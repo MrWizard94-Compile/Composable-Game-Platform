@@ -1,6 +1,6 @@
 # Status
 
-Milestone 1 through an execution boundary. Working, not a game.
+Milestone 1 through an isolated WebAssembly guest. Working, not a game.
 
 ## Implemented
 
@@ -14,7 +14,7 @@ Milestone 1 through an execution boundary. Working, not a game.
 - Headless demo and the browser console over one `compose()` function. The public entry is `src/foundations/index.ts`, also the package export `"."`.
 - Caller-initiated dispatch. `publish` fans one event through a subscriber slot and keeps going after a throw. `runPipeline` folds a value through a pipeline slot and stops at the first failure. `callService` invokes the one provider of a service slot and returns its value. A contribution to those three kinds must already be callable or registration fails. None of these is a tick.
 - Composition fingerprints name module versions, slot contracts, dependency edges, and contribution order. Package order does not change the fingerprint. A different version or contribution order does.
-- Execution boundary. Hooks and slot payloads run only through a backend. The default policy allows no filesystem, network, or operating-system grant, so the in-process backend does not run until the caller opts in. A limit on a backend that cannot enforce it is refused. A replacement backend uses the same manifests and hooks. The host does not pass filesystem, network, or operating-system handles into a module context.
+- Isolated WebAssembly guests. Discovery reads manifests and wasm bytes and does not import or instantiate. Each guest runs in its own worker, with a memory maximum and a time limit that stops the isolate. Unauthorized imports, including WASI and `node:fs`, are refused before the guest runs. `cgp.log` is linked only when the manifest and the policy both allow it. Save slices are plain JSON and restore on a new isolate.
 - Flora proof (species registry + one growth policy) and Lighting proof (source registry) on the same platform slot.
 - Module-owned save slices. The host stores JSON a module exports and restores a slice only when the major version matches. Two slices for one module are refused. A different profile name or fingerprint warns, and slices are still matched by module id. Object keys in a slice are sorted. Array order is kept. `shutdown()` quiesces the runtime, and dispatch and save then refuse.
 - A public entry, `src/foundations/index.ts`, and a copyable starter module. `validateManifest` checks a manifest that has no implementation yet. The console uses that same function. It does not load code.
@@ -32,8 +32,8 @@ Milestone 1 through an execution boundary. Working, not a game.
 - A simulation tick or a scheduler that runs by itself. A step happens only when a caller asks.
 - Multiplayer networking or replication.
 - Hot module reloading.
-- Enforced permissions. A declared permission is still not a boundary.
-- An isolating backend that can revoke filesystem, network, and operating-system access and enforce time and memory limits. The policy gate refuses a backend that cannot. The in-process backend cannot.
+- Enforced permissions for in-process JavaScript. A declared permission is still not a boundary there. The WASM backend does enforce its import allow-list.
+- An isolating backend other than `wasm-isolate`. The in-process backend still cannot revoke filesystem, network, or operating-system access, and it cannot enforce time or memory limits. A policy that asks it to is refused.
 - Save migrations beyond a major-version refusal. No disk format beyond the JSON document.
 
 ## Provisional

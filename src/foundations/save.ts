@@ -115,7 +115,7 @@ export function captureSave(result: CompositionResult): CaptureReport {
     const version = module?.save?.version;
     if (!module || module.status !== "active" || !version) continue;
     const implementation = moduleImplementation(result, moduleId);
-    if (!implementation?.exportState) {
+    if (!backendOf(result).hasHook(implementation, "exportState")) {
       notices.push(
         notice(
           "error",
@@ -273,7 +273,7 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
       continue;
     }
     const implementation = moduleImplementation(result, moduleId);
-    if (!implementation?.importState) {
+    if (!backendOf(result).hasHook(implementation, "importState")) {
       notices.push(
         notice("error", "save.no-import", `Module "${moduleId}" declares a save but has no importState.`, moduleId),
       );

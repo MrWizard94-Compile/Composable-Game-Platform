@@ -5,6 +5,7 @@ import type { ModuleImplementation, ModulePackage } from "./host.ts";
 
 export type DiscoveredModule = ModulePackage & {
   folder: string;
+  directory: string;
 };
 
 function compare(a: string, b: string): number {
@@ -14,26 +15,45 @@ function compare(a: string, b: string): number {
 }
 
 /**
- * Filesystem discovery for the headless host. Each child directory with a
- * manifest.json is a package. module.ts may export `implementation`.
- * This is not a sandbox, and it is not used by the browser build.
+ * Reads manifests and, when present, raw WebAssembly bytes.
+ * It does not import module.ts and it does not instantiate a guest.
+ * Call `loadInProcessImplementations` only when a trusted in-process backend
+ * is about to run those functions.
  */
 export async function discoverModules(root: string): Promise<DiscoveredModule[]> {
   const entries = readdirSync(root, { withFileTypes: true });
   const found: DiscoveredModule[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const manifestPath = join(root, entry.name, "manifest.json");
+    const directory = join(root, entry.name);
+    const manifestPath = join(directory, "manifest.json");
     if (!existsSync(manifestPath)) continue;
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as unknown;
-    let implementation: ModuleImplementation | undefined;
-    const modulePath = join(root, entry.name, "module.ts");
-    if (existsSync(modulePath)) {
-      const loaded = (await import(pathToFileURL(modulePath).href)) as { implementation?: ModuleImplementation };
-      implementation = loaded.implementation;
-    }
-    found.push({ folder: entry.name, manifest, implementation });
+    const wasmPath = join(directory, "module.wasm");
+    const wasm = existsSync(wasmPath) ? new Uint8Array(readFileSync(wasmPath)) : undefined;
+    const implementation = wasm ? { wasm } : undefined;
+    found.push({ folder: entry.name, directory, manifest, implementation });
   }
   found.sort((a, b) => compare(a.folder, b.folder));
   return found;
+}
+
+/** Explicit in-process load. This is not part of discovery. */
+export async function loadInProcessImplementations(
+  modules: readonly DiscoveredModule[],
+): Promise<DiscoveredModule[]> {
+  const loaded: DiscoveredModule[] = [];
+  for (const item of modules) {
+    const modulePath = join(item.directory, "module.ts");
+    if (!existsSync(modulePath)) {
+      loaded.push(item);
+      continue;
+    }
+    const imported = (await import(pathToFileURL(modulePath).href)) as { implementation?: ModuleImplementation };
+    loaded.push({
+      ...item,
+      implementation: item.implementation?.wasm ? { ...imported.implementation, wasm: item.implementation.wasm } : imported.implementation,
+    });
+  }
+  return loaded;
 }

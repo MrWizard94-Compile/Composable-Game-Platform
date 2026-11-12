@@ -36,8 +36,9 @@ export type HookName = "register" | "initialize" | "shutdown" | "exportState" | 
 export type HookCall = {
   moduleId: string;
   hook: HookName;
-  implementation: Partial<Record<HookName, (...args: unknown[]) => unknown>> | undefined;
+  implementation: (Partial<Record<HookName, (...args: unknown[]) => unknown>> & { wasm?: Uint8Array }) | undefined;
   args: readonly unknown[];
+  permissions?: readonly string[];
 };
 
 export type HookResult = { ok: true; value: unknown } | { ok: false; error: unknown };
@@ -51,8 +52,15 @@ export type ExecutionBackend = {
   id: string;
   grants: readonly HostGrant[];
   enforcesLimits: boolean;
+  /** Tighten limits to the composition policy. Backends that cannot enforce a requested limit are refused earlier. */
+  configure?(policy: ExecutionPolicy): void;
+  /** True when this backend, not a raw function, accepts the payload. */
+  recognizesPayload(payload: unknown): boolean;
+  /** True when this backend can run the hook. The host does not call the function itself. */
+  hasHook(implementation: unknown, hook: HookName): boolean;
   invoke(call: HookCall): HookResult;
   callPayload(payload: unknown, arg: unknown): PayloadResult;
+  dispose?(): void;
 };
 
 export type PolicyConflict = {
@@ -92,6 +100,12 @@ export const inProcessBackend: ExecutionBackend = {
   id: "in-process",
   grants: ["filesystem", "network", "os"],
   enforcesLimits: false,
+  recognizesPayload: isCallablePayload,
+  hasHook(implementation, hook) {
+    if (!implementation || typeof implementation !== "object") return false;
+    const fn = (implementation as Partial<Record<HookName, unknown>>)[hook];
+    return typeof fn === "function";
+  },
   invoke(call) {
     const fn = call.implementation?.[call.hook];
     if (typeof fn !== "function") return { ok: true, value: undefined };
@@ -120,6 +134,12 @@ export const denyingBackend: ExecutionBackend = {
   id: "denied",
   grants: [],
   enforcesLimits: true,
+  recognizesPayload() {
+    return false;
+  },
+  hasHook() {
+    return false;
+  },
   invoke() {
     return { ok: false, error: new Error("This composition has no execution backend.") };
   },

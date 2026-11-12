@@ -3,7 +3,7 @@ import { indicted } from "./diagnostics.ts";
 import type { ModuleManifest, SlotExposeDecl } from "./manifest.ts";
 import { validateManifest } from "./manifest.ts";
 import { contractRefMatches, parseContractRef, satisfies } from "./semver.ts";
-import { isCallablePayload, isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
+import { isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
 import type { SlotKind } from "./slots.ts";
 import type { ExecutionBackend, ExecutionPolicy, HostGrant } from "./backend.ts";
 import {
@@ -63,6 +63,8 @@ export type LifecycleContext = {
 };
 
 export type ModuleImplementation = {
+  /** WebAssembly bytes for an isolating backend. The host does not instantiate them. */
+  wasm?: Uint8Array;
   register?: (ctx: RegisterContext) => void;
   initialize?: (ctx: LifecycleContext) => void;
   shutdown?: (ctx: LifecycleContext) => void;
@@ -405,6 +407,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   const backendId = backend.id;
   const grants = backend.grants;
   const limitsEnforced = backend.enforcesLimits;
+  backend.configure?.(policy);
 
   phases.push(
     phase("discover", "completed", `Discovered ${packages.length} package${packages.length === 1 ? "" : "s"}.`),
@@ -865,11 +868,13 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     implementation: ModuleImplementation | undefined,
     args: readonly unknown[],
   ): string | undefined => {
+    const permissions = admitted.find((item) => item.manifest.moduleId === moduleId)?.manifest.permissions ?? [];
     const outcome = backend.invoke({
       moduleId,
       hook,
       implementation: implementation as Parameters<ExecutionBackend["invoke"]>[0]["implementation"],
       args,
+      permissions,
     });
     if (outcome.ok) return undefined;
     if (outcome.error instanceof Error && outcome.error.message) return outcome.error.message;
@@ -903,7 +908,16 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       Object.freeze({
         moduleId,
         contribute: (slotId: string, contribution: ContributionInput) => {
-          acceptContribution(moduleId, slotId, contribution, declaredConnections, slotDecl, records, diagnostics);
+          acceptContribution(
+            moduleId,
+            slotId,
+            contribution,
+            declaredConnections,
+            slotDecl,
+            records,
+            diagnostics,
+            (payload) => backend.recognizesPayload(payload),
+          );
         },
         keep(state: unknown) {
           if (keptByModule.has(moduleId)) {
@@ -1100,6 +1114,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         );
       }
     }
+    backend.dispose?.();
     return { already: false, order: shutdownOrder, diagnostics: shutdownDiagnostics };
   };
 
@@ -1137,6 +1152,7 @@ function acceptContribution(
   slotDecl: Map<string, SlotExposeDecl>,
   records: ContributionRecord[],
   diagnostics: Diagnostic[],
+  recognizesPayload: (payload: unknown) => boolean,
 ): void {
   if (!declaredConnections.get(moduleId)?.has(slotId)) {
     diagnostics.push(
@@ -1190,7 +1206,7 @@ function acceptContribution(
     return;
   }
   const kind = slotDecl.get(slotId)?.kind;
-  if (kind && slotRequiresCallable(kind) && !isCallablePayload(contribution.payload)) {
+  if (kind && slotRequiresCallable(kind) && !recognizesPayload(contribution.payload)) {
     diagnostics.push(
       errorDiagnostic(
         "slot.contract",

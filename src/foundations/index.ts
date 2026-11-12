@@ -50,4 +50,7 @@ export {
   policyConflict,
 } from "./backend.ts";
 export type { ExecutionBackend, ExecutionPolicy, HostGrant, PayloadResult } from "./backend.ts";
+export { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
+export { ABI_HOOK, ABI_ID, isAbiHandle } from "./abi.ts";
+export type { AbiHandle } from "./abi.ts";
 export type { Diagnostic, PhaseName, PhaseRecord } from "./diagnostics.ts";

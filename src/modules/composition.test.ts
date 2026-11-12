@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { discoverModules } from "../foundations/discover-node.ts";
+import { discoverModules, loadInProcessImplementations } from "../foundations/discover-node.ts";
 import { compose as hostCompose, type ComposeOptions, type ModulePackage } from "../foundations/host.ts";
 import { IN_PROCESS_POLICY } from "../foundations/backend.ts";
 import { resolveProfile, validateProfile } from "../foundations/profile.ts";
@@ -30,12 +30,12 @@ describe("packaged modules", () => {
     for (const found of discovered) {
       const bundled = CATALOG.find((item) => moduleIdOf(item.manifest) === moduleIdOf(found.manifest));
       assert.deepEqual(found.manifest, bundled?.manifest);
-      assert.equal(join(modulesDir, found.folder, "manifest.json").endsWith(`${found.folder}/manifest.json`), true);
+      assert.equal(found.implementation, undefined);
     }
   });
 
   it("nests species and lights under two systems without a host special case", async () => {
-    const discovered = await discoverModules(modulesDir);
+    const discovered = await loadInProcessImplementations(await discoverModules(modulesDir));
     const proof = discovered.filter((item) => PROOF_IDS.includes(moduleIdOf(item.manifest)));
     const forward = compose(proof, { profileName: "proof" });
     const reverse = compose([...proof].reverse(), { profileName: "proof" });
@@ -83,7 +83,7 @@ describe("packaged modules", () => {
   });
 
   it("accepts a module defined only in the test, connected to Flora's slot", async () => {
-    const discovered = await discoverModules(modulesDir);
+    const discovered = await loadInProcessImplementations(await discoverModules(modulesDir));
     const flora = discovered.find((item) => moduleIdOf(item.manifest) === "org.cgp.flora-core");
     if (!flora) throw new Error("missing flora core");
     const mangrove: ModulePackage = {

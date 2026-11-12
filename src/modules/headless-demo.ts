@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverModules } from "../foundations/discover-node.ts";
+import { discoverModules, loadInProcessImplementations } from "../foundations/discover-node.ts";
 import { compose } from "../foundations/host.ts";
 import { IN_PROCESS_POLICY } from "../foundations/backend.ts";
 import { captureSave } from "../foundations/save.ts";
@@ -8,7 +8,7 @@ import { moduleIdOf, DISPATCH_IDS, PROOF_IDS, SERVICE_IDS } from "./registry.ts"
 import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from "./runners.ts";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const discovered = await discoverModules(root);
+const discovered = await loadInProcessImplementations(await discoverModules(root));
 const proof = discovered.filter((item) => PROOF_IDS.includes(moduleIdOf(item.manifest)));
 const result = compose(proof, { profileName: "headless-proof", policy: IN_PROCESS_POLICY });
 const growth = advanceFlora(result, {}, "spring");
