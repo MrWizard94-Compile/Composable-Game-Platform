@@ -1,0 +1,37 @@
+{
+  "moduleId": "org.cgp.world-core",
+  "name": "World Core",
+  "description": "Owns spawn, remove, and list services. It does not store entities and it does not simulate them.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "world.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "world.spawn",
+      "contract": "world.spawn",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Creates one entity id for a JSON record.",
+      "required": false
+    },
+    {
+      "slotId": "world.remove",
+      "contract": "world.remove",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Removes one entity id.",
+      "required": false
+    },
+    {
+      "slotId": "world.list",
+      "contract": "world.list",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Returns the current entity records.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

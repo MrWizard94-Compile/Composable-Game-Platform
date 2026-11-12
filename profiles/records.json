@@ -1,0 +1,11 @@
+{
+  "profileId": "org.cgp.records",
+  "name": "Records",
+  "modules": [
+    { "moduleId": "org.cgp.world-core", "version": "1.0.0" },
+    { "moduleId": "org.cgp.world-store", "version": "1.0.0" },
+    { "moduleId": "org.cgp.step-core", "version": "1.0.0" },
+    { "moduleId": "org.cgp.step-clock", "version": "1.0.0" },
+    { "moduleId": "org.cgp.step-witness", "version": "1.0.0" }
+  ]
+}

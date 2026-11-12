@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.step-witness",
+  "name": "Step Witness",
+  "description": "Records step numbers a caller publishes. It does not advance the clock.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "step.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "step.hear", "contract": "step.hear/1" }],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

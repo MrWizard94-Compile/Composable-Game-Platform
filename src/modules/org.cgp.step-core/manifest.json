@@ -1,0 +1,29 @@
+{
+  "moduleId": "org.cgp.step-core",
+  "name": "Step Core",
+  "description": "Owns one advance service and one listener slot. Nothing runs until a caller asks for a step.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "step.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "step.advance",
+      "contract": "step.advance",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Advances the caller-driven counter by one.",
+      "required": false
+    },
+    {
+      "slotId": "step.hear",
+      "contract": "step.hear",
+      "contractVersion": "1.0.0",
+      "kind": "subscriber",
+      "description": "Listeners for one completed step. The caller publishes. There is no loop.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

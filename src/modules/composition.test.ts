@@ -8,7 +8,7 @@ import { resolveProfile, validateProfile } from "../foundations/profile.ts";
 import { captureSave, restoreSave } from "../foundations/save.ts";
 import { PROFILES } from "./profiles.ts";
 import { CATALOG, DISPATCH_IDS, SERVICE_IDS, moduleIdOf, packagesFor, PROOF_IDS, toPackage } from "./registry.ts";
-import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from "./runners.ts";
+import { advanceFlora, advanceStep, askQuery, dispatchPulse, foldPipe, listEntities, readLighting, removeEntity, spawnEntity } from "./runners.ts";
 
 const modulesDir = dirname(fileURLToPath(import.meta.url));
 
@@ -257,6 +257,45 @@ describe("packaged modules", () => {
     const refused = askQuery(clash, "alpha");
     assert.equal(refused.report.ok, false);
     assert.equal(refused.report.reason, "Runtime is not active.");
+  });
+
+  it("stores entity records and advances a step only when the caller asks", () => {
+    const ids = [
+      "org.cgp.world-core",
+      "org.cgp.world-store",
+      "org.cgp.step-core",
+      "org.cgp.step-clock",
+      "org.cgp.step-witness",
+    ];
+    const result = compose(packagesFor(ids), { profileName: "records" });
+    assert.equal(result.runtimeActive, true, result.diagnostics.map((item) => item.message).join("\n"));
+    const first = spawnEntity(result, { label: "marker" });
+    const second = spawnEntity(result, { label: "other" });
+    assert.equal(first.ok, true);
+    assert.deepEqual(first.output, { id: "e1" });
+    assert.deepEqual(second.output, { id: "e2" });
+    assert.equal(removeEntity(result, "e1").ok, true);
+    assert.deepEqual(
+      listEntities(result).map((item) => item.id),
+      ["e2"],
+    );
+    assert.equal(advanceStep(result).count, 1);
+    const again = advanceStep(result);
+    assert.equal(again.count, 2);
+    assert.equal(again.deliveries, 1);
+
+    const saved = captureSave(result);
+    assert.equal(saved.ok, true);
+    const fresh = compose(packagesFor(ids), { profileName: "records" });
+    const restored = restoreSave(fresh, saved.document);
+    assert.equal(restored.ok, true);
+    assert.deepEqual(
+      listEntities(fresh).map((item) => item.id),
+      ["e2"],
+    );
+    const third = spawnEntity(fresh, { label: "next" });
+    assert.deepEqual(third.output, { id: "e3" });
+    assert.equal(advanceStep(fresh).count, 3);
   });
 
   it("resolves shipped profiles to the same graph and refuses a version the package does not have", () => {

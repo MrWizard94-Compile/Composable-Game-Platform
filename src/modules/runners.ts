@@ -168,3 +168,50 @@ export type QueryView = { question: string; report: ServiceReport };
 export function askQuery(result: CompositionResult, question: string): QueryView {
   return { question, report: callService(result, "queries.ask", question) };
 }
+
+export type StepView = {
+  ok: boolean;
+  count: number | null;
+  reason?: string;
+  deliveries: number;
+};
+
+/** Demo runner. One call advances the clock and publishes that step. Nothing loops. */
+export function advanceStep(result: CompositionResult): StepView {
+  const advanced = callService(result, "step.advance", null);
+  if (!advanced.ok) {
+    return { ok: false, count: null, reason: advanced.message ?? advanced.reason, deliveries: 0 };
+  }
+  const count =
+    advanced.output && typeof advanced.output === "object" && "count" in advanced.output
+      ? (advanced.output as { count?: unknown }).count
+      : undefined;
+  const fan = publish(result, "step.hear", advanced.output);
+  return {
+    ok: fan.ok && typeof count === "number",
+    count: typeof count === "number" ? count : null,
+    deliveries: fan.deliveries.length,
+    reason: fan.ok ? undefined : "A step listener failed.",
+  };
+}
+
+export type EntityView = { id: string; record: unknown };
+
+/** Demo runner. The world module stores the record. This only calls the service. */
+export function spawnEntity(result: CompositionResult, record: unknown): ServiceReport {
+  return callService(result, "world.spawn", record);
+}
+
+export function removeEntity(result: CompositionResult, id: string): ServiceReport {
+  return callService(result, "world.remove", id);
+}
+
+export function listEntities(result: CompositionResult): EntityView[] {
+  const report = callService(result, "world.list", null);
+  if (!report.ok || !report.output || typeof report.output !== "object" || !("entities" in report.output)) return [];
+  const entities = (report.output as { entities?: unknown }).entities;
+  if (!Array.isArray(entities)) return [];
+  return entities.filter((item): item is EntityView => {
+    return !!item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string";
+  });
+}

@@ -1,6 +1,6 @@
 # Status
 
-Milestone 1 through an explicit trust gate. Working, not a game.
+Milestone 1 through caller-driven records. Working, not a game.
 
 ## Implemented
 
@@ -21,14 +21,20 @@ Milestone 1 through an explicit trust gate. Working, not a game.
 - Composition profiles. A JSON document pins module ids and exact versions. A missing module or a different packaged version refuses the selection. The host does not upgrade.
 - Capability requirements. One matching provider is a dependency. Two matching providers are ambiguous, and the host does not pick one. Naming `moduleId` on the requirement pins the provider. An optional requirement still refuses when more than one provider matches. A module that lists the same capability twice is isolated.
 - Resolved order edges. Each edge names the provider, the dependent, and a capability or a module-owned slot. A missing or ambiguous requirement adds no edge.
+- A world record table and a caller-driven step, as modules. World Core exposes spawn, remove, and list. World Store keeps the records and the save slice. Step Clock counts only when a caller asks. Step Witness hears that one publish. Neither module runs a loop, and the host does not know what an entity or a step means.
 
 ## Not implemented
 
-- Sandbox, resource limits, package signing.
-- Permission enforcement. Declarations are stored and ignored.
-- Save migrations beyond a major-version refusal. No disk format beyond the JSON document. No networking or replication.
-- Hot reload, a frame loop, rendering, input, audio.
-- A world, entities, or any gameplay rule inside the Foundations.
+- Physics.
+- Rendering.
+- Input.
+- Audio.
+- A simulation tick or a scheduler that runs by itself. A step happens only when a caller asks.
+- Multiplayer networking or replication.
+- Hot module reloading.
+- Enforced permissions or a sandbox.
+- Resource limits.
+- Save migrations beyond a major-version refusal. No disk format beyond the JSON document.
 
 ## Provisional
 

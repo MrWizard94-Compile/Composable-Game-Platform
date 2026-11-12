@@ -1,0 +1,16 @@
+{
+  "moduleId": "org.cgp.world-store",
+  "name": "World Store",
+  "description": "Stores entity records and owns their save slice. It does not move, draw, or replicate them.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "world.core", "version": "^1.0.0" }],
+  "connectsTo": [
+    { "slot": "world.spawn", "contract": "world.spawn/1" },
+    { "slot": "world.remove", "contract": "world.remove/1" },
+    { "slot": "world.list", "contract": "world.list/1" }
+  ],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

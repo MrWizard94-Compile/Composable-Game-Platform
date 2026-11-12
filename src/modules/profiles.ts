@@ -7,6 +7,7 @@ import initFailure from "../../profiles/init-failure.json" with { type: "json" }
 import nestedProof from "../../profiles/nested-proof.json" with { type: "json" };
 import policyConflict from "../../profiles/policy-conflict.json" with { type: "json" };
 import secondPack from "../../profiles/second-pack.json" with { type: "json" };
+import records from "../../profiles/records.json" with { type: "json" };
 import service from "../../profiles/service.json" with { type: "json" };
 import twoServices from "../../profiles/two-services.json" with { type: "json" };
 import twoProviders from "../../profiles/two-providers.json" with { type: "json" };
@@ -17,6 +18,7 @@ export const PROFILES: { id: string; profile: CompositionProfile }[] = [
   { id: "dispatch", profile: dispatch },
   { id: "dispatch-fault", profile: badDispatch },
   { id: "service", profile: service },
+  { id: "records", profile: records },
   { id: "service-clash", profile: twoServices },
   { id: "two-providers", profile: twoProviders },
   { id: "desert", profile: secondPack },

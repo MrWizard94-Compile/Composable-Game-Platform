@@ -47,8 +47,18 @@ import aliasIndexManifest from "./org.cgp.alias-index/manifest.json" with { type
 import { implementation as aliasIndex } from "./org.cgp.alias-index/module.ts";
 import pulseCountManifest from "./org.cgp.pulse-count/manifest.json" with { type: "json" };
 import { implementation as pulseCount } from "./org.cgp.pulse-count/module.ts";
+import worldCoreManifest from "./org.cgp.world-core/manifest.json" with { type: "json" };
+import { implementation as worldCore } from "./org.cgp.world-core/module.ts";
+import worldStoreManifest from "./org.cgp.world-store/manifest.json" with { type: "json" };
+import { implementation as worldStore } from "./org.cgp.world-store/module.ts";
+import stepCoreManifest from "./org.cgp.step-core/manifest.json" with { type: "json" };
+import { implementation as stepCore } from "./org.cgp.step-core/module.ts";
+import stepClockManifest from "./org.cgp.step-clock/manifest.json" with { type: "json" };
+import { implementation as stepClock } from "./org.cgp.step-clock/module.ts";
+import stepWitnessManifest from "./org.cgp.step-witness/manifest.json" with { type: "json" };
+import { implementation as stepWitness } from "./org.cgp.step-witness/module.ts";
 
-export type ModuleGroup = "Flora" | "Lighting" | "Signals" | "Queries" | "Faults";
+export type ModuleGroup = "Flora" | "Lighting" | "Signals" | "Queries" | "World" | "Faults";
 
 export type CatalogEntry = {
   group: ModuleGroup;
@@ -87,6 +97,11 @@ export const CATALOG: readonly CatalogEntry[] = [
   entry("Queries", false, queryCoreManifest, queryCore),
   entry("Queries", false, nameIndexManifest, nameIndex),
   entry("Queries", false, aliasIndexManifest, aliasIndex),
+  entry("World", false, worldCoreManifest, worldCore),
+  entry("World", false, worldStoreManifest, worldStore),
+  entry("World", false, stepCoreManifest, stepCore),
+  entry("World", false, stepClockManifest, stepClock),
+  entry("World", false, stepWitnessManifest, stepWitness),
   entry("Faults", false, cycleAlphaManifest),
   entry("Faults", false, cycleBetaManifest),
   entry("Faults", false, initFaultManifest, initFault),

@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.step-clock",
+  "name": "Step Clock",
+  "description": "Counts caller-driven steps and owns that count. It does not schedule itself.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "step.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "step.advance", "contract": "step.advance/1" }],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}
