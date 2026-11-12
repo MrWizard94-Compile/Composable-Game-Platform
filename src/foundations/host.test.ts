@@ -3,7 +3,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { compose, FOUNDATIONS_API, PLATFORM_SLOTS, type ModulePackage } from "./host.ts";
+import { compose as hostCompose, FOUNDATIONS_API, PLATFORM_SLOTS, type ComposeOptions, type ModulePackage } from "./host.ts";
+import { IN_PROCESS_POLICY, inProcessBackend, type ExecutionBackend } from "./backend.ts";
+
+function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}) {
+  return hostCompose(packages, { policy: IN_PROCESS_POLICY, ...options });
+}
 import { validateManifest } from "./manifest.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -426,6 +431,78 @@ describe("composition", () => {
     assert.equal(called, true);
     assert.equal(live.trust, "trusted-in-process");
     assert.equal(live.runtimeActive, true);
+    assert.deepEqual(live.grants, ["filesystem", "network", "os"]);
+    assert.equal(live.limitsEnforced, false);
+  });
+
+  it("does not run module code unless the policy allows the backend grants", () => {
+    let called = false;
+    const pack = pkg(moduleManifest("org.example.plain"), {
+      register() {
+        called = true;
+      },
+    });
+    const closed = hostCompose([pack]);
+    assert.equal(called, false);
+    assert.equal(closed.runtimeActive, false);
+    assert.ok(closed.diagnostics.some((item) => item.code === "trust.grants"));
+
+    const limited = hostCompose([pack], {
+      policy: { allowGrants: ["filesystem", "network", "os"], maxMemoryBytes: 1024 },
+    });
+    assert.equal(called, false);
+    assert.ok(limited.diagnostics.some((item) => item.code === "trust.limits"));
+  });
+
+  it("runs hooks only through a replacement backend", () => {
+    const seen: string[] = [];
+    const backend: ExecutionBackend = {
+      id: "counting",
+      grants: [],
+      enforcesLimits: true,
+      invoke(call) {
+        seen.push(`${call.hook}:${call.moduleId}`);
+        return inProcessBackend.invoke(call);
+      },
+      callPayload(payload, arg) {
+        seen.push("payload");
+        return inProcessBackend.callPayload(payload, arg);
+      },
+    };
+    const pack = pkg(
+      moduleManifest("org.example.plain", {
+        connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("platform.systems", { id: "plain", payload: () => "ran" });
+        },
+        initialize() {
+          seen.push("inside-initialize");
+        },
+      },
+    );
+    const result = hostCompose([pack], { backend, policy: { allowGrants: [] } });
+    assert.equal(result.runtimeActive, true);
+    assert.equal(result.trust, "custom");
+    assert.equal(result.backendId, "counting");
+    assert.equal(result.limitsEnforced, true);
+    assert.deepEqual(seen, ["register:org.example.plain", "initialize:org.example.plain", "inside-initialize"]);
+    const report = result.shutdown();
+    assert.equal(report.already, false);
+    assert.deepEqual(seen.at(-1), "shutdown:org.example.plain");
+  });
+
+  it("gives a module no host channel except its context", () => {
+    let keys: string[] = [];
+    compose([
+      pkg(moduleManifest("org.example.plain"), {
+        register(ctx) {
+          keys = Object.keys(ctx);
+        },
+      }),
+    ]);
+    assert.deepEqual(keys.sort(), ["contribute", "keep", "moduleId"]);
   });
 
   it("keeps every subscriber", () => {

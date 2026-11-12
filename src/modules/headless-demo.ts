@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverModules } from "../foundations/discover-node.ts";
 import { compose } from "../foundations/host.ts";
+import { IN_PROCESS_POLICY } from "../foundations/backend.ts";
 import { captureSave } from "../foundations/save.ts";
 import { moduleIdOf, DISPATCH_IDS, PROOF_IDS, SERVICE_IDS } from "./registry.ts";
 import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from "./runners.ts";
@@ -9,7 +10,7 @@ import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from ".
 const root = dirname(fileURLToPath(import.meta.url));
 const discovered = await discoverModules(root);
 const proof = discovered.filter((item) => PROOF_IDS.includes(moduleIdOf(item.manifest)));
-const result = compose(proof, { profileName: "headless-proof" });
+const result = compose(proof, { profileName: "headless-proof", policy: IN_PROCESS_POLICY });
 const growth = advanceFlora(result, {}, "spring");
 const lights = readLighting(result);
 
@@ -33,7 +34,7 @@ for (const item of result.diagnostics) {
 }
 
 const signals = discovered.filter((item) => (DISPATCH_IDS as readonly string[]).includes(moduleIdOf(item.manifest)));
-const dispatched = compose(signals, { profileName: "headless-dispatch" });
+const dispatched = compose(signals, { profileName: "headless-dispatch", policy: IN_PROCESS_POLICY });
 const pulse = dispatchPulse(dispatched);
 const folded = foldPipe(dispatched, 4);
 const saved = captureSave(dispatched);
@@ -45,7 +46,7 @@ console.log(
 if (!result.ok || !dispatched.ok || !pulse.report.ok || !folded.ok || !saved.ok) process.exitCode = 1;
 
 const queries = discovered.filter((item) => (SERVICE_IDS as readonly string[]).includes(moduleIdOf(item.manifest)));
-const service = compose(queries, { profileName: "headless-service" });
+const service = compose(queries, { profileName: "headless-service", policy: IN_PROCESS_POLICY });
 const asked = askQuery(service, "alpha");
 console.log(`service ${service.ok && asked.report.ok ? "ok" : "not ok"} ${JSON.stringify(asked.report.output)}`);
 if (!service.ok || !asked.report.ok) process.exitCode = 1;

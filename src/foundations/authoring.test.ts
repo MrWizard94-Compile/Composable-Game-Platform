@@ -4,13 +4,20 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  compose,
+  compose as composeClosed,
   contributionsFor,
   isCallablePayload,
   slotRequiresCallable,
   validateManifest,
+  type ComposeOptions,
   type ModuleImplementation,
+  type ModulePackage,
+  IN_PROCESS_POLICY,
 } from "./index.ts";
+
+function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}) {
+  return composeClosed(packages, { policy: IN_PROCESS_POLICY, ...options });
+}
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const folder = join(root, "examples/starter-module");

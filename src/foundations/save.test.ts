@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compose, type ModulePackage } from "./host.ts";
+import { compose as hostCompose, type ComposeOptions, type ModulePackage } from "./host.ts";
+import { IN_PROCESS_POLICY } from "./backend.ts";
 import { captureSave, restoreSave } from "./save.ts";
+
+function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}) {
+  return hostCompose(packages, { policy: IN_PROCESS_POLICY, ...options });
+}
 
 function pkg(manifest: unknown, implementation?: ModulePackage["implementation"]): ModulePackage {
   return { manifest, implementation };

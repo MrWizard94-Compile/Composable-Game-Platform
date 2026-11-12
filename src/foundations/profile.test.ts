@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compose } from "./host.ts";
+import { compose as hostCompose } from "./host.ts";
+import { IN_PROCESS_POLICY } from "./backend.ts";
 import { resolveProfile, unresolvedProfile, validateProfile, type CompositionProfile } from "./profile.ts";
+
+function compose(packages: readonly { manifest: unknown }[] = []) {
+  return hostCompose(packages, { policy: IN_PROCESS_POLICY });
+}
 
 function profile(modules: CompositionProfile["modules"], extra: Record<string, unknown> = {}) {
   return {

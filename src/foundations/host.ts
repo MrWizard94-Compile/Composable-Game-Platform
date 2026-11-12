@@ -5,6 +5,14 @@ import { validateManifest } from "./manifest.ts";
 import { contractRefMatches, parseContractRef, satisfies } from "./semver.ts";
 import { isCallablePayload, isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
 import type { SlotKind } from "./slots.ts";
+import type { ExecutionBackend, ExecutionPolicy, HostGrant } from "./backend.ts";
+import {
+  CLOSED_POLICY,
+  IN_PROCESS_POLICY,
+  denyingBackend,
+  inProcessBackend,
+  policyConflict,
+} from "./backend.ts";
 
 /** Foundations API this host implements. Modules declare a range that must admit it. */
 export const FOUNDATIONS_API = "1.0.0";
@@ -73,10 +81,17 @@ export type ComposeOptions = {
   profileName?: string;
   maxDepth?: number;
   /**
-   * Execution mode. Omitted means trusted in-process code.
-   * Any other string refuses the composition before a module function runs.
+   * `trusted-in-process` opts into the in-process backend and its grants.
+   * Any other string is refused. Omit this and pass `backend` to replace the backend.
    */
   trust?: string;
+  /** Defaults to the in-process backend, which grants filesystem, network, and os. */
+  backend?: ExecutionBackend;
+  /**
+   * Defaults to a closed policy: no filesystem, network, or OS grant, and no limit
+   * the backend cannot enforce. The in-process backend does not satisfy that default.
+   */
+  policy?: ExecutionPolicy;
 };
 
 export type ModuleStatus = "active" | "rejected" | "blocked";
@@ -139,8 +154,13 @@ export type ShutdownReport = {
 export type CompositionResult = {
   profileName: string;
   foundationsApi: string;
-  /** `trusted-in-process` when modules were allowed to run. `unsupported` when the requested mode is not implemented. */
-  trust: ExecutionTrust | "unsupported";
+  /** `trusted-in-process` when that backend was selected. `custom` for a replacement. `unsupported` when the name is unknown. */
+  trust: ExecutionTrust | "unsupported" | "custom";
+  backendId: string;
+  /** Grants the selected backend cannot revoke. Empty when none were selected. */
+  grants: readonly HostGrant[];
+  /** True only when the selected backend can enforce time and memory limits. */
+  limitsEnforced: boolean;
   /** True only when the runtime is active and every selected package was clean. */
   ok: boolean;
   /** True when the admitted graph was registered and initialized. An empty graph counts. */
@@ -187,6 +207,7 @@ function phase(phaseName: PhaseRecord["phase"], status: PhaseRecord["status"], d
 }
 
 function fingerprintOf(
+  backendId: string,
   order: string[],
   modules: ResolvedModule[],
   slots: ResolvedSlot[],
@@ -209,7 +230,7 @@ function fingerprintOf(
     .sort(contributionSort)
     .map((item) => `${item.slotId}:${item.id}@${item.moduleId}#${item.order}`)
     .join(";");
-  return `m:${mods}|s:${slotPart}|d:${deps}|c:${contribs}`;
+  return `b:${backendId}|m:${mods}|s:${slotPart}|d:${deps}|c:${contribs}`;
 }
 
 function errorDiagnostic(
@@ -307,13 +328,16 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   const diagnostics: Diagnostic[] = [];
   const phases: PhaseRecord[] = [];
   const trace: string[] = [];
-  const trustRequest = options.trust ?? EXECUTION_TRUST;
+  const trustRequest = options.trust;
+  const backend = options.backend ?? inProcessBackend;
+  const policy =
+    options.policy ?? (trustRequest === EXECUTION_TRUST ? IN_PROCESS_POLICY : CLOSED_POLICY);
 
-  if (trustRequest !== EXECUTION_TRUST) {
+  if (trustRequest !== undefined && trustRequest !== EXECUTION_TRUST) {
     diagnostics.push(
       errorDiagnostic(
         "trust.unsupported",
-        `Execution trust "${trustRequest}" is not implemented. This host only runs "${EXECUTION_TRUST}".`,
+        `Execution trust "${trustRequest}" is not implemented. Pass a backend, or "${EXECUTION_TRUST}" to accept the in-process grants.`,
         { phase: "prepare" },
       ),
     );
@@ -327,6 +351,9 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return assemble({
       profileName,
       trust: "unsupported",
+      backendId: "unsupported",
+      grants: [],
+      limitsEnforced: false,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -341,7 +368,43 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     });
   }
 
-  const trust: ExecutionTrust = EXECUTION_TRUST;
+  const blockedByPolicy = policyConflict(backend, policy);
+  if (blockedByPolicy) {
+    diagnostics.push(
+      errorDiagnostic(blockedByPolicy.code, blockedByPolicy.message, { phase: "prepare" }),
+    );
+    phases.push(phase("discover", "skipped", "No packages were opened."));
+    phases.push(phase("validate", "skipped", "Skipped because the execution policy refused the backend."));
+    phases.push(phase("resolve", "skipped", "Skipped because the execution policy refused the backend."));
+    phases.push(phase("prepare", "failed", blockedByPolicy.message));
+    phases.push(phase("register", "skipped", "Skipped because the execution policy refused the backend."));
+    phases.push(phase("initialize", "skipped", "Skipped because the execution policy refused the backend."));
+    phases.push(phase("run", "skipped", "Skipped because the execution policy refused the backend."));
+    return assemble({
+      profileName,
+      trust: backend === inProcessBackend ? EXECUTION_TRUST : "custom",
+      backendId: backend.id,
+      grants: backend.grants,
+      limitsEnforced: backend.enforcesLimits,
+      backend,
+      runtimeActive: false,
+      phases,
+      diagnostics,
+      working: [],
+      slots: [],
+      order: [],
+      dependencies: [],
+      contributions: [],
+      trace,
+      shutdown: noopShutdown,
+      guilty: new Set(),
+    });
+  }
+
+  const trust: ExecutionTrust | "custom" = backend === inProcessBackend ? EXECUTION_TRUST : "custom";
+  const backendId = backend.id;
+  const grants = backend.grants;
+  const limitsEnforced = backend.enforcesLimits;
 
   phases.push(
     phase("discover", "completed", `Discovered ${packages.length} package${packages.length === 1 ? "" : "s"}.`),
@@ -747,6 +810,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return assemble({
       profileName,
       trust,
+      backendId,
+      grants,
+      limitsEnforced,
+      backend,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -785,24 +852,40 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   const enteredRegister: string[] = [];
   const keptByModule = new Map<string, unknown>();
   let registerFailed = false;
-  const life = (moduleId: string): LifecycleContext => ({
-    moduleId,
-    ownedSlot: (slotId) => owned(records, slotOwner, moduleId, slotId),
-    kept: () => keptByModule.get(moduleId),
-  });
+  const life = (moduleId: string): LifecycleContext =>
+    Object.freeze({
+      moduleId,
+      ownedSlot: (slotId: string) => owned(records, slotOwner, moduleId, slotId),
+      kept: () => keptByModule.get(moduleId),
+    });
+
+  const callHook = (
+    moduleId: string,
+    hook: "register" | "initialize" | "shutdown",
+    implementation: ModuleImplementation | undefined,
+    args: readonly unknown[],
+  ): string | undefined => {
+    const outcome = backend.invoke({
+      moduleId,
+      hook,
+      implementation: implementation as Parameters<ExecutionBackend["invoke"]>[0]["implementation"],
+      args,
+    });
+    if (outcome.ok) return undefined;
+    if (outcome.error instanceof Error && outcome.error.message) return outcome.error.message;
+    return String(outcome.error);
+  };
 
   const shutdownEntered = (ids: readonly string[], fromPhase: "register" | "initialize") => {
     for (const moduleId of [...ids].reverse()) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
-      try {
-        entry?.implementation?.shutdown?.(life(moduleId));
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : String(caught);
+      const failure = callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
+      if (failure) {
         diagnostics.push(
           errorDiagnostic(
             "lifecycle.exception",
-            `Shutdown of "${moduleId}" failed during rollback: ${message}`,
+            `Shutdown of "${moduleId}" failed during rollback: ${failure}`,
             { phase: fromPhase, moduleId },
           ),
         );
@@ -816,10 +899,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     enteredRegister.push(moduleId);
     const before = records.length;
     const localErrors = diagnostics.length;
-    try {
-      entry.implementation?.register?.({
+    const failure = callHook(moduleId, "register", entry.implementation, [
+      Object.freeze({
         moduleId,
-        contribute: (slotId, contribution) => {
+        contribute: (slotId: string, contribution: ContributionInput) => {
           acceptContribution(moduleId, slotId, contribution, declaredConnections, slotDecl, records, diagnostics);
         },
         keep(state: unknown) {
@@ -834,11 +917,11 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
           }
           keptByModule.set(moduleId, state);
         },
-      });
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
+      }),
+    ]);
+    if (failure) {
       diagnostics.push(
-        errorDiagnostic("lifecycle.exception", `Register of "${moduleId}" threw: ${message}`, {
+        errorDiagnostic("lifecycle.exception", `Register of "${moduleId}" threw: ${failure}`, {
           phase: "register",
           moduleId,
         }),
@@ -911,6 +994,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return assemble({
       profileName,
       trust,
+      backendId,
+      grants,
+      limitsEnforced,
+      backend,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -936,7 +1023,8 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
     if (!entry) continue;
     try {
-      entry.implementation?.initialize?.(life(moduleId));
+      const failure = callHook(moduleId, "initialize", entry.implementation, [life(moduleId)]);
+      if (failure) throw new Error(failure);
       initialized.push(moduleId);
       trace.push(`${moduleId}:initialize`);
     } catch (caught) {
@@ -960,6 +1048,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return assemble({
       profileName,
       trust,
+      backendId,
+      grants,
+      limitsEnforced,
+      backend,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -998,12 +1090,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     for (const moduleId of shutdownOrder) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
-      try {
-        entry?.implementation?.shutdown?.(life(moduleId));
-      } catch (caught) {
-        const message = caught instanceof Error ? caught.message : String(caught);
+      const failure = callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
+      if (failure) {
         shutdownDiagnostics.push(
-          errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${message}`, {
+          errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${failure}`, {
             phase: "shutdown",
             moduleId,
           }),
@@ -1016,6 +1106,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   built = assemble({
     profileName,
     trust,
+    backendId,
+    grants,
+    limitsEnforced,
+    backend,
     runtimeActive: true,
     phases,
     diagnostics,
@@ -1153,12 +1247,18 @@ function owned(
   slotId: string,
 ): readonly ContributionRecord[] | undefined {
   if (slotOwner.get(slotId) !== moduleId) return undefined;
-  return records.filter((item) => item.slotId === slotId);
+  return records
+    .filter((item) => item.slotId === slotId)
+    .map((item) => ({ ...item }));
 }
 
 function assemble(input: {
   profileName: string;
-  trust: ExecutionTrust | "unsupported";
+  trust: ExecutionTrust | "unsupported" | "custom";
+  backendId: string;
+  grants: readonly HostGrant[];
+  limitsEnforced: boolean;
+  backend?: ExecutionBackend;
   runtimeActive: boolean;
   phases: PhaseRecord[];
   diagnostics: Diagnostic[];
@@ -1197,10 +1297,13 @@ function assemble(input: {
 
   // A module that never validated still shouldn't be marked active.
   const clean = input.diagnostics.every((item) => item.severity !== "error");
-  return {
+  const built: CompositionResult = {
     profileName: input.profileName,
     foundationsApi: FOUNDATIONS_API,
     trust: input.trust,
+    backendId: input.backendId,
+    grants: input.grants,
+    limitsEnforced: input.limitsEnforced,
     ok: input.runtimeActive && clean,
     runtimeActive: input.runtimeActive,
     quiesced: false,
@@ -1210,15 +1313,29 @@ function assemble(input: {
     slots: input.slots,
     order: input.order,
     dependencies: input.dependencies,
-    fingerprint: fingerprintOf(input.order, modules, input.slots, input.dependencies, input.contributions),
+    fingerprint: fingerprintOf(
+      input.backendId,
+      input.order,
+      modules,
+      input.slots,
+      input.dependencies,
+      input.contributions,
+    ),
     contributions: input.runtimeActive ? input.contributions : [],
     trace: input.trace,
     shutdown: input.shutdown,
   };
+  if (input.backend) backendOfMap.set(built, input.backend);
+  return built;
 }
 
 const memoryOf = new WeakMap<CompositionResult, ReadonlyMap<string, unknown>>();
 const implOf = new WeakMap<CompositionResult, ReadonlyMap<string, ModuleImplementation | undefined>>();
+const backendOfMap = new WeakMap<CompositionResult, ExecutionBackend>();
+
+export function backendOf(result: CompositionResult): ExecutionBackend {
+  return backendOfMap.get(result) ?? denyingBackend;
+}
 
 export function moduleMemory(result: CompositionResult, moduleId: string): unknown {
   return memoryOf.get(result)?.get(moduleId);

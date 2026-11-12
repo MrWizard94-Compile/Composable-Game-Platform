@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { discoverModules } from "../foundations/discover-node.ts";
-import { compose, type ModulePackage } from "../foundations/host.ts";
+import { compose as hostCompose, type ComposeOptions, type ModulePackage } from "../foundations/host.ts";
+import { IN_PROCESS_POLICY } from "../foundations/backend.ts";
 import { resolveProfile, validateProfile } from "../foundations/profile.ts";
 import { captureSave, restoreSave } from "../foundations/save.ts";
 import { PROFILES } from "./profiles.ts";
@@ -11,6 +12,10 @@ import { CATALOG, DISPATCH_IDS, SERVICE_IDS, moduleIdOf, packagesFor, PROOF_IDS,
 import { advanceFlora, advanceStep, askQuery, dispatchPulse, foldPipe, listEntities, readLighting, removeEntity, spawnEntity } from "./runners.ts";
 
 const modulesDir = dirname(fileURLToPath(import.meta.url));
+
+function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}) {
+  return hostCompose(packages, { policy: IN_PROCESS_POLICY, ...options });
+}
 
 function idsOf(packages: readonly ModulePackage[]): string[] {
   return packages.map((item) => moduleIdOf(item.manifest));

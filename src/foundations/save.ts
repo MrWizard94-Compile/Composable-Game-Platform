@@ -1,5 +1,5 @@
 import type { CompositionResult, LifecycleContext } from "./host.ts";
-import { FOUNDATIONS_API, moduleImplementation, moduleMemory } from "./host.ts";
+import { FOUNDATIONS_API, backendOf, moduleImplementation, moduleMemory } from "./host.ts";
 import { parseSemVer } from "./semver.ts";
 
 /**
@@ -127,13 +127,18 @@ export function captureSave(result: CompositionResult): CaptureReport {
       continue;
     }
     let payload: unknown;
-    try {
-      payload = implementation.exportState(life(result, moduleId));
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "exportState threw a non-error value.";
+    const exported = backendOf(result).invoke({
+      moduleId,
+      hook: "exportState",
+      implementation: implementation as Parameters<ReturnType<typeof backendOf>["invoke"]>[0]["implementation"],
+      args: [life(result, moduleId)],
+    });
+    if (!exported.ok) {
+      const message = exported.error instanceof Error ? exported.error.message : "exportState threw a non-error value.";
       notices.push(notice("error", "save.threw", message, moduleId));
       continue;
     }
+    payload = exported.value;
     const cloned = jsonClone(payload);
     if (!cloned.ok) {
       notices.push(
@@ -274,13 +279,18 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
       );
       continue;
     }
-    try {
-      implementation.importState(life(result, moduleId), slice.payload);
-      applied.push(moduleId);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "importState threw a non-error value.";
+    const imported = backendOf(result).invoke({
+      moduleId,
+      hook: "importState",
+      implementation: implementation as Parameters<ReturnType<typeof backendOf>["invoke"]>[0]["implementation"],
+      args: [life(result, moduleId), slice.payload],
+    });
+    if (!imported.ok) {
+      const message = imported.error instanceof Error ? imported.error.message : "importState threw a non-error value.";
       notices.push(notice("error", "save.threw", message, moduleId));
+      continue;
     }
+    applied.push(moduleId);
   }
 
   for (const slice of slices) {

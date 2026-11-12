@@ -1,6 +1,5 @@
 import type { CompositionResult, ContributionRecord } from "./host.ts";
-import { contributionsFor } from "./host.ts";
-import { isCallablePayload } from "./slots.ts";
+import { backendOf, contributionsFor } from "./host.ts";
 
 /**
  * Caller-initiated execution for three slot kinds.
@@ -67,10 +66,11 @@ export type ServiceReport = {
 
 const NOT_CALLABLE = Symbol("not-callable");
 
-function callHandler(payload: unknown, arg: unknown): unknown | typeof NOT_CALLABLE {
-  if (!isCallablePayload(payload)) return NOT_CALLABLE;
-  if (typeof payload === "function") return payload(arg);
-  return (payload as { handle: (input: unknown) => unknown }).handle(arg);
+function callHandler(result: CompositionResult, payload: unknown, arg: unknown): unknown | typeof NOT_CALLABLE {
+  const outcome = backendOf(result).callPayload(payload, arg);
+  if (!outcome.ok && outcome.code === "not-callable") return NOT_CALLABLE;
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
 }
 
 function thrownMessage(error: unknown): string {
@@ -102,7 +102,7 @@ export function publish(result: CompositionResult, slotId: string, event: unknow
 
   const deliveries: PublishDelivery[] = [];
   for (const contribution of contributionsFor(result, slotId)) {
-    deliveries.push(deliver(contribution, event));
+    deliveries.push(deliver(result, contribution, event));
   }
   return {
     ok: deliveries.every((item) => item.ok),
@@ -111,9 +111,9 @@ export function publish(result: CompositionResult, slotId: string, event: unknow
   };
 }
 
-function deliver(contribution: ContributionRecord, event: unknown): PublishDelivery {
+function deliver(result: CompositionResult, contribution: ContributionRecord, event: unknown): PublishDelivery {
   try {
-    const returned = callHandler(contribution.payload, event);
+    const returned = callHandler(result, contribution.payload, event);
     if (returned === NOT_CALLABLE) {
       return {
         contributionId: contribution.id,
@@ -144,7 +144,7 @@ export function runPipeline(result: CompositionResult, slotId: string, input: un
   for (const contribution of contributionsFor(result, slotId)) {
     let returned: unknown | typeof NOT_CALLABLE;
     try {
-      returned = callHandler(contribution.payload, value);
+      returned = callHandler(result, contribution.payload, value);
     } catch (error) {
       stages.push({
         contributionId: contribution.id,
@@ -205,7 +205,7 @@ export function callService(result: CompositionResult, slotId: string, input: un
   const contribution = providers[0];
   if (!contribution) return { ok: false, slotId, reason: `Service slot "${slotId}" has no provider.` };
   try {
-    const returned = callHandler(contribution.payload, input);
+    const returned = callHandler(result, contribution.payload, input);
     if (returned === NOT_CALLABLE) {
       return {
         ok: false,

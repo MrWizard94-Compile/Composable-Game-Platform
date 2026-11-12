@@ -16,9 +16,9 @@ If `initialize` throws, every module whose `initialize` was entered is shut down
 
 ## Trust
 
-The only implemented execution mode is `trusted-in-process`. `compose` uses it when `trust` is omitted. Any other value refuses the composition before a module function runs. That refusal is the gate a later sandbox would have to pass; this host does not pretend to be one.
+The host does not run module code except through an execution backend (ADR 0010). The default policy allows no filesystem, network, or operating-system grant. The in-process backend has those grants and cannot enforce time or memory limits, so it does not run unless the caller opts in.
 
-Modules in the trusted mode are in-process code. A permission list does not create a boundary. This host is not sandboxed, not a multiplayer authority, and not hot-reloadable. Determinism is tested for module order, contribution order, fingerprints, and pure demo payloads. Rendering, input, and clocks are outside that claim.
+That opt-in is not a sandbox. A permission list in a manifest is still not a boundary. Hot reload, replication, and resource enforcement belong to a backend that can actually do them. This host refuses a backend that cannot, instead of ignoring the request.
 
 ## What stays out of the host
 

@@ -6,7 +6,7 @@ The browser console can check a manifest. It does not load an implementation. Lo
 
 ## Public entry
 
-Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` runs `trusted-in-process` unless you pass `trust`. Any other mode is refused before your functions run.
+Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` does not run module code under the default policy. The in-process backend grants filesystem, network, and os, and it cannot enforce limits. Pass `trust: "trusted-in-process"` or `policy: IN_PROCESS_POLICY` to opt in. Pass `backend` to replace it. This is not a sandbox.
 
 | Export | Use |
 |---|---|
