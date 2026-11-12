@@ -23,7 +23,7 @@ The schema is closed. An unknown field is an error. Versions are `major.minor.pa
 
 - `moduleId`: dotted lowercase, at least two segments (`org.example.starter`).
 - `name`, `version`, `moduleApi`: required. `version` is exact.
-- `requires`: capabilities, not folder names. `optional: true` warns and continues when nobody provides it. Two matching providers refuse the composition. Set `moduleId` to pin one provider. A satisfied requirement is an order edge. An ambiguous or missing one is not.
+- `requires`: capabilities, not folder names. List each capability once. `optional: true` warns and continues when nobody provides it. Two matching providers refuse the composition. Set `moduleId` to pin one provider. A satisfied requirement is an order edge. An ambiguous or missing one is not.
 - `provides`: capabilities this module offers, exact versions.
 - `connectsTo`: a slot id and a contract reference (`platform.system/1` or a full version).
 - `exposesSlots`: slots this module owns. Kind is `singleton`, `policy`, `registry`, `pipeline`, `subscriber`, or `service`.

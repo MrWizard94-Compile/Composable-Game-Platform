@@ -109,6 +109,23 @@ describe("composition", () => {
     assert.equal(result.contributions.some((item) => item.id === "good"), true);
   });
 
+  it("isolates a module that requires one capability twice", () => {
+    const good = pkg(moduleManifest("org.example.good"));
+    const doubled = pkg(
+      moduleManifest("org.example.doubled", {
+        requires: [
+          { capability: "example.marker", version: "^1.0.0" },
+          { capability: "example.marker", version: "^1.0.0", moduleId: "org.example.good" },
+        ],
+      }),
+    );
+    const result = compose([doubled, good]);
+    assert.equal(result.runtimeActive, true);
+    assert.equal(result.modules.find((item) => item.moduleId === "org.example.good")?.status, "active");
+    assert.equal(result.modules.find((item) => item.moduleId === "org.example.doubled")?.status, "rejected");
+    assert.ok(result.diagnostics.some((item) => item.message.includes("required more than once")));
+  });
+
   it("isolates a module built for a future host API", () => {
     const result = compose([
       pkg(moduleManifest("org.example.future", { moduleApi: ">=2.0.0 <3.0.0" })),

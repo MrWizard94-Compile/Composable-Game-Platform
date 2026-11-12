@@ -162,6 +162,16 @@ export function validateManifest(input: unknown): ManifestValidation {
     seenProvides.add(cap.capability);
   }
 
+  const seenRequires = new Set<string>();
+  for (const cap of requires) {
+    if (seenRequires.has(cap.capability)) {
+      errors.push(
+        fieldError("requires", `Capability "${cap.capability}" is required more than once.`, moduleId),
+      );
+    }
+    seenRequires.add(cap.capability);
+  }
+
   const seenSlots = new Set<string>();
   for (const slot of exposesSlots) {
     if (seenSlots.has(slot.slotId)) {

@@ -17,7 +17,7 @@ Milestone 1 through save identity. Working, not a game.
 - Module-owned save slices. The host stores JSON a module exports and restores a slice only when the major version matches. Two slices for one module are refused. A different profile name or fingerprint warns, and slices are still matched by module id. Object keys in a slice are sorted. Array order is kept. `shutdown()` quiesces the runtime, and dispatch and save then refuse.
 - A public entry, `src/foundations/index.ts`, and a copyable starter module. `validateManifest` checks a manifest that has no implementation yet. The console uses that same function. It does not load code.
 - Composition profiles. A JSON document pins module ids and exact versions. A missing module or a different packaged version refuses the selection. The host does not upgrade.
-- Capability requirements. One matching provider is a dependency. Two matching providers are ambiguous, and the host does not pick one. Naming `moduleId` on the requirement pins the provider. An optional requirement still refuses when more than one provider matches.
+- Capability requirements. One matching provider is a dependency. Two matching providers are ambiguous, and the host does not pick one. Naming `moduleId` on the requirement pins the provider. An optional requirement still refuses when more than one provider matches. A module that lists the same capability twice is isolated.
 - Resolved order edges. Each edge names the provider, the dependent, and a capability or a module-owned slot. A missing or ambiguous requirement adds no edge.
 
 ## Not implemented

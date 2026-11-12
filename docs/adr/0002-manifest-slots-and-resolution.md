@@ -22,7 +22,7 @@ Slot kinds and their refusal rules:
 
 Connections name a slot and a contract reference (`contract.id/1` or an exact version). The contract id and major must match the owner's declaration. A module cannot connect to a slot it owns.
 
-Dependencies are capabilities, not package names, unless `moduleId` is set. Optional requirements warn and continue when nobody provides them. Two or more matching providers are ambiguous, optional or not, and the host does not pick one. A `moduleId` pin selects that provider. Cycles fail the composition. Nesting deeper than 8 fails the composition.
+Dependencies are capabilities, not package names, unless `moduleId` is set. A module lists each capability once. A second entry is a manifest error, and that package is isolated. Optional requirements warn and continue when nobody provides them. Two or more matching providers are ambiguous, optional or not, and the host does not pick one. A `moduleId` pin selects that provider. Cycles fail the composition. Nesting deeper than 8 fails the composition.
 
 Invalid manifests are isolated. A valid neighbor can still activate. A conflict, cycle, bad contract, or thrown `initialize` refuses the admitted graph: nothing remains registered.
 
