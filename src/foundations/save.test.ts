@@ -126,6 +126,25 @@ describe("capture and restore", () => {
     assert.ok(report.notices.some((item) => item.code === "save.absent"));
     assert.ok(report.notices.some((item) => item.code === "save.orphan"));
     assert.ok(report.notices.some((item) => item.code === "save.profile"));
+    assert.ok(report.notices.some((item) => item.code === "save.fingerprint"));
+  });
+
+  it("does not pick between two slices for one module", () => {
+    const result = compose([owner, counter("org.example.count")], { profileName: "preview" });
+    const report = restoreSave(result, {
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.count", version: "1.0.0", payload: { n: 1 } },
+        { moduleId: "org.example.count", version: "1.1.0", payload: { n: 2 } },
+      ],
+    });
+    assert.equal(report.ok, false);
+    assert.deepEqual(report.applied, []);
+    assert.ok(report.notices.some((item) => item.code === "save.duplicate"));
+    assert.equal(report.notices.some((item) => item.code === "save.fingerprint"), false);
+    assert.deepEqual(captureSave(result).document.slices[0]?.payload, { n: 0 });
   });
 
   it("rejects a second keep, a non-JSON export, and a quiesced runtime", () => {

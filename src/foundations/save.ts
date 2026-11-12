@@ -171,6 +171,15 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
       ),
     );
   }
+  if (typeof record.fingerprint === "string" && record.fingerprint !== result.fingerprint) {
+    notices.push(
+      notice(
+        "warning",
+        "save.fingerprint",
+        "Document fingerprint does not match this composition. Slices are still matched by module id.",
+      ),
+    );
+  }
   if (!Array.isArray(record.slices)) {
     return { ok: false, applied: [], notices: [notice("error", "save.document", "Save document slices must be an array.")] };
   }
@@ -194,11 +203,27 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
     slices.push({ moduleId: row.moduleId, version: row.version, payload: row.payload });
   }
 
-  const byId = new Map(slices.map((slice) => [slice.moduleId, slice]));
+  const counts = new Map<string, number>();
+  for (const slice of slices) counts.set(slice.moduleId, (counts.get(slice.moduleId) ?? 0) + 1);
+  const byId = new Map<string, SaveSlice>();
+  for (const slice of slices) {
+    if ((counts.get(slice.moduleId) ?? 0) === 1) byId.set(slice.moduleId, slice);
+  }
   const applied: string[] = [];
   for (const moduleId of result.order) {
     const module = result.modules.find((item) => item.moduleId === moduleId);
     if (!module || module.status !== "active" || !module.save) continue;
+    if ((counts.get(moduleId) ?? 0) > 1) {
+      notices.push(
+        notice(
+          "error",
+          "save.duplicate",
+          `Save document has more than one slice for "${moduleId}". The host will not pick one.`,
+          moduleId,
+        ),
+      );
+      continue;
+    }
     const slice = byId.get(moduleId);
     if (!slice) {
       notices.push(

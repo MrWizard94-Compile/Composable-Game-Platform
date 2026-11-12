@@ -16,6 +16,8 @@ Restore rules:
 - A slice major must match the major the module declares now. `1.1.0` may load into a module that declares `1.0.0`. `2.0.0` is refused and that module's current state stays.
 - A missing slice is a warning. The module keeps what it has.
 - A slice for a module that is not active is a warning and is not read.
+- Two slices for the same module are an error. Neither is applied. The host does not pick one.
+- A different profile name or fingerprint is a warning. Slices are still matched by module id and save major.
 - One module's failure does not roll back slices already applied. The report says which ones landed.
 
 `shutdown()` marks the result quiesced. Capture, restore, `publish`, and `runPipeline` then refuse. The contribution list is still readable.
