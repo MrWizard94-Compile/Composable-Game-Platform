@@ -1,0 +1,30 @@
+{
+  "moduleId": "org.cgp.flora-core",
+  "name": "Flora Core",
+  "description": "Owns the plant-species registry and the growth-model policy. It does not define a single plant.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "flora.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "flora.plant-species",
+      "contract": "flora.plant-species",
+      "contractVersion": "1.0.0",
+      "kind": "registry",
+      "description": "Species records contributed by other modules.",
+      "required": false
+    },
+    {
+      "slotId": "flora.growth-model",
+      "contract": "flora.growth-model",
+      "contractVersion": "1.0.0",
+      "kind": "policy",
+      "description": "Exactly one growth strategy.",
+      "required": false
+    }
+  ],
+  "permissions": ["world.read"],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.seasonal-growth",
+  "name": "Seasonal Growth",
+  "description": "A single growth policy. Spring pushes. Winter barely moves.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "flora.core", "version": "^1.0.0" }],
+  "provides": [{ "capability": "flora.growth-model", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "flora.growth-model", "contract": "flora.growth-model/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

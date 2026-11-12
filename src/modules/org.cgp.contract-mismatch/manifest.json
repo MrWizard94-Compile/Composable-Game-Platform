@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.contract-mismatch",
+  "name": "Contract Mismatch",
+  "description": "Tries to join the species slot with contract major 2. The slot is major 1.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "flora.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "flora.plant-species", "contract": "flora.plant-species/2" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

@@ -1,0 +1,143 @@
+import { contributionsFor, type CompositionResult } from "../foundations/host.ts";
+
+export const SEASONS = ["spring", "summer", "autumn", "winter"] as const;
+export type Season = (typeof SEASONS)[number];
+
+export type SpeciesView = {
+  id: string;
+  commonName: string;
+  biome: string;
+  growthRate: number;
+  maxStage: number;
+};
+
+export type GrowthRow = SpeciesView & {
+  stage: number;
+  note: string;
+};
+
+type StrategyPayload = {
+  strategyId?: unknown;
+  label?: unknown;
+  summary?: unknown;
+  advance?: unknown;
+};
+
+function isSpecies(value: unknown): value is SpeciesView {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "string" &&
+    typeof row.commonName === "string" &&
+    typeof row.biome === "string" &&
+    typeof row.growthRate === "number" &&
+    typeof row.maxStage === "number"
+  );
+}
+
+export type FloraStep =
+  | {
+      ok: true;
+      strategy: string;
+      summary: string;
+      rows: GrowthRow[];
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Demo runner. It lives outside the Foundations and understands Flora payloads.
+ * The host only hands back the contributions it was given.
+ */
+export function advanceFlora(
+  result: CompositionResult,
+  stages: Readonly<Record<string, number>>,
+  season: Season,
+): FloraStep {
+  if (!result.runtimeActive) {
+    return { ok: false, reason: "Runtime is not active. Fix the composition before stepping growth." };
+  }
+  const speciesSlot = result.slots.find((slot) => slot.slotId === "flora.plant-species");
+  if (!speciesSlot) {
+    return { ok: false, reason: "Flora Core is not in this composition, so there is no species slot." };
+  }
+  const strategies = contributionsFor(result, "flora.growth-model");
+  const strategy = strategies[0]?.payload as StrategyPayload | undefined;
+  const advance =
+    strategy && typeof strategy.advance === "function"
+      ? (strategy.advance as (species: SpeciesView, season: Season, stage: number) => number)
+      : undefined;
+  const rows: GrowthRow[] = [];
+  for (const contribution of contributionsFor(result, "flora.plant-species")) {
+    if (!isSpecies(contribution.payload)) {
+      return {
+        ok: false,
+        reason: `Contribution "${contribution.id}" from ${contribution.moduleId} is not a species record.`,
+      };
+    }
+    const current = stages[contribution.payload.id] ?? 0;
+    if (!advance || !strategy) {
+      rows.push({
+        ...contribution.payload,
+        stage: current,
+        note: "No growth model connected.",
+      });
+      continue;
+    }
+    const next = advance(contribution.payload, season, current);
+    if (typeof next !== "number" || Number.isNaN(next)) {
+      return { ok: false, reason: `Growth model returned a non-numeric stage for ${contribution.payload.id}.` };
+    }
+    rows.push({
+      ...contribution.payload,
+      stage: next,
+      note: next >= contribution.payload.maxStage ? "At canopy." : `+${Math.round((next - current) * 100) / 100}`,
+    });
+  }
+  return {
+    ok: true,
+    strategy: typeof strategy?.label === "string" ? strategy.label : "No growth model",
+    summary: typeof strategy?.summary === "string" ? strategy.summary : "Species stay where they are.",
+    rows,
+  };
+}
+
+export type LightSource = {
+  id: string;
+  label: string;
+  kind: string;
+  intensity: number;
+  moduleId: string;
+};
+
+export type LightingRead =
+  | { ok: true; sources: LightSource[]; total: number }
+  | { ok: false; reason: string };
+
+export function readLighting(result: CompositionResult): LightingRead {
+  if (!result.runtimeActive) {
+    return { ok: false, reason: "Runtime is not active." };
+  }
+  if (!result.slots.some((slot) => slot.slotId === "lighting.sources")) {
+    return { ok: false, reason: "Lighting Core is not in this composition." };
+  }
+  const sources: LightSource[] = [];
+  for (const contribution of contributionsFor(result, "lighting.sources")) {
+    const payload = contribution.payload;
+    if (!payload || typeof payload !== "object") {
+      return { ok: false, reason: `Light contribution "${contribution.id}" has no payload.` };
+    }
+    const row = payload as Record<string, unknown>;
+    if (typeof row.label !== "string" || typeof row.kind !== "string" || typeof row.intensity !== "number") {
+      return { ok: false, reason: `Light contribution "${contribution.id}" does not match the source contract.` };
+    }
+    sources.push({
+      id: contribution.id,
+      label: row.label,
+      kind: row.kind,
+      intensity: row.intensity,
+      moduleId: contribution.moduleId,
+    });
+  }
+  const total = sources.reduce((sum, source) => sum + source.intensity, 0);
+  return { ok: true, sources, total };
+}

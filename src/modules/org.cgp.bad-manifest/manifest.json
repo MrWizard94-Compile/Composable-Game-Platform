@@ -1,0 +1,7 @@
+{
+  "moduleId": "org.cgp.bad-manifest",
+  "name": "Bad Manifest",
+  "description": "Version is not semantic. The host isolates this package.",
+  "version": "1.0",
+  "moduleApi": ">=1.0.0 <2.0.0"
+}

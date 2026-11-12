@@ -1,0 +1,16 @@
+{
+  "moduleId": "org.cgp.forest-plants",
+  "name": "Forest Plants",
+  "description": "Registers oak, pine, and fern into Flora Core's species slot.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [
+    { "capability": "flora.core", "version": "^1.0.0" },
+    { "capability": "flora.soil", "version": "^1.0.0", "optional": true }
+  ],
+  "provides": [{ "capability": "flora.plant-species", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "flora.plant-species", "contract": "flora.plant-species/1" }],
+  "permissions": ["flora.species.register"],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

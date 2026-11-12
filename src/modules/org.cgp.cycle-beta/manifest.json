@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.cycle-beta",
+  "name": "Cycle Beta",
+  "description": "The other half of the dependency cycle.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "demo.beta", "version": "1.0.0" }],
+  "requires": [{ "capability": "demo.alpha", "version": "^1.0.0" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

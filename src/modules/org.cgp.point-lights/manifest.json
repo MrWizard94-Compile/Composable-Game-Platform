@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.point-lights",
+  "name": "Point Lights",
+  "description": "Registers torch and lamp sources.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "lighting.core", "version": "^1.0.0" }],
+  "provides": [{ "capability": "lighting.source", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "lighting.sources", "contract": "lighting.source/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

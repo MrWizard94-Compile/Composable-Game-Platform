@@ -1,0 +1,21 @@
+{
+  "moduleId": "org.cgp.lighting-core",
+  "name": "Lighting Core",
+  "description": "A second system family. It uses the same platform slot as Flora and adds no host code.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "lighting.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "lighting.sources",
+      "contract": "lighting.source",
+      "contractVersion": "1.0.0",
+      "kind": "registry",
+      "description": "Light source records. Nothing here is rendered.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

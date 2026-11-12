@@ -1,0 +1,10 @@
+{
+  "moduleId": "org.cgp.init-fault",
+  "name": "Init Fault",
+  "description": "Valid package that throws during initialize. The host must roll back.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

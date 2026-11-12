@@ -1,0 +1,13 @@
+{
+  "moduleId": "org.cgp.desert-plants",
+  "name": "Desert Plants",
+  "description": "A second species pack. Same slot, separate package.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "flora.core", "version": "^1.0.0" }],
+  "provides": [{ "capability": "flora.plant-species", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "flora.plant-species", "contract": "flora.plant-species/1" }],
+  "permissions": ["flora.species.register"],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}
