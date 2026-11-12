@@ -1,0 +1,18 @@
+{
+  "profileId": "org.cgp.two-services",
+  "name": "Two services",
+  "modules": [
+    {
+      "moduleId": "org.cgp.query-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.name-index",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.alias-index",
+      "version": "1.0.0"
+    }
+  ]
+}

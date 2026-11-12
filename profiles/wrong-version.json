@@ -1,0 +1,10 @@
+{
+  "profileId": "org.cgp.wrong-version",
+  "name": "Wrong version",
+  "modules": [
+    {
+      "moduleId": "org.cgp.flora-core",
+      "version": "9.0.0"
+    }
+  ]
+}

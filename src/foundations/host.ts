@@ -37,18 +37,26 @@ export type ContributionInput = {
 export type RegisterContext = {
   moduleId: string;
   contribute: (slotId: string, contribution: ContributionInput) => void;
+  /** Stores one composition-local value. A second call fails registration. */
+  keep: (state: unknown) => void;
 };
 
 export type LifecycleContext = {
   moduleId: string;
   /** Contributions already registered into a slot this module owns. */
   ownedSlot: (slotId: string) => readonly ContributionRecord[] | undefined;
+  /** The value passed to keep during register, if any. */
+  kept: () => unknown;
 };
 
 export type ModuleImplementation = {
   register?: (ctx: RegisterContext) => void;
   initialize?: (ctx: LifecycleContext) => void;
   shutdown?: (ctx: LifecycleContext) => void;
+  /** Returns JSON this module owns. Called only by captureSave. */
+  exportState?: (ctx: LifecycleContext) => unknown;
+  /** Applies a JSON slice from the same save major. Called only by restoreSave. */
+  importState?: (ctx: LifecycleContext, saved: unknown) => void;
 };
 
 export type ModulePackage = {
@@ -75,6 +83,7 @@ export type ResolvedModule = {
   connectsTo: ModuleManifest["connectsTo"];
   exposesSlots: ModuleManifest["exposesSlots"];
   permissions: string[];
+  save?: ModuleManifest["save"];
   author?: string;
   license?: string;
 };
@@ -116,6 +125,8 @@ export type CompositionResult = {
   ok: boolean;
   /** True when the admitted graph was registered and initialized. An empty graph counts. */
   runtimeActive: boolean;
+  /** Set by shutdown(). Dispatch and save refuse a quiesced runtime. */
+  quiesced: boolean;
   phases: PhaseRecord[];
   diagnostics: Diagnostic[];
   modules: ResolvedModule[];
@@ -471,20 +482,36 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         }
         continue;
       }
+      const distinct = new Map<string, { moduleId: string; version: string }>();
       for (const provider of candidates) {
-        if (provider.moduleId === entry.manifest.moduleId) {
-          resolveFailed = true;
-          diagnostics.push(
-            errorDiagnostic(
-              "dependency.cycle",
-              `Module "${entry.manifest.moduleId}" requires capability "${req.capability}", which it provides itself.`,
-              { moduleId: entry.manifest.moduleId, moduleIds: [entry.manifest.moduleId] },
-            ),
-          );
-          continue;
-        }
-        edges.push([provider.moduleId, entry.manifest.moduleId]);
+        if (!distinct.has(provider.moduleId)) distinct.set(provider.moduleId, provider);
       }
+      if (distinct.size > 1) {
+        resolveFailed = true;
+        const ids = [...distinct.keys()].sort(cmp);
+        diagnostics.push(
+          errorDiagnostic(
+            "dependency.ambiguous",
+            `Module "${entry.manifest.moduleId}" requires capability "${req.capability}" ${req.version}, and ${ids.length} modules provide it (${ids.join(", ")}). The host will not pick one.`,
+            { moduleId: entry.manifest.moduleId, moduleIds: [entry.manifest.moduleId, ...ids] },
+          ),
+        );
+        continue;
+      }
+      const provider = [...distinct.values()][0];
+      if (!provider) continue;
+      if (provider.moduleId === entry.manifest.moduleId) {
+        resolveFailed = true;
+        diagnostics.push(
+          errorDiagnostic(
+            "dependency.cycle",
+            `Module "${entry.manifest.moduleId}" requires capability "${req.capability}", which it provides itself.`,
+            { moduleId: entry.manifest.moduleId, moduleIds: [entry.manifest.moduleId] },
+          ),
+        );
+        continue;
+      }
+      edges.push([provider.moduleId, entry.manifest.moduleId]);
     }
   }
 
@@ -665,7 +692,13 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
 
   const records: ContributionRecord[] = [];
   const registered: string[] = [];
+  const keptByModule = new Map<string, unknown>();
   let registerFailed = false;
+  const life = (moduleId: string): LifecycleContext => ({
+    moduleId,
+    ownedSlot: (slotId) => owned(records, slotOwner, moduleId, slotId),
+    kept: () => keptByModule.get(moduleId),
+  });
 
   const rollbackRegistered = (fromPhase: "register" | "initialize" | "shutdown") => {
     const shutdownDiagnostics: Diagnostic[] = [];
@@ -674,10 +707,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
       try {
-        entry?.implementation?.shutdown?.({
-          moduleId,
-          ownedSlot: (slotId) => owned(records, slotOwner, moduleId, slotId),
-        });
+        entry?.implementation?.shutdown?.(life(moduleId));
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
         const diagnostic = errorDiagnostic(
@@ -702,6 +732,18 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         moduleId,
         contribute: (slotId, contribution) => {
           acceptContribution(moduleId, slotId, contribution, declaredConnections, slotDecl, records, diagnostics);
+        },
+        keep(state: unknown) {
+          if (keptByModule.has(moduleId)) {
+            diagnostics.push(
+              errorDiagnostic("save.duplicate-keep", `Module "${moduleId}" called keep more than once.`, {
+                phase: "register",
+                moduleId,
+              }),
+            );
+            return;
+          }
+          keptByModule.set(moduleId, state);
         },
       });
     } catch (caught) {
@@ -801,10 +843,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
     if (!entry) continue;
     try {
-      entry.implementation?.initialize?.({
-        moduleId,
-        ownedSlot: (slotId) => owned(records, slotOwner, moduleId, slotId),
-      });
+      entry.implementation?.initialize?.(life(moduleId));
       initialized.push(moduleId);
       trace.push(`${moduleId}:initialize`);
     } catch (caught) {
@@ -822,10 +861,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         const priorEntry = admitted.find((item) => item.manifest.moduleId === prior);
         trace.push(`${prior}:shutdown`);
         try {
-          priorEntry?.implementation?.shutdown?.({
-            moduleId: prior,
-            ownedSlot: (slotId) => owned(records, slotOwner, prior, slotId),
-          });
+          priorEntry?.implementation?.shutdown?.(life(prior));
         } catch (shutdownError) {
           const shutdownMessage =
             shutdownError instanceof Error ? shutdownError.message : String(shutdownError);
@@ -875,20 +911,17 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     ),
   );
 
-  let shut = false;
+  let built: CompositionResult;
   const shutdown = (): ShutdownReport => {
-    if (shut) return { already: true, order: [], diagnostics: [] };
-    shut = true;
+    if (built.quiesced) return { already: true, order: [], diagnostics: [] };
+    built.quiesced = true;
     const shutdownDiagnostics: Diagnostic[] = [];
     const shutdownOrder = [...initialized].reverse();
     for (const moduleId of shutdownOrder) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
       try {
-        entry?.implementation?.shutdown?.({
-          moduleId,
-          ownedSlot: (slotId) => owned(records, slotOwner, moduleId, slotId),
-        });
+        entry?.implementation?.shutdown?.(life(moduleId));
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
         shutdownDiagnostics.push(
@@ -902,8 +935,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return { already: false, order: shutdownOrder, diagnostics: shutdownDiagnostics };
   };
 
-  // `registered` included initialize bookkeeping; shutdown walks `initialized` only.
-  return assemble({
+  built = assemble({
     profileName,
     runtimeActive: true,
     phases,
@@ -916,6 +948,11 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     shutdown,
     guilty,
   });
+  const implByModule = new Map<string, ModuleImplementation | undefined>();
+  for (const entry of admitted) implByModule.set(entry.manifest.moduleId, entry.implementation);
+  memoryOf.set(built, keptByModule);
+  implOf.set(built, implByModule);
+  return built;
 }
 
 function acceptContribution(
@@ -1040,6 +1077,7 @@ function assemble(input: {
       connectsTo: manifest?.connectsTo ?? [],
       exposesSlots: manifest?.exposesSlots ?? [],
       permissions: manifest?.permissions ?? [],
+      save: manifest?.save,
       author: manifest?.author,
       license: manifest?.license,
     };
@@ -1052,6 +1090,7 @@ function assemble(input: {
     foundationsApi: FOUNDATIONS_API,
     ok: input.runtimeActive && clean,
     runtimeActive: input.runtimeActive,
+    quiesced: false,
     phases: input.phases,
     diagnostics: input.diagnostics,
     modules,
@@ -1062,6 +1101,20 @@ function assemble(input: {
     trace: input.trace,
     shutdown: input.shutdown,
   };
+}
+
+const memoryOf = new WeakMap<CompositionResult, ReadonlyMap<string, unknown>>();
+const implOf = new WeakMap<CompositionResult, ReadonlyMap<string, ModuleImplementation | undefined>>();
+
+export function moduleMemory(result: CompositionResult, moduleId: string): unknown {
+  return memoryOf.get(result)?.get(moduleId);
+}
+
+export function moduleImplementation(
+  result: CompositionResult,
+  moduleId: string,
+): ModuleImplementation | undefined {
+  return implOf.get(result)?.get(moduleId);
 }
 
 export function contributionsFor(

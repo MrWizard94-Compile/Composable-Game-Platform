@@ -22,8 +22,33 @@ import { implementation as initFault } from "./org.cgp.init-fault/module.ts";
 import mismatchManifest from "./org.cgp.contract-mismatch/manifest.json" with { type: "json" };
 import { implementation as contractMismatch } from "./org.cgp.contract-mismatch/module.ts";
 import badManifest from "./org.cgp.bad-manifest/manifest.json" with { type: "json" };
+import markerLeftManifest from "./org.cgp.marker-left/manifest.json" with { type: "json" };
+import markerRightManifest from "./org.cgp.marker-right/manifest.json" with { type: "json" };
+import markerUseManifest from "./org.cgp.marker-use/manifest.json" with { type: "json" };
+import signalsManifest from "./org.cgp.signals-core/manifest.json" with { type: "json" };
+import { implementation as signalsCore } from "./org.cgp.signals-core/module.ts";
+import stampManifest from "./org.cgp.signal-stamp/manifest.json" with { type: "json" };
+import { implementation as signalStamp } from "./org.cgp.signal-stamp/module.ts";
+import lateManifest from "./org.cgp.signal-late/manifest.json" with { type: "json" };
+import { implementation as signalLate } from "./org.cgp.signal-late/module.ts";
+import signalFaultManifest from "./org.cgp.signal-fault/manifest.json" with { type: "json" };
+import { implementation as signalFault } from "./org.cgp.signal-fault/module.ts";
+import pipeDoubleManifest from "./org.cgp.pipe-double/manifest.json" with { type: "json" };
+import { implementation as pipeDouble } from "./org.cgp.pipe-double/module.ts";
+import pipeOffsetManifest from "./org.cgp.pipe-offset/manifest.json" with { type: "json" };
+import { implementation as pipeOffset } from "./org.cgp.pipe-offset/module.ts";
+import pipeFaultManifest from "./org.cgp.pipe-fault/manifest.json" with { type: "json" };
+import { implementation as pipeFault } from "./org.cgp.pipe-fault/module.ts";
+import queryCoreManifest from "./org.cgp.query-core/manifest.json" with { type: "json" };
+import { implementation as queryCore } from "./org.cgp.query-core/module.ts";
+import nameIndexManifest from "./org.cgp.name-index/manifest.json" with { type: "json" };
+import { implementation as nameIndex } from "./org.cgp.name-index/module.ts";
+import aliasIndexManifest from "./org.cgp.alias-index/manifest.json" with { type: "json" };
+import { implementation as aliasIndex } from "./org.cgp.alias-index/module.ts";
+import pulseCountManifest from "./org.cgp.pulse-count/manifest.json" with { type: "json" };
+import { implementation as pulseCount } from "./org.cgp.pulse-count/module.ts";
 
-export type ModuleGroup = "Flora" | "Lighting" | "Faults";
+export type ModuleGroup = "Flora" | "Lighting" | "Signals" | "Queries" | "Faults";
 
 export type CatalogEntry = {
   group: ModuleGroup;
@@ -51,11 +76,25 @@ export const CATALOG: readonly CatalogEntry[] = [
   entry("Lighting", true, lightingManifest, lightingCore),
   entry("Lighting", true, pointManifest, pointLights),
   entry("Lighting", true, directionalManifest, directionalLights),
+  entry("Signals", false, signalsManifest, signalsCore),
+  entry("Signals", false, stampManifest, signalStamp),
+  entry("Signals", false, lateManifest, signalLate),
+  entry("Signals", false, pipeDoubleManifest, pipeDouble),
+  entry("Signals", false, pipeOffsetManifest, pipeOffset),
+  entry("Signals", false, pulseCountManifest, pulseCount),
+  entry("Signals", false, signalFaultManifest, signalFault),
+  entry("Signals", false, pipeFaultManifest, pipeFault),
+  entry("Queries", false, queryCoreManifest, queryCore),
+  entry("Queries", false, nameIndexManifest, nameIndex),
+  entry("Queries", false, aliasIndexManifest, aliasIndex),
   entry("Faults", false, cycleAlphaManifest),
   entry("Faults", false, cycleBetaManifest),
   entry("Faults", false, initFaultManifest, initFault),
   entry("Faults", false, mismatchManifest, contractMismatch),
   entry("Faults", false, badManifest),
+  entry("Faults", false, markerLeftManifest),
+  entry("Faults", false, markerRightManifest),
+  entry("Faults", false, markerUseManifest),
 ];
 
 export function moduleIdOf(manifest: unknown): string {
@@ -76,3 +115,16 @@ export function packagesFor(ids: readonly string[]): ModulePackage[] {
 }
 
 export const PROOF_IDS = CATALOG.filter((item) => item.defaultOn).map((item) => moduleIdOf(item.manifest));
+
+/** Signals packages that demonstrate subscriber fan-out and a pipeline fold. Faults stay out. */
+export const DISPATCH_IDS = [
+  "org.cgp.signals-core",
+  "org.cgp.signal-stamp",
+  "org.cgp.signal-late",
+  "org.cgp.pipe-double",
+  "org.cgp.pipe-offset",
+  "org.cgp.pulse-count",
+] as const;
+
+/** One service owner and its single provider. A second provider is a separate fault. */
+export const SERVICE_IDS = ["org.cgp.query-core", "org.cgp.name-index"] as const;

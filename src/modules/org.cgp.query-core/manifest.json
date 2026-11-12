@@ -1,0 +1,21 @@
+{
+  "moduleId": "org.cgp.query-core",
+  "name": "Query Core",
+  "description": "Owns one service slot. The host calls that single provider when asked and will not choose among several.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "query.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "queries.ask",
+      "contract": "queries.answer",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "One function. The caller passes a value and receives whatever the provider returns.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

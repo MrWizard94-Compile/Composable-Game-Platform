@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.pipe-offset",
+  "name": "Pipe Offset",
+  "description": "Last pipeline stage. Adds 3 to a number. It does not run if an earlier stage stops the fold.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "signals.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "signals.pipe", "contract": "signals.pipe/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

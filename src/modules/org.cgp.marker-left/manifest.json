@@ -1,0 +1,10 @@
+{
+  "moduleId": "org.cgp.marker-left",
+  "name": "Marker Left",
+  "description": "One provider of catalog.marker. It does not own the capability.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "catalog.marker", "version": "1.0.0" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

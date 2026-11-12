@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.signal-fault",
+  "name": "Signal Fault",
+  "description": "Throws when a pulse is published. Later listeners still run.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "signals.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "signals.listeners", "contract": "signals.listener/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

@@ -1,0 +1,14 @@
+{
+  "profileId": "org.cgp.service",
+  "name": "Service",
+  "modules": [
+    {
+      "moduleId": "org.cgp.query-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.name-index",
+      "version": "1.0.0"
+    }
+  ]
+}

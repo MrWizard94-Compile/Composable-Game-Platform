@@ -1,0 +1,14 @@
+{
+  "profileId": "org.cgp.cycle",
+  "name": "Cycle",
+  "modules": [
+    {
+      "moduleId": "org.cgp.cycle-alpha",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.cycle-beta",
+      "version": "1.0.0"
+    }
+  ]
+}

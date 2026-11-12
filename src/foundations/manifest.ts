@@ -5,6 +5,14 @@ import { isSlotKind, type SlotKind } from "./slots.ts";
 const MODULE_ID_RE = /^[a-z][a-z0-9]*(?:\.[a-z0-9][a-z0-9-]*)+$/;
 const NAME_RE = /^[\w][\w .,'’()/-]{0,80}$/u;
 
+export function isModuleId(value: string): boolean {
+  return MODULE_ID_RE.test(value);
+}
+
+export function isDisplayName(value: string): boolean {
+  return NAME_RE.test(value);
+}
+
 export type CapabilityRequire = {
   capability: string;
   version: string;
@@ -31,6 +39,10 @@ export type SlotExposeDecl = {
   required: boolean;
 };
 
+export type SaveDecl = {
+  version: string;
+};
+
 export type ModuleManifest = {
   moduleId: string;
   name: string;
@@ -42,6 +54,8 @@ export type ModuleManifest = {
   connectsTo: SlotConnectionDecl[];
   exposesSlots: SlotExposeDecl[];
   permissions: string[];
+  /** Present only when this module owns a save slice. */
+  save?: SaveDecl;
   author?: string;
   license?: string;
 };
@@ -57,6 +71,7 @@ const MANIFEST_KEYS = new Set([
   "connectsTo",
   "exposesSlots",
   "permissions",
+  "save",
   "author",
   "license",
 ]);
@@ -116,6 +131,7 @@ export function validateManifest(input: unknown): ManifestValidation {
   const connectsTo = readConnections(input.connectsTo, errors, moduleId);
   const exposesSlots = readSlots(input.exposesSlots, errors, moduleId);
   const permissions = readPermissions(input.permissions, errors, moduleId);
+  const save = readSave(input.save, errors, moduleId);
 
   if (
     errors.length > 0 ||
@@ -189,6 +205,7 @@ export function validateManifest(input: unknown): ManifestValidation {
       connectsTo,
       exposesSlots,
       permissions,
+      save,
       author,
       license,
     },
@@ -249,6 +266,20 @@ function readRange(
     return undefined;
   }
   return value;
+}
+
+function readSave(value: unknown, errors: Diagnostic[], moduleId?: string): SaveDecl | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    errors.push(fieldError("save", "save must be an object with an exact version.", moduleId));
+    return undefined;
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "version") errors.push(fieldError(`save.${key}`, `Unknown save field "${key}".`, moduleId));
+  }
+  const version = readExactVersion(value.version, "save.version", errors, moduleId);
+  if (!version) return undefined;
+  return { version };
 }
 
 function readOptionalString(

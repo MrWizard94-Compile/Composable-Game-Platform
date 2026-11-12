@@ -4,7 +4,7 @@
   "type": "module",
   "description": "A module host for independently packaged game systems. Separate from STRATA.",
   "scripts": {
-    "test": "node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/modules/composition.test.ts",
+    "test": "node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/modules/composition.test.ts",
     "demo": "node --experimental-strip-types src/modules/headless-demo.ts"
   },
   "engines": {

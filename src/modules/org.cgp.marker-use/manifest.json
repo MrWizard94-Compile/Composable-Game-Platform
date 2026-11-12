@@ -1,0 +1,10 @@
+{
+  "moduleId": "org.cgp.marker-use",
+  "name": "Marker Use",
+  "description": "Requires catalog.marker and does not name a provider. Two matches refuse the composition.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "catalog.marker", "version": "^1.0.0" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

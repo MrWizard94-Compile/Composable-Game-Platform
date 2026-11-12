@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.alias-index",
+  "name": "Alias Index",
+  "description": "A second provider of the same service slot. The host refuses both instead of picking one.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "query.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "queries.ask", "contract": "queries.answer/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

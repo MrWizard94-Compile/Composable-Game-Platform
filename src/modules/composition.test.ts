@@ -4,8 +4,11 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { discoverModules } from "../foundations/discover-node.ts";
 import { compose, type ModulePackage } from "../foundations/host.ts";
-import { CATALOG, moduleIdOf, packagesFor, PROOF_IDS, toPackage } from "./registry.ts";
-import { advanceFlora, readLighting } from "./runners.ts";
+import { resolveProfile, validateProfile } from "../foundations/profile.ts";
+import { captureSave, restoreSave } from "../foundations/save.ts";
+import { PROFILES } from "./profiles.ts";
+import { CATALOG, DISPATCH_IDS, SERVICE_IDS, moduleIdOf, packagesFor, PROOF_IDS, toPackage } from "./registry.ts";
+import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from "./runners.ts";
 
 const modulesDir = dirname(fileURLToPath(import.meta.url));
 
@@ -163,5 +166,103 @@ describe("packaged modules", () => {
       lights.sources.map((source) => source.id),
       ["moon", "sun", "lamp", "torch"],
     );
+  });
+
+  it("fans a pulse out and folds a pipe without depending on package order", () => {
+    const ids = [...PROOF_IDS, ...DISPATCH_IDS];
+    const forward = compose(packagesFor(ids));
+    const reverse = compose([...packagesFor(ids)].reverse());
+    assert.equal(forward.ok, true);
+    assert.equal(forward.fingerprint, reverse.fingerprint);
+    const pulse = dispatchPulse(forward);
+    assert.equal(pulse.report.ok, true);
+    assert.deepEqual(pulse.heard, ["stamp", "late"]);
+    const folded = foldPipe(reverse, 4);
+    assert.equal(folded.ok, true);
+    assert.equal(folded.output, 11);
+    assert.deepEqual(
+      folded.stages.map((stage) => stage.contributionId),
+      ["double", "offset"],
+    );
+  });
+
+  it("keeps later listeners after a throw and stops the pipe at a fault", () => {
+    const result = compose(
+      packagesFor([...DISPATCH_IDS, "org.cgp.signal-fault", "org.cgp.pipe-fault"]),
+    );
+    assert.equal(result.ok, true);
+    const pulse = dispatchPulse(result);
+    assert.equal(pulse.report.ok, false);
+    assert.deepEqual(pulse.heard, ["stamp", "late"]);
+    assert.equal(pulse.report.deliveries.find((item) => item.contributionId === "fault")?.code, "dispatch.threw");
+    const folded = foldPipe(result, 4);
+    assert.equal(folded.ok, false);
+    assert.equal(folded.output, 8);
+    assert.equal(folded.stages.some((stage) => stage.contributionId === "offset"), false);
+  });
+
+  it("saves the pulse count and restores an older minor of the same major", () => {
+    const result = compose(packagesFor([...DISPATCH_IDS]), { profileName: "preview" });
+    dispatchPulse(result);
+    dispatchPulse(result);
+    const captured = captureSave(result);
+    assert.equal(captured.ok, true);
+    assert.deepEqual(
+      captured.document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload,
+      { heard: 2 },
+    );
+    const restored = restoreSave(result, {
+      ...captured.document,
+      slices: [{ moduleId: "org.cgp.pulse-count", version: "1.1.0", payload: { heard: 5 } }],
+    });
+    assert.equal(restored.ok, true);
+    dispatchPulse(result);
+    assert.deepEqual(
+      captureSave(result).document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload,
+      { heard: 6 },
+    );
+  });
+
+  it("calls the one query provider and refuses a second", () => {
+    const result = compose(packagesFor([...SERVICE_IDS]));
+    assert.equal(result.ok, true);
+    const asked = askQuery(result, "alpha");
+    assert.equal(asked.report.ok, true);
+    assert.deepEqual(asked.report.output, { question: "alpha", letters: 5 });
+    const clash = compose(packagesFor([...SERVICE_IDS, "org.cgp.alias-index"]));
+    assert.equal(clash.runtimeActive, false);
+    assert.ok(clash.diagnostics.some((item) => item.code === "slot.ambiguous"));
+    const refused = askQuery(clash, "alpha");
+    assert.equal(refused.report.ok, false);
+    assert.equal(refused.report.reason, "Runtime is not active.");
+  });
+
+  it("resolves shipped profiles to the same graph and refuses a version the package does not have", () => {
+    const available = CATALOG.map(toPackage);
+    for (const item of PROFILES) {
+      const checked = validateProfile(item.profile);
+      assert.equal(checked.ok, true, item.id);
+      if (!checked.ok) continue;
+      const resolved = resolveProfile(checked.profile, available);
+      if (item.id === "wrong-version") {
+        assert.equal(resolved.ok, false);
+        if (!resolved.ok) assert.equal(resolved.errors[0]?.code, "profile.version");
+        continue;
+      }
+      if (item.id === "two-providers") {
+        assert.equal(resolved.ok, true, item.id);
+        if (!resolved.ok) continue;
+        const result = compose(resolved.packages);
+        assert.equal(result.runtimeActive, false);
+        assert.ok(result.diagnostics.some((item) => item.code === "dependency.ambiguous"));
+        continue;
+      }
+      assert.equal(resolved.ok, true, item.id);
+      if (!resolved.ok) continue;
+      const ids = checked.profile.modules.map((pin) => pin.moduleId);
+      const viaProfile = compose(resolved.packages, { profileName: checked.profile.profileId });
+      const viaIds = compose(packagesFor(ids), { profileName: checked.profile.profileId });
+      assert.equal(viaProfile.fingerprint, viaIds.fingerprint);
+    }
   });
 });

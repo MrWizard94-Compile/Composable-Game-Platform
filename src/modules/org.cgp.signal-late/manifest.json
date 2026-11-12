@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.signal-late",
+  "name": "Signal Late",
+  "description": "Appends late to an event's heard list. Order 30, after stamp and after a fault.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "signals.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "signals.listeners", "contract": "signals.listener/1" }],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

@@ -182,6 +182,56 @@ describe("composition", () => {
     assert.deepEqual(only?.contributors, []);
   });
 
+  it("refuses two capability providers and accepts a named pin", () => {
+    const left = pkg(
+      moduleManifest("org.example.left", { provides: [{ capability: "example.marker", version: "1.0.0" }] }),
+    );
+    const right = pkg(
+      moduleManifest("org.example.right", { provides: [{ capability: "example.marker", version: "1.0.0" }] }),
+    );
+    const open = pkg(
+      moduleManifest("org.example.use", { requires: [{ capability: "example.marker", version: "^1.0.0" }] }),
+    );
+    const ambiguous = compose([right, open, left]);
+    assert.equal(ambiguous.runtimeActive, false);
+    assert.ok(codes(ambiguous).includes("dependency.ambiguous"));
+    assert.equal(ambiguous.contributions.length, 0);
+
+    const optional = compose([
+      left,
+      right,
+      pkg(
+        moduleManifest("org.example.use", {
+          requires: [{ capability: "example.marker", version: "^1.0.0", optional: true }],
+        }),
+      ),
+    ]);
+    assert.equal(optional.runtimeActive, false);
+    assert.ok(codes(optional).includes("dependency.ambiguous"));
+
+    const pinned = compose([
+      right,
+      left,
+      pkg(
+        moduleManifest("org.example.use", {
+          requires: [{ capability: "example.marker", version: "^1.0.0", moduleId: "org.example.left" }],
+        }),
+      ),
+    ]);
+    assert.equal(pinned.runtimeActive, true);
+    assert.ok(pinned.order.indexOf("org.example.left") < pinned.order.indexOf("org.example.use"));
+
+    const newer = pkg(
+      moduleManifest("org.example.right", {
+        version: "2.0.0",
+        provides: [{ capability: "example.marker", version: "2.0.0" }],
+      }),
+    );
+    const onlyLeft = compose([newer, open, left]);
+    assert.equal(onlyLeft.runtimeActive, true);
+    assert.equal(codes(onlyLeft).includes("dependency.ambiguous"), false);
+  });
+
   it("orders pipeline contributions by order, then module id", () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
@@ -515,11 +565,13 @@ describe("composition", () => {
         },
       });
     const result = compose([make("org.example.beta"), make("org.example.alpha")]);
+    assert.equal(result.quiesced, false);
     const first = result.shutdown();
     const second = result.shutdown();
     assert.deepEqual(first.order, ["org.example.beta", "org.example.alpha"]);
     assert.equal(first.already, false);
     assert.equal(second.already, true);
+    assert.equal(result.quiesced, true);
     assert.deepEqual(events, [
       "init:org.example.alpha",
       "init:org.example.beta",

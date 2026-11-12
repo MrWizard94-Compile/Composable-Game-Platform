@@ -1,0 +1,34 @@
+{
+  "profileId": "org.cgp.policy-conflict",
+  "name": "Policy conflict",
+  "modules": [
+    {
+      "moduleId": "org.cgp.flora-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.forest-plants",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.seasonal-growth",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.lighting-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.point-lights",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.directional-lights",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.accelerated-growth",
+      "version": "1.0.0"
+    }
+  ]
+}

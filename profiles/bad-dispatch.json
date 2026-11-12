@@ -1,0 +1,62 @@
+{
+  "profileId": "org.cgp.bad-dispatch",
+  "name": "Bad dispatch",
+  "modules": [
+    {
+      "moduleId": "org.cgp.flora-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.forest-plants",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.seasonal-growth",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.lighting-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.point-lights",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.directional-lights",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.signals-core",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.signal-stamp",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.signal-late",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.pipe-double",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.pipe-offset",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.pulse-count",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.signal-fault",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.cgp.pipe-fault",
+      "version": "1.0.0"
+    }
+  ]
+}

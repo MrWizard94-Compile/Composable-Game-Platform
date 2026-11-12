@@ -6,7 +6,7 @@
 
 `discover → validate → resolve → prepare → register → initialize → run`, then `shutdown` on request.
 
-`register` collects contributions. `initialize` runs only after every registration succeeded, in topological order. `run` means the result is readable. There is no tick loop inside the host. Demo runners live outside the Foundations and call payloads themselves.
+`register` collects contributions. A module may `keep` one composition-local value there. `initialize` runs only after every registration succeeded, in topological order. `run` means the result is readable. There is no tick loop inside the host. Demo runners live outside the Foundations. Subscriber, pipeline, and service slots execute only when a caller uses `publish`, `runPipeline`, or `callService` (ADR 0004, ADR 0006). Save slices are captured and restored by the caller (ADR 0005). `shutdown()` quiesces the result; later dispatch and save calls refuse.
 
 If `initialize` throws, modules whose `register` completed are shut down in reverse registration order, except the module that threw. Contributions are discarded. `shutdown()` on a live result runs once, in reverse initialization order.
 

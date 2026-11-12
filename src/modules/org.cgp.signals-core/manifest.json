@@ -1,0 +1,29 @@
+{
+  "moduleId": "org.cgp.signals-core",
+  "name": "Signals Core",
+  "description": "Owns a subscriber slot and a pipeline slot. It does not decide what a pulse means.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "signals.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "signals.listeners",
+      "contract": "signals.listener",
+      "contractVersion": "1.0.0",
+      "kind": "subscriber",
+      "description": "Handlers called, in order, when a caller publishes one event.",
+      "required": false
+    },
+    {
+      "slotId": "signals.pipe",
+      "contract": "signals.pipe",
+      "contractVersion": "1.0.0",
+      "kind": "pipeline",
+      "description": "Stages that fold one value. The first failure stops the fold.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}

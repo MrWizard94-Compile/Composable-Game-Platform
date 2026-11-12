@@ -1,4 +1,5 @@
 import { contributionsFor, type CompositionResult } from "../foundations/host.ts";
+import { publish, runPipeline, callService, type PipelineReport, type PublishReport, type ServiceReport } from "../foundations/dispatch.ts";
 
 export const SEASONS = ["spring", "summer", "autumn", "winter"] as const;
 export type Season = (typeof SEASONS)[number];
@@ -140,4 +141,30 @@ export function readLighting(result: CompositionResult): LightingRead {
   }
   const total = sources.reduce((sum, source) => sum + source.intensity, 0);
   return { ok: true, sources, total };
+}
+
+export type PulseView = {
+  heard: string[];
+  report: PublishReport;
+};
+
+/** Demo runner. The host fans the event out; this only builds the pulse object. */
+export function dispatchPulse(result: CompositionResult): PulseView {
+  const heard: string[] = [];
+  const report = publish(result, "signals.listeners", { heard });
+  return { heard: [...heard], report };
+}
+
+export type PipeView = PipelineReport & { input: number };
+
+/** Demo runner. The host folds the number; this only chooses the slot. */
+export function foldPipe(result: CompositionResult, input: number): PipeView {
+  return { input, ...runPipeline(result, "signals.pipe", input) };
+}
+
+export type QueryView = { question: string; report: ServiceReport };
+
+/** Demo runner. The host calls the one service provider; this only chooses the slot. */
+export function askQuery(result: CompositionResult, question: string): QueryView {
+  return { question, report: callService(result, "queries.ask", question) };
 }

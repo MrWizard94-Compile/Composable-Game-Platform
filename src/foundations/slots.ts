@@ -11,16 +11,19 @@ export type SlotKind = (typeof SLOT_KINDS)[number];
 
 /**
  * Resolution rules are part of the slot type. None of them pick a winner silently.
- * Subscriber and pipeline contributions are stored and ordered; this milestone
- * does not dispatch an event bus or run a frame loop.
+ * Subscriber and pipeline slots store contributions in order. They run only when
+ * a caller uses publish() or runPipeline(). There is still no frame loop.
  */
 export const SLOT_KIND_SUMMARY: Record<SlotKind, string> = {
   singleton: "Exactly one provider. Two or more is a conflict. The host does not choose.",
   policy: "A replaceable rule set. Same cardinality as a singleton: one provider, or it is refused.",
   registry: "Any number of contributions. Order is (order, module id, contribution id).",
-  pipeline: "Every contribution is kept. Order is (order, module id, contribution id). Equal order is a tie-break, not a conflict.",
-  subscriber: "Every contribution is kept, in registry order. No event fan-out is executed in this milestone.",
-  service: "Zero or one provider. More than one is ambiguous and refused. There is no default pick.",
+  pipeline:
+    "Every contribution is kept, in (order, module id, contribution id). runPipeline folds a value through each handle and stops at the first failure.",
+  subscriber:
+    "Every contribution is kept, in the same order. publish fans one event out to each handle. A throw does not stop the rest. Nothing runs until a caller asks.",
+  service:
+    "Zero or one provider. More than one is ambiguous and refused. callService invokes the one provider and returns its value, including undefined.",
 };
 
 export function isSlotKind(value: unknown): value is SlotKind {

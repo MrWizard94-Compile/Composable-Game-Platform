@@ -16,11 +16,13 @@ Slot kinds and their refusal rules:
 |---|---|
 | singleton, policy | One provider. More than one is a conflict. Nobody is activated. |
 | service | One provider. More than one is ambiguous. Nobody is activated. |
-| registry, pipeline, subscriber | Many providers. Order is `(order, module id, contribution id)`. |
+| registry | Many providers. Order is `(order, module id, contribution id)`. Stored only. |
+| pipeline | Many providers, same order. `runPipeline` folds a value and stops at the first failure. |
+| subscriber | Many providers, same order. `publish` fans one event out. A throw does not stop the rest. |
 
 Connections name a slot and a contract reference (`contract.id/1` or an exact version). The contract id and major must match the owner's declaration. A module cannot connect to a slot it owns.
 
-Dependencies are capabilities, not package names, unless `moduleId` is set. Optional requirements warn and continue. Cycles fail the composition. Nesting deeper than 8 fails the composition.
+Dependencies are capabilities, not package names, unless `moduleId` is set. Optional requirements warn and continue when nobody provides them. Two or more matching providers are ambiguous, optional or not, and the host does not pick one. A `moduleId` pin selects that provider. Cycles fail the composition. Nesting deeper than 8 fails the composition.
 
 Invalid manifests are isolated. A valid neighbor can still activate. A conflict, cycle, bad contract, or thrown `initialize` refuses the admitted graph: nothing remains registered.
 

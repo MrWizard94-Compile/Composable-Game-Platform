@@ -1,0 +1,9 @@
+{
+  "profileId": "org.cgp.two-providers",
+  "name": "Two providers",
+  "modules": [
+    { "moduleId": "org.cgp.marker-left", "version": "1.0.0" },
+    { "moduleId": "org.cgp.marker-right", "version": "1.0.0" },
+    { "moduleId": "org.cgp.marker-use", "version": "1.0.0" }
+  ]
+}

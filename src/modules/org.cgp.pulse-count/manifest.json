@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.pulse-count",
+  "name": "Pulse Count",
+  "description": "Counts published pulses and owns that number as a save slice. The host does not interpret the count.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "signals.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "signals.listeners", "contract": "signals.listener/1" }],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "Not yet licensed"
+}
