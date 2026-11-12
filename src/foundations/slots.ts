@@ -30,7 +30,21 @@ export function isSlotKind(value: unknown): value is SlotKind {
   return typeof value === "string" && (SLOT_KINDS as readonly string[]).includes(value);
 }
 
+const CALLABLE: ReadonlySet<SlotKind> = new Set(["subscriber", "pipeline", "service"]);
 const EXCLUSIVE: ReadonlySet<SlotKind> = new Set(["singleton", "policy", "service"]);
+
+export function slotRequiresCallable(kind: SlotKind): boolean {
+  return CALLABLE.has(kind);
+}
+
+/** A dispatch payload is a function, or an object whose `handle` is a function. */
+export function isCallablePayload(payload: unknown): boolean {
+  if (typeof payload === "function") return true;
+  if (payload && typeof payload === "object" && "handle" in payload) {
+    return typeof (payload as { handle?: unknown }).handle === "function";
+  }
+  return false;
+}
 
 export function isExclusiveSlot(kind: SlotKind): boolean {
   return EXCLUSIVE.has(kind);

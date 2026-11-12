@@ -277,7 +277,7 @@ describe("composition", () => {
       }),
       {
         register(ctx) {
-          ctx.contribute("example.pipe", { id: "late", order: 10, payload: { n: 10 } });
+          ctx.contribute("example.pipe", { id: "late", order: 10, payload: (value: unknown) => value });
         },
       },
     );
@@ -287,7 +287,7 @@ describe("composition", () => {
       }),
       {
         register(ctx) {
-          ctx.contribute("example.pipe", { id: "early", order: 2, payload: { n: 2 } });
+          ctx.contribute("example.pipe", { id: "early", order: 2, payload: (value: unknown) => value });
         },
       },
     );
@@ -297,7 +297,7 @@ describe("composition", () => {
       }),
       {
         register(ctx) {
-          ctx.contribute("example.pipe", { id: "bee", order: 2, payload: { n: 2 } });
+          ctx.contribute("example.pipe", { id: "bee", order: 2, payload: (value: unknown) => value });
         },
       },
     );
@@ -309,6 +309,123 @@ describe("composition", () => {
       ["early", "bee", "late"],
     );
     assert.equal(forward.fingerprint, reverse.fingerprint);
+    assert.match(forward.fingerprint, /org\.example\.early@1\.0\.0/);
+    assert.match(forward.fingerprint, /example\.pipe:early@org\.example\.early#2/);
+  });
+
+  it("changes the fingerprint when a version or a contribution order changes", () => {
+    const base = compose([pkg(moduleManifest("org.example.one"))]);
+    const bumped = compose([pkg(moduleManifest("org.example.one", { version: "1.0.1" }))]);
+    assert.notEqual(base.fingerprint, bumped.fingerprint);
+    assert.match(base.fingerprint, /org\.example\.one@1\.0\.0/);
+    assert.match(bumped.fingerprint, /org\.example\.one@1\.0\.1/);
+
+    const owner = pkg(
+      moduleManifest("org.example.owner", {
+        exposesSlots: [
+          {
+            slotId: "example.pipe",
+            contract: "example.pipe",
+            contractVersion: "1.0.0",
+            kind: "pipeline",
+          },
+        ],
+      }),
+    );
+    const stage = (order: number) =>
+      pkg(
+        moduleManifest("org.example.stage", {
+          connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+        }),
+        {
+          register(ctx) {
+            ctx.contribute("example.pipe", { id: "stage", order, payload: (value: unknown) => value });
+          },
+        },
+      );
+    assert.notEqual(compose([owner, stage(1)]).fingerprint, compose([owner, stage(2)]).fingerprint);
+  });
+
+  it("refuses a service payload that is not callable and still shuts the parent down", () => {
+    const events: string[] = [];
+    const parent = pkg(
+      moduleManifest("org.example.parent", {
+        connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.answer",
+            contractVersion: "1.0.0",
+            kind: "service",
+          },
+        ],
+      }),
+      {
+        register(ctx) {
+          events.push("register:parent");
+          ctx.contribute("platform.systems", { id: "parent", payload: { role: "parent" } });
+        },
+        shutdown() {
+          events.push("shutdown:parent");
+        },
+      },
+    );
+    const child = pkg(
+      moduleManifest("org.example.child", {
+        requires: [{ capability: "example.core", version: "^1.0.0", optional: true }],
+        connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+      }),
+      {
+        register(ctx) {
+          events.push("register:child");
+          ctx.contribute("example.ask", { id: "child", payload: { note: true } });
+        },
+        shutdown() {
+          events.push("shutdown:child");
+        },
+      },
+    );
+    const result = compose([
+      pkg(
+        moduleManifest("org.example.parent", {
+          provides: [{ capability: "example.core", version: "1.0.0" }],
+          connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
+          exposesSlots: [
+            {
+              slotId: "example.ask",
+              contract: "example.answer",
+              contractVersion: "1.0.0",
+              kind: "service",
+            },
+          ],
+        }),
+        parent.implementation,
+      ),
+      child,
+    ]);
+    assert.equal(result.runtimeActive, false);
+    assert.equal(result.contributions.length, 0);
+    assert.ok(result.diagnostics.some((item) => item.code === "slot.contract"));
+    assert.deepEqual(events, ["register:parent", "register:child", "shutdown:child", "shutdown:parent"]);
+  });
+
+  it("runs trusted in-process code and refuses any other execution trust", () => {
+    let called = false;
+    const pack = pkg(moduleManifest("org.example.plain"), {
+      register() {
+        called = true;
+      },
+    });
+    const refused = compose([pack], { trust: "sandbox" });
+    assert.equal(called, false);
+    assert.equal(refused.trust, "unsupported");
+    assert.equal(refused.runtimeActive, false);
+    assert.ok(refused.diagnostics.some((item) => item.code === "trust.unsupported"));
+
+    const live = compose([pack]);
+    assert.equal(called, true);
+    assert.equal(live.trust, "trusted-in-process");
+    assert.equal(live.runtimeActive, true);
   });
 
   it("keeps every subscriber", () => {
@@ -331,7 +448,7 @@ describe("composition", () => {
         }),
         {
           register(ctx) {
-            ctx.contribute("example.events", { id: id.split(".").at(-1) ?? id, payload: { id } });
+            ctx.contribute("example.events", { id: id.split(".").at(-1) ?? id, payload: () => id });
           },
         },
       );
@@ -539,7 +656,7 @@ describe("composition", () => {
     );
   });
 
-  it("rolls back when initialize throws and shuts down in reverse registration order", () => {
+  it("rolls back when initialize throws and shuts down only modules that entered initialize", () => {
     const events: string[] = [];
     const make = (id: string, boom = false): ModulePackage =>
       pkg(
@@ -574,7 +691,36 @@ describe("composition", () => {
       "register:org.example.later",
       "init:org.example.alpha",
       "init:org.example.boom",
-      "shutdown:org.example.later",
+      "shutdown:org.example.boom",
+      "shutdown:org.example.alpha",
+    ]);
+  });
+
+  it("shuts down a module whose register threw, and not one that never started", () => {
+    const events: string[] = [];
+    const make = (id: string, boom = false): ModulePackage =>
+      pkg(
+        moduleManifest(id, {
+          connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
+        }),
+        {
+          register(ctx) {
+            events.push(`register:${id}`);
+            if (boom) throw new Error("register boom");
+            ctx.contribute("platform.systems", { id: id.split(".").at(-1) ?? id, payload: { id } });
+          },
+          shutdown() {
+            events.push(`shutdown:${id}`);
+          },
+        },
+      );
+    const result = compose([make("org.example.later"), make("org.example.boom", true), make("org.example.alpha")]);
+    assert.equal(result.runtimeActive, false);
+    assert.equal(result.contributions.length, 0);
+    assert.deepEqual(events, [
+      "register:org.example.alpha",
+      "register:org.example.boom",
+      "shutdown:org.example.boom",
       "shutdown:org.example.alpha",
     ]);
   });

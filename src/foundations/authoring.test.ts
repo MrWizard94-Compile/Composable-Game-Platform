@@ -3,8 +3,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { compose, contributionsFor, type ModuleImplementation } from "./host.ts";
-import { validateManifest } from "./manifest.ts";
+import {
+  compose,
+  contributionsFor,
+  isCallablePayload,
+  slotRequiresCallable,
+  validateManifest,
+  type ModuleImplementation,
+} from "./index.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const folder = join(root, "examples/starter-module");
@@ -45,5 +51,15 @@ describe("starter module", () => {
     const result = compose([{ manifest: wrong }]);
     assert.equal(result.runtimeActive, false);
     assert.ok(result.diagnostics.some((item) => item.code === "slot.contract-mismatch"));
+  });
+
+  it("exports the slot payload contract from the public barrel", () => {
+    assert.equal(slotRequiresCallable("service"), true);
+    assert.equal(slotRequiresCallable("pipeline"), true);
+    assert.equal(slotRequiresCallable("subscriber"), true);
+    assert.equal(slotRequiresCallable("registry"), false);
+    assert.equal(isCallablePayload(() => 1), true);
+    assert.equal(isCallablePayload({ handle() {} }), true);
+    assert.equal(isCallablePayload({ note: true }), false);
   });
 });

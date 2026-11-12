@@ -3,7 +3,7 @@ import { indicted } from "./diagnostics.ts";
 import type { ModuleManifest, SlotExposeDecl } from "./manifest.ts";
 import { validateManifest } from "./manifest.ts";
 import { contractRefMatches, parseContractRef, satisfies } from "./semver.ts";
-import { isExclusiveSlot } from "./slots.ts";
+import { isCallablePayload, isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
 import type { SlotKind } from "./slots.ts";
 
 /** Foundations API this host implements. Modules declare a range that must admit it. */
@@ -11,6 +11,11 @@ export const FOUNDATIONS_API = "1.0.0";
 
 /** Nested slot depth beyond this is refused. Foundations themselves are depth 0. */
 export const MAX_SLOT_DEPTH = 8;
+
+/** The only execution mode this host implements. Other values are refused before module code runs. */
+export const EXECUTION_TRUST = "trusted-in-process" as const;
+
+export type ExecutionTrust = typeof EXECUTION_TRUST;
 
 const CONTRIBUTION_ID_RE = /^[a-z][a-z0-9-]{0,64}$/;
 
@@ -67,6 +72,11 @@ export type ModulePackage = {
 export type ComposeOptions = {
   profileName?: string;
   maxDepth?: number;
+  /**
+   * Execution mode. Omitted means trusted in-process code.
+   * Any other string refuses the composition before a module function runs.
+   */
+  trust?: string;
 };
 
 export type ModuleStatus = "active" | "rejected" | "blocked";
@@ -129,6 +139,8 @@ export type ShutdownReport = {
 export type CompositionResult = {
   profileName: string;
   foundationsApi: string;
+  /** `trusted-in-process` when modules were allowed to run. `unsupported` when the requested mode is not implemented. */
+  trust: ExecutionTrust | "unsupported";
   /** True only when the runtime is active and every selected package was clean. */
   ok: boolean;
   /** True when the admitted graph was registered and initialized. An empty graph counts. */
@@ -174,15 +186,30 @@ function phase(phaseName: PhaseRecord["phase"], status: PhaseRecord["status"], d
   return { phase: phaseName, status, detail };
 }
 
-function fingerprintOf(order: string[], slots: ResolvedSlot[]): string {
+function fingerprintOf(
+  order: string[],
+  modules: ResolvedModule[],
+  slots: ResolvedSlot[],
+  dependencies: ResolvedDependency[],
+  contributions: ContributionRecord[],
+): string {
+  const versionOf = new Map(modules.map((item) => [item.moduleId, item.version]));
+  const mods = order.map((id) => `${id}@${versionOf.get(id) ?? "unknown"}`).join(">");
   const slotPart = [...slots]
     .sort((a, b) => cmp(a.slotId, b.slotId))
     .map((slot) => {
       const who = (slot.status === "ok" ? slot.contributors : slot.contestedBy).join("+");
-      return `${slot.slotId}[${slot.status}]=${who}`;
+      return `${slot.slotId}@${slot.ownerId}:${slot.contract}/${slot.contractVersion}[${slot.status}]=${who}`;
     })
     .join(";");
-  return `${order.join(">")}::${slotPart}`;
+  const deps = dependencies
+    .map((link) => `${link.dependentId}<${link.kind}:${link.ref}<${link.providerId}`)
+    .join(";");
+  const contribs = [...contributions]
+    .sort(contributionSort)
+    .map((item) => `${item.slotId}:${item.id}@${item.moduleId}#${item.order}`)
+    .join(";");
+  return `m:${mods}|s:${slotPart}|d:${deps}|c:${contribs}`;
 }
 
 function errorDiagnostic(
@@ -280,6 +307,41 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   const diagnostics: Diagnostic[] = [];
   const phases: PhaseRecord[] = [];
   const trace: string[] = [];
+  const trustRequest = options.trust ?? EXECUTION_TRUST;
+
+  if (trustRequest !== EXECUTION_TRUST) {
+    diagnostics.push(
+      errorDiagnostic(
+        "trust.unsupported",
+        `Execution trust "${trustRequest}" is not implemented. This host only runs "${EXECUTION_TRUST}".`,
+        { phase: "prepare" },
+      ),
+    );
+    phases.push(phase("discover", "skipped", "No packages were opened."));
+    phases.push(phase("validate", "skipped", "Skipped because the execution trust is not implemented."));
+    phases.push(phase("resolve", "skipped", "Skipped because the execution trust is not implemented."));
+    phases.push(phase("prepare", "failed", `Refused trust "${trustRequest}".`));
+    phases.push(phase("register", "skipped", "Skipped because the execution trust is not implemented."));
+    phases.push(phase("initialize", "skipped", "Skipped because the execution trust is not implemented."));
+    phases.push(phase("run", "skipped", "Skipped because the execution trust is not implemented."));
+    return assemble({
+      profileName,
+      trust: "unsupported",
+      runtimeActive: false,
+      phases,
+      diagnostics,
+      working: [],
+      slots: [],
+      order: [],
+      dependencies: [],
+      contributions: [],
+      trace,
+      shutdown: noopShutdown,
+      guilty: new Set(),
+    });
+  }
+
+  const trust: ExecutionTrust = EXECUTION_TRUST;
 
   phases.push(
     phase("discover", "completed", `Discovered ${packages.length} package${packages.length === 1 ? "" : "s"}.`),
@@ -684,6 +746,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     phases.push(phase("run", "skipped", reason));
     return assemble({
       profileName,
+      trust,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -719,7 +782,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   }
 
   const records: ContributionRecord[] = [];
-  const registered: string[] = [];
+  const enteredRegister: string[] = [];
   const keptByModule = new Map<string, unknown>();
   let registerFailed = false;
   const life = (moduleId: string): LifecycleContext => ({
@@ -728,31 +791,29 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     kept: () => keptByModule.get(moduleId),
   });
 
-  const rollbackRegistered = (fromPhase: "register" | "initialize" | "shutdown") => {
-    const shutdownDiagnostics: Diagnostic[] = [];
-    const orderShutdown = [...registered].reverse();
-    for (const moduleId of orderShutdown) {
+  const shutdownEntered = (ids: readonly string[], fromPhase: "register" | "initialize") => {
+    for (const moduleId of [...ids].reverse()) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
       try {
         entry?.implementation?.shutdown?.(life(moduleId));
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : String(caught);
-        const diagnostic = errorDiagnostic(
-          "lifecycle.exception",
-          `Shutdown of "${moduleId}" failed during rollback: ${message}`,
-          { phase: fromPhase, moduleId },
+        diagnostics.push(
+          errorDiagnostic(
+            "lifecycle.exception",
+            `Shutdown of "${moduleId}" failed during rollback: ${message}`,
+            { phase: fromPhase, moduleId },
+          ),
         );
-        diagnostics.push(diagnostic);
-        shutdownDiagnostics.push(diagnostic);
       }
     }
-    return shutdownDiagnostics;
   };
 
   for (const moduleId of order) {
     const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
     if (!entry) continue;
+    enteredRegister.push(moduleId);
     const before = records.length;
     const localErrors = diagnostics.length;
     try {
@@ -789,7 +850,10 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     for (const slotId of declaredConnections.get(moduleId) ?? []) {
       const produced = mine.filter((item) => item.slotId === slotId);
       const kind = slotDecl.get(slotId)?.kind;
-      if (produced.length === 0) {
+      const refusedShape = diagnostics
+        .slice(localErrors)
+        .some((item) => item.code === "slot.contract" && item.slotId === slotId && item.moduleId === moduleId);
+      if (produced.length === 0 && !refusedShape) {
         diagnostics.push(
           errorDiagnostic(
             "slot.empty-connection",
@@ -813,7 +877,6 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       records.splice(before);
       break;
     }
-    registered.push(moduleId);
   }
 
   if (!registerFailed) {
@@ -835,7 +898,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   }
 
   if (registerFailed) {
-    rollbackRegistered("register");
+    shutdownEntered(enteredRegister, "register");
     records.splice(0, records.length);
     phases.push(phase("register", "failed", "Registration failed. Registered modules were shut down and contributions discarded."));
     phases.push(phase("initialize", "skipped", "Skipped because registration failed."));
@@ -847,6 +910,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     }
     return assemble({
       profileName,
+      trust,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -885,33 +949,17 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         }),
       );
       guilty.add(moduleId);
-      const shutdownOrder = [...registered].filter((id) => id !== moduleId).reverse();
-      for (const prior of shutdownOrder) {
-        const priorEntry = admitted.find((item) => item.manifest.moduleId === prior);
-        trace.push(`${prior}:shutdown`);
-        try {
-          priorEntry?.implementation?.shutdown?.(life(prior));
-        } catch (shutdownError) {
-          const shutdownMessage =
-            shutdownError instanceof Error ? shutdownError.message : String(shutdownError);
-          diagnostics.push(
-            errorDiagnostic(
-              "lifecycle.exception",
-              `Shutdown of "${prior}" failed during rollback: ${shutdownMessage}`,
-              { phase: "shutdown", moduleId: prior },
-            ),
-          );
-        }
-      }
+      shutdownEntered([...initialized, moduleId], "initialize");
       break;
     }
   }
 
   if (initFailed) {
-    phases.push(phase("initialize", "failed", "Initialization failed. Earlier modules were shut down. No contributions remain registered."));
+    phases.push(phase("initialize", "failed", "Initialization failed. Modules that had entered initialize were shut down. No contributions remain registered."));
     phases.push(phase("run", "skipped", "Skipped because initialization failed."));
     return assemble({
       profileName,
+      trust,
       runtimeActive: false,
       phases,
       diagnostics,
@@ -967,6 +1015,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
 
   built = assemble({
     profileName,
+    trust,
     runtimeActive: true,
     phases,
     diagnostics,
@@ -1046,6 +1095,17 @@ function acceptContribution(
     );
     return;
   }
+  const kind = slotDecl.get(slotId)?.kind;
+  if (kind && slotRequiresCallable(kind) && !isCallablePayload(contribution.payload)) {
+    diagnostics.push(
+      errorDiagnostic(
+        "slot.contract",
+        `Contribution "${contribution.id}" into ${kind} slot "${slotId}" must be a function, or an object with a handle function.`,
+        { phase: "register", moduleId, slotId },
+      ),
+    );
+    return;
+  }
   records.push({
     slotId,
     moduleId,
@@ -1098,6 +1158,7 @@ function owned(
 
 function assemble(input: {
   profileName: string;
+  trust: ExecutionTrust | "unsupported";
   runtimeActive: boolean;
   phases: PhaseRecord[];
   diagnostics: Diagnostic[];
@@ -1139,6 +1200,7 @@ function assemble(input: {
   return {
     profileName: input.profileName,
     foundationsApi: FOUNDATIONS_API,
+    trust: input.trust,
     ok: input.runtimeActive && clean,
     runtimeActive: input.runtimeActive,
     quiesced: false,
@@ -1148,7 +1210,7 @@ function assemble(input: {
     slots: input.slots,
     order: input.order,
     dependencies: input.dependencies,
-    fingerprint: fingerprintOf(input.order, input.slots),
+    fingerprint: fingerprintOf(input.order, modules, input.slots, input.dependencies, input.contributions),
     contributions: input.runtimeActive ? input.contributions : [],
     trace: input.trace,
     shutdown: input.shutdown,

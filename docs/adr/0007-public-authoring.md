@@ -4,7 +4,9 @@
 
 ## Decision
 
-`src/foundations/index.ts` is the only import a module author should use. The other Foundations files are internal.
+`src/foundations/index.ts` is the only import a module author should use. The package export `"."` points at that file. The other Foundations files are internal.
+
+The barrel includes composition, dispatch, save, manifest checks, profiles, and the slot payload contract (`isCallablePayload`, `slotRequiresCallable`). `compose({ trust })` accepts only `trusted-in-process`.
 
 `examples/starter-module` is a copyable package. It is not part of the proof composition and it is not discovered with the packaged modules. `validateManifest` accepts its manifest. `compose` loads it when a caller passes the package.
 

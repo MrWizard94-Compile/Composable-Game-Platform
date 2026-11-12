@@ -60,4 +60,4 @@ The browser console is a viewer. It calls the same `compose()` function. It is n
 
 ## Honest limits
 
-Modules are trusted in-process code. Permissions are not enforced. Nothing here is sandboxed, replicated, or hot-reloaded. A save is JSON a module exports. See [docs/STATUS.md](docs/STATUS.md).
+Modules run only as `trusted-in-process` code. Asking for any other execution trust refuses the composition before module code runs. Permissions are not enforced. Nothing here is sandboxed, replicated, or hot-reloaded. A save is JSON a module exports. The composition fingerprint includes module versions, slot contracts, and contribution order. See [docs/STATUS.md](docs/STATUS.md).

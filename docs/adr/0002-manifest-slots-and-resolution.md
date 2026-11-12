@@ -20,7 +20,7 @@ Slot kinds and their refusal rules:
 | pipeline | Many providers, same order. `runPipeline` folds a value and stops at the first failure. |
 | subscriber | Many providers, same order. `publish` fans one event out. A throw does not stop the rest. |
 
-Connections name a slot and a contract reference (`contract.id/1` or an exact version). The contract id and major must match the owner's declaration. A module cannot connect to a slot it owns.
+Connections name a slot and a contract reference (`contract.id/1` or an exact version). The contract id and major must match the owner's declaration. A module cannot connect to a slot it owns. A subscriber, pipeline, or service contribution must be a function, or an object whose `handle` is a function. That check happens at registration. A registry, singleton, or policy payload is not inspected.
 
 Dependencies are capabilities, not package names, unless `moduleId` is set. A module lists each capability once. A second entry is a manifest error, and that package is isolated. Optional requirements warn and continue when nobody provides them. Two or more matching providers are ambiguous, optional or not, and the host does not pick one. A `moduleId` pin selects that provider. Cycles fail the composition. Nesting deeper than 8 fails the composition.
 

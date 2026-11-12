@@ -1,6 +1,6 @@
 # Status
 
-Milestone 1 through save identity. Working, not a game.
+Milestone 1 through an explicit trust gate. Working, not a game.
 
 ## Implemented
 
@@ -10,10 +10,12 @@ Milestone 1 through save identity. Working, not a game.
 - Slots: singleton, policy, registry, pipeline, subscriber, service.
 - Module-owned slots. A child package connects without changing the parent or the host.
 - Cycle detection, depth limit 8, deterministic order, conflict and ambiguity refusal.
-- Transactional failure: bad manifests are isolated; graph failures and init exceptions roll back.
-- Headless demo and the browser console over one `compose()` function.
+- Transactional failure: bad manifests are isolated; graph failures and init exceptions roll back. Shutdown on rollback includes the module that failed, and skips any module that had not entered that phase.
+- Headless demo and the browser console over one `compose()` function. The public entry is `src/foundations/index.ts`, also the package export `"."`.
+- Caller-initiated dispatch. `publish` fans one event through a subscriber slot and keeps going after a throw. `runPipeline` folds a value through a pipeline slot and stops at the first failure. `callService` invokes the one provider of a service slot and returns its value. A contribution to those three kinds must already be callable or registration fails. None of these is a tick.
+- Composition fingerprints name module versions, slot contracts, dependency edges, and contribution order. Package order does not change the fingerprint. A different version or contribution order does.
+- Execution trust. The only implemented mode is `trusted-in-process`. Any other requested mode refuses the composition before module code runs. Permissions are still not a sandbox.
 - Flora proof (species registry + one growth policy) and Lighting proof (source registry) on the same platform slot.
-- Caller-initiated dispatch. `publish` fans one event through a subscriber slot and keeps going after a throw. `runPipeline` folds a value through a pipeline slot and stops at the first failure. `callService` invokes the one provider of a service slot and returns its value. None of these is a tick.
 - Module-owned save slices. The host stores JSON a module exports and restores a slice only when the major version matches. Two slices for one module are refused. A different profile name or fingerprint warns, and slices are still matched by module id. Object keys in a slice are sorted. Array order is kept. `shutdown()` quiesces the runtime, and dispatch and save then refuse.
 - A public entry, `src/foundations/index.ts`, and a copyable starter module. `validateManifest` checks a manifest that has no implementation yet. The console uses that same function. It does not load code.
 - Composition profiles. A JSON document pins module ids and exact versions. A missing module or a different packaged version refuses the selection. The host does not upgrade.
@@ -32,7 +34,7 @@ Milestone 1 through save identity. Working, not a game.
 
 - Manifest field names and the six slot kinds.
 - Foundations API `1.0.0` and max depth 8.
-- In-process trusted modules as the only execution mode.
-- Contract compatibility is major-version equality, or exact equality when the connection names a full version.
+- Contract compatibility is major-version equality, or exact equality when the connection names a full version. Subscriber, pipeline, and service payloads must be callable at registration. Registry, singleton, and policy payloads are not inspected.
+- The only execution mode is `trusted-in-process`. A permission list is not a boundary.
 - A dispatchable payload is a function, or an object with a `handle` function. A service may return `undefined`. A pipeline stage may not.
 - A save payload is whatever JSON the module returns. Same major means compatible. `importState` is the only migration.

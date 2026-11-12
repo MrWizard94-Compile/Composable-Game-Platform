@@ -6,12 +6,12 @@ The browser console can check a manifest. It does not load an implementation. Lo
 
 ## Public entry
 
-Import from `src/foundations/index.ts` only. Other files under `src/foundations` are internal and can change.
+Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` runs `trusted-in-process` unless you pass `trust`. Any other mode is refused before your functions run.
 
 | Export | Use |
 |---|---|
 | `validateManifest` | Check one manifest before you compose. |
-| `compose` | Load packages. One function for the console and the headless host. |
+| `compose` | Load packages. Pass `{ trust: "trusted-in-process" }` or omit it. |
 | `contributionsFor` | Read a slot. The host does not interpret payloads. |
 | `publish`, `runPipeline`, `callService` | Caller-initiated execution. There is no tick. |
 | `captureSave`, `restoreSave` | JSON a module exports. Same major version only. |

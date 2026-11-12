@@ -1,5 +1,6 @@
 import type { CompositionResult, ContributionRecord } from "./host.ts";
 import { contributionsFor } from "./host.ts";
+import { isCallablePayload } from "./slots.ts";
 
 /**
  * Caller-initiated execution for three slot kinds.
@@ -67,12 +68,9 @@ export type ServiceReport = {
 const NOT_CALLABLE = Symbol("not-callable");
 
 function callHandler(payload: unknown, arg: unknown): unknown | typeof NOT_CALLABLE {
+  if (!isCallablePayload(payload)) return NOT_CALLABLE;
   if (typeof payload === "function") return payload(arg);
-  if (payload && typeof payload === "object" && "handle" in payload) {
-    const handle = (payload as { handle?: unknown }).handle;
-    if (typeof handle === "function") return handle(arg);
-  }
-  return NOT_CALLABLE;
+  return (payload as { handle: (input: unknown) => unknown }).handle(arg);
 }
 
 function thrownMessage(error: unknown): string {

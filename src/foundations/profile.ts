@@ -174,6 +174,7 @@ export function unresolvedProfile(profileName: string, errors: readonly Diagnost
   return {
     profileName,
     foundationsApi: FOUNDATIONS_API,
+    trust: "trusted-in-process",
     ok: false,
     runtimeActive: false,
     quiesced: false,

@@ -97,17 +97,7 @@ describe("publish", () => {
         },
       },
     );
-    const inert = pkg(
-      moduleManifest("org.example.inert", {
-        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
-      }),
-      {
-        register(ctx) {
-          ctx.contribute("example.listeners", { id: "inert", order: 4, payload: { note: "no function" } });
-        },
-      },
-    );
-    const result = compose([inert, owner, late, boom, early]);
+    const result = compose([owner, late, boom, early]);
     const report = publish(result, "example.listeners", { n: 7 });
     assert.equal(report.ok, false);
     assert.deepEqual(heard, ["early:7", "late"]);
@@ -117,7 +107,6 @@ describe("publish", () => {
         ["early", true, ""],
         ["boom", false, "dispatch.threw"],
         ["late", true, ""],
-        ["inert", false, "dispatch.not-callable"],
       ],
     );
     assert.equal(report.deliveries[1]?.message, "listener refused");
@@ -280,9 +269,9 @@ describe("runPipeline", () => {
     assert.equal(blank.output, "seed");
     assert.equal(blank.stages.at(-1)?.code, "dispatch.undefined");
 
-    const inert = runPipeline(compose([owner, keep("inert", 1, { note: true })]), "example.pipe", 1);
-    assert.equal(inert.output, 1);
-    assert.equal(inert.stages[0]?.code, "dispatch.not-callable");
+    const inert = compose([owner, keep("inert", 1, { note: true })]);
+    assert.equal(inert.runtimeActive, false);
+    assert.ok(inert.diagnostics.some((item) => item.code === "slot.contract"));
   });
 
   it("refuses a subscriber slot", () => {
@@ -356,9 +345,10 @@ describe("callService", () => {
     assert.equal(thrown.code, "dispatch.threw");
     assert.equal(thrown.output, undefined);
 
-    const inert = callService(compose([desk, provider("org.example.inert", { note: true })]), "example.ask", 1);
-    assert.equal(inert.ok, false);
-    assert.equal(inert.code, "dispatch.not-callable");
+    const inert = compose([desk, provider("org.example.inert", { note: true })]);
+    assert.equal(inert.runtimeActive, false);
+    assert.ok(inert.diagnostics.some((item) => item.code === "slot.contract"));
+    assert.equal(callService(inert, "example.ask", 1).reason, "Runtime is not active.");
   });
 
   it("refuses an empty slot, the wrong kind, and a shut-down runtime", () => {
