@@ -26,7 +26,7 @@ Dependencies are capabilities, not package names, unless `moduleId` is set. Opti
 
 Invalid manifests are isolated. A valid neighbor can still activate. A conflict, cycle, bad contract, or thrown `initialize` refuses the admitted graph: nothing remains registered.
 
-Resolution order is a topological sort. Ties break by module id, byte order, not by input order.
+Resolution order is a topological sort. Ties break by module id, byte order, not by input order. Each reason for that order is kept: the provider, the dependent, and whether the edge is a capability or a module-owned slot. An ambiguous or missing requirement adds no edge. The host does not guess one.
 
 ## Consequences
 

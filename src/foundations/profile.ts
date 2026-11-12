@@ -188,6 +188,7 @@ export function unresolvedProfile(profileName: string, errors: readonly Diagnost
     modules: [],
     slots: [],
     order: [],
+    dependencies: [],
     fingerprint: "unresolved",
     contributions: [],
     trace: [],

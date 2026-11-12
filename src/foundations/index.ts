@@ -16,6 +16,7 @@ export type {
   ModulePackage,
   ModuleStatus,
   RegisterContext,
+  ResolvedDependency,
   ResolvedModule,
   ResolvedSlot,
   ShutdownReport,

@@ -112,6 +112,14 @@ export type ResolvedSlot = {
   contestedBy: string[];
 };
 
+/** One reason a module is ordered after another. An ambiguous or missing requirement creates no edge. */
+export type ResolvedDependency = {
+  providerId: string;
+  dependentId: string;
+  kind: "capability" | "slot";
+  ref: string;
+};
+
 export type ShutdownReport = {
   already: boolean;
   order: string[];
@@ -133,6 +141,8 @@ export type CompositionResult = {
   slots: ResolvedSlot[];
   /** Topological order. Proposed even when the runtime did not start, unless a cycle prevented it. */
   order: string[];
+  /** Why that order exists. Present even when the runtime did not start. */
+  dependencies: ResolvedDependency[];
   fingerprint: string;
   /** Populated only while the runtime is active. Discarded on rollback. */
   contributions: ContributionRecord[];
@@ -453,6 +463,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   }
 
   const edges: Array<[string, string]> = [];
+  const links: ResolvedDependency[] = [];
   const admittedIds = admitted.map((entry) => entry.manifest.moduleId);
 
   for (const entry of admitted) {
@@ -512,13 +523,29 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         continue;
       }
       edges.push([provider.moduleId, entry.manifest.moduleId]);
+      links.push({
+        providerId: provider.moduleId,
+        dependentId: entry.manifest.moduleId,
+        kind: "capability",
+        ref: req.capability,
+      });
     }
   }
 
   for (const link of connections) {
     const owner = slotOwner.get(link.slotId);
-    if (owner && owner !== PLATFORM_OWNER) edges.push([owner, link.moduleId]);
+    if (owner && owner !== PLATFORM_OWNER) {
+      edges.push([owner, link.moduleId]);
+      links.push({
+        providerId: owner,
+        dependentId: link.moduleId,
+        kind: "slot",
+        ref: link.slotId,
+      });
+    }
   }
+
+  const dependencies = settleDependencies(links);
 
   const cycle = findCycle(admittedIds, uniqueEdges(edges));
   if (cycle) {
@@ -663,6 +690,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       working,
       slots: resolvedSlots,
       order,
+      dependencies,
       contributions: [],
       trace,
       shutdown: noopShutdown,
@@ -825,6 +853,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       working,
       slots: resolvedSlots,
       order,
+      dependencies,
       contributions: [],
       trace,
       shutdown: noopShutdown,
@@ -889,6 +918,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       working,
       slots: resolvedSlots,
       order,
+      dependencies,
       contributions: [],
       trace,
       shutdown: noopShutdown,
@@ -943,6 +973,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     working,
     slots: resolvedSlots,
     order,
+    dependencies,
     contributions: records,
     trace,
     shutdown,
@@ -1024,6 +1055,25 @@ function acceptContribution(
   });
 }
 
+function settleDependencies(links: ResolvedDependency[]): ResolvedDependency[] {
+  const seen = new Set<string>();
+  const unique: ResolvedDependency[] = [];
+  for (const link of links) {
+    const key = `${link.providerId}\0${link.dependentId}\0${link.kind}\0${link.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(link);
+  }
+  unique.sort(
+    (a, b) =>
+      cmp(a.dependentId, b.dependentId) ||
+      cmp(a.providerId, b.providerId) ||
+      cmp(a.kind, b.kind) ||
+      cmp(a.ref, b.ref),
+  );
+  return unique;
+}
+
 function uniqueEdges(edges: Array<[string, string]>): Array<[string, string]> {
   const seen = new Set<string>();
   const unique: Array<[string, string]> = [];
@@ -1054,6 +1104,7 @@ function assemble(input: {
   working: WorkingModule[];
   slots: ResolvedSlot[];
   order: string[];
+  dependencies: ResolvedDependency[];
   contributions: ContributionRecord[];
   trace: string[];
   shutdown: () => ShutdownReport;
@@ -1096,6 +1147,7 @@ function assemble(input: {
     modules,
     slots: input.slots,
     order: input.order,
+    dependencies: input.dependencies,
     fingerprint: fingerprintOf(input.order, input.slots),
     contributions: input.runtimeActive ? input.contributions : [],
     trace: input.trace,

@@ -196,6 +196,7 @@ describe("composition", () => {
     assert.equal(ambiguous.runtimeActive, false);
     assert.ok(codes(ambiguous).includes("dependency.ambiguous"));
     assert.equal(ambiguous.contributions.length, 0);
+    assert.deepEqual(ambiguous.dependencies, []);
 
     const optional = compose([
       left,
@@ -220,6 +221,14 @@ describe("composition", () => {
     ]);
     assert.equal(pinned.runtimeActive, true);
     assert.ok(pinned.order.indexOf("org.example.left") < pinned.order.indexOf("org.example.use"));
+    assert.deepEqual(pinned.dependencies, [
+      {
+        providerId: "org.example.left",
+        dependentId: "org.example.use",
+        kind: "capability",
+        ref: "example.marker",
+      },
+    ]);
 
     const newer = pkg(
       moduleManifest("org.example.right", {

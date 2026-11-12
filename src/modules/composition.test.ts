@@ -53,6 +53,28 @@ describe("packaged modules", () => {
     assert.equal(forward.order[0], "org.cgp.flora-core");
     assert.ok(forward.order.indexOf("org.cgp.flora-core") < forward.order.indexOf("org.cgp.forest-plants"));
     assert.ok(forward.order.indexOf("org.cgp.lighting-core") < forward.order.indexOf("org.cgp.point-lights"));
+    assert.ok(
+      forward.dependencies.some(
+        (item) =>
+          item.providerId === "org.cgp.flora-core" &&
+          item.dependentId === "org.cgp.forest-plants" &&
+          item.kind === "capability" &&
+          item.ref === "flora.core",
+      ),
+    );
+    assert.ok(
+      forward.dependencies.some(
+        (item) =>
+          item.providerId === "org.cgp.flora-core" &&
+          item.dependentId === "org.cgp.forest-plants" &&
+          item.kind === "slot" &&
+          item.ref === "flora.plant-species",
+      ),
+    );
+    assert.equal(
+      forward.dependencies.some((item) => item.ref === "flora.soil"),
+      false,
+    );
   });
 
   it("accepts a module defined only in the test, connected to Flora's slot", async () => {
