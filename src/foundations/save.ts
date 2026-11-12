@@ -6,6 +6,7 @@ import { parseSemVer } from "./semver.ts";
  * A save document is a list of JSON slices. Each slice belongs to one module.
  * The host does not read the payload. It only checks that the Foundations API
  * major matches, and that the slice major matches the version the module declares.
+ * Object keys are sorted. Array order is kept. Key order is not part of the save.
  */
 
 export type SaveSlice = {
@@ -79,10 +80,22 @@ function jsonClone(value: unknown): { ok: true; value: unknown } | { ok: false }
   try {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) return { ok: false };
-    return { ok: true, value: JSON.parse(encoded) as unknown };
+    const stable = JSON.stringify(sortKeys(JSON.parse(encoded) as unknown));
+    return { ok: true, value: JSON.parse(stable) as unknown };
   } catch {
     return { ok: false };
   }
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) sorted[key] = sortKeys(record[key]);
+    return sorted;
+  }
+  return value;
 }
 
 function sameMajor(left: string, right: string): boolean {
@@ -200,7 +213,14 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
       notices.push(notice("error", "save.document", "A save slice needs moduleId, version, and payload."));
       continue;
     }
-    slices.push({ moduleId: row.moduleId, version: row.version, payload: row.payload });
+    const cloned = jsonClone(row.payload);
+    if (!cloned.ok) {
+      notices.push(
+        notice("error", "save.not-json", `Slice for "${row.moduleId}" has a payload that is not JSON.`, row.moduleId),
+      );
+      continue;
+    }
+    slices.push({ moduleId: row.moduleId, version: row.version, payload: cloned.value });
   }
 
   const counts = new Map<string, number>();

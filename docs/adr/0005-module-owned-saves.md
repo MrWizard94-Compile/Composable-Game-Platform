@@ -6,7 +6,7 @@
 
 A module may declare `save: { version }` with an exact semantic version. The host does not invent a save for a module that omits it.
 
-`keep(state)` during register stores one value on that composition, not on the module singleton. `exportState` returns JSON. `importState` receives a slice and may mutate the kept value. The host JSON-clones the export and refuses values that do not survive `JSON.stringify`.
+`keep(state)` during register stores one value on that composition, not on the module singleton. `exportState` returns JSON. `importState` receives a slice and may mutate the kept value. The host JSON-clones the export and refuses values that do not survive `JSON.stringify`. Object keys are sorted on the way out and on the way in. Array order is kept. Key order is not part of the save.
 
 `captureSave` walks the active order and records one slice per declaring module. `restoreSave` writes slices back.
 

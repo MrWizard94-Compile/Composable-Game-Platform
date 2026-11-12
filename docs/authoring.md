@@ -27,7 +27,7 @@ The schema is closed. An unknown field is an error. Versions are `major.minor.pa
 - `provides`: capabilities this module offers, exact versions.
 - `connectsTo`: a slot id and a contract reference (`platform.system/1` or a full version).
 - `exposesSlots`: slots this module owns. Kind is `singleton`, `policy`, `registry`, `pipeline`, `subscriber`, or `service`.
-- `save`: optional `{ "version": "1.0.0" }`. Exact. This module then owns one JSON slice. A document with two slices for that module is refused.
+- `save`: optional `{ "version": "1.0.0" }`. Exact. This module then owns one JSON slice. A document with two slices for that module is refused. Object keys are sorted. Array order is kept.
 - `permissions`: stored on the result. Not enforced. A list here is not a sandbox.
 
 A module cannot connect to a slot it owns. Two modules cannot own the same slot id.

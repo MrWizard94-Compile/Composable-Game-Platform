@@ -147,6 +147,41 @@ describe("capture and restore", () => {
     assert.deepEqual(captureSave(result).document.slices[0]?.payload, { n: 0 });
   });
 
+  it("sorts object keys and keeps array order", () => {
+    const bag = (body: Record<string, unknown>) =>
+      pkg(moduleManifest("org.example.bag", { save: { version: "1.0.0" } }), {
+        exportState() {
+          return body;
+        },
+        importState(_ctx, saved) {
+          seen = saved;
+        },
+      });
+    let seen: unknown;
+    const forward = compose([bag({ z: 1, a: { d: [2, 1], b: true } })]);
+    const payload = captureSave(forward).document.slices[0]?.payload as {
+      a: { b: boolean; d: number[] };
+    };
+    assert.deepEqual(Object.keys(payload), ["a", "z"]);
+    assert.deepEqual(Object.keys(payload.a), ["b", "d"]);
+    assert.deepEqual(payload.a.d, [2, 1]);
+
+    const reverse = compose([bag({ a: { b: true, d: [2, 1] }, z: 1 })]);
+    assert.equal(
+      JSON.stringify(captureSave(reverse).document.slices[0]?.payload),
+      JSON.stringify(payload),
+    );
+
+    const restored = restoreSave(forward, {
+      foundationsApi: "1.0.0",
+      profileName: forward.profileName,
+      fingerprint: forward.fingerprint,
+      slices: [{ moduleId: "org.example.bag", version: "1.0.0", payload: { z: 1, a: { d: [2, 1], b: true } } }],
+    });
+    assert.equal(restored.ok, true);
+    assert.deepEqual(Object.keys(seen as object), ["a", "z"]);
+  });
+
   it("rejects a second keep, a non-JSON export, and a quiesced runtime", () => {
     const doubled = compose([
       pkg(
