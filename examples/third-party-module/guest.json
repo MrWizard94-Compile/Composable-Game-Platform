@@ -1,0 +1,9 @@
+{
+  "contributions": [
+    {
+      "slotId": "platform.systems",
+      "id": "beacon",
+      "payload": { "systemId": "beacon", "label": "Beacon" }
+    }
+  ]
+}

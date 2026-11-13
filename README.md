@@ -42,9 +42,12 @@ node --experimental-strip-types --test \
   src/foundations/profile.test.ts \
   src/foundations/isolation.test.ts \
   src/foundations/browser-isolation.test.ts \
+  src/foundations/browser-wasm.test.ts \
   src/foundations/stress.test.ts \
   src/modules/composition.test.ts
 npx tsc -p tsconfig.foundations.json --noEmit
+node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
+node --experimental-strip-types scripts/browser-wasm.ts
 ```
 
 Headless proof:
@@ -59,6 +62,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 - `src/modules/*` — packaged proofs. One folder per module.
 - `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
 - `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.
+- `examples/third-party-module` — a guest authored as `guest.json`. Another toolchain can omit that file and still be checked.
 - `profiles/*.json` — composition pins. A different packaged version refuses the chip. The host does not upgrade.
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.

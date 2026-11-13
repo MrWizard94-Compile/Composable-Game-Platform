@@ -1,3 +1,4 @@
+// @ts-check
 const PAGE = 65536;
 const MAX_TABLE = 256;
 const textEncode = new TextEncoder();
@@ -36,16 +37,18 @@ export function createGuestRuntime(reply) {
    * @param {string} line
    */
   function pushLog(line) {
-    const clipped = line.length > logBudget.maxLine ? line.slice(0, logBudget.maxLine) : line;
-    if (dropped || logs.length >= logBudget.maxLines || logBytes + clipped.length > logBudget.maxBytes) {
+    const clipped = clipUtf8(line, logBudget.maxLine);
+    const size = utf8Bytes(clipped);
+    if (dropped || logs.length >= logBudget.maxLines || logBytes + size > logBudget.maxBytes) {
       if (!dropped) {
         dropped = true;
         logs.push("[log dropped]");
+        logBytes += utf8Bytes("[log dropped]");
       }
       return;
     }
     logs.push(clipped);
-    logBytes += clipped.length;
+    logBytes += size;
   }
 
   /**
@@ -120,7 +123,7 @@ export function createGuestRuntime(reply) {
         if (input.byteLength > maxBytes) throw new Error("Guest input exceeds the memory limit.");
         const ptr = exported.cg_alloc(input.length);
         if (input.length > 0 && ptr === 0) throw new Error("Guest refused the input allocation.");
-        if (input.length > 0) new Uint8Array(memory.buffer, ptr, input.length).set(input);
+        if (input.length > 0) new Uint8Array(/** @type {ArrayBuffer} */ (memory.buffer), ptr, input.length).set(input);
         const status = exported.cg_hook(typeof record.hook === "number" ? record.hook : -1, ptr, input.length);
         const outPtr = exported.cg_out_ptr();
         const outLen = exported.cg_out_len();
@@ -160,6 +163,28 @@ export function createGuestRuntime(reply) {
  *   cg_out_len: () => number,
  * }} GuestExports
  */
+
+/** @param {string} text */
+function utf8Bytes(text) {
+  return textEncode.encode(text).byteLength;
+}
+
+/**
+ * @param {string} text
+ * @param {number} maxBytes
+ */
+function clipUtf8(text, maxBytes) {
+  if (maxBytes <= 0) return "";
+  const encoded = textEncode.encode(text);
+  if (encoded.byteLength <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0) {
+    const byte = encoded[end];
+    if (byte === undefined || (byte & 0xc0) !== 0x80) break;
+    end -= 1;
+  }
+  return textDecode.decode(encoded.subarray(0, end));
+}
 
 /**
  * @param {Uint8Array} bytes
@@ -270,7 +295,9 @@ function assertGuestBinary(bytes, maxBytes, allowLog) {
  * @param {number} maxBytes
  */
 function assertMemory(guestMemory, maxBytes) {
-  if (guestMemory.buffer instanceof SharedArrayBuffer) throw new Error("Guest memory is shared. The host refuses it.");
+  if (typeof SharedArrayBuffer === "function" && guestMemory.buffer instanceof SharedArrayBuffer) {
+    throw new Error("Guest memory is shared. The host refuses it.");
+  }
   if (guestMemory.buffer.byteLength > maxBytes) {
     throw new Error(`Guest memory is ${guestMemory.buffer.byteLength} bytes. The limit is ${maxBytes}.`);
   }

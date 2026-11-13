@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkWasmPackage } from "../../scripts/check-wasm-module.ts";
 import {
   compose as composeClosed,
   contributionsFor,
@@ -72,5 +73,15 @@ describe("starter module", () => {
     assert.equal(isCallablePayload(() => 1), true);
     assert.equal(isCallablePayload({ handle() {} }), true);
     assert.equal(isCallablePayload({ note: true }), false);
+  });
+});
+
+describe("third-party wasm package", () => {
+  it("checks a guest built from guest.json", async () => {
+    const report = await checkWasmPackage(join(root, "examples/third-party-module"));
+    assert.equal(report.ok, true, report.ok ? "" : report.errors.join("\n"));
+    if (!report.ok) return;
+    assert.equal(report.moduleId, "org.example.beacon");
+    assert.deepEqual(report.contributions, [{ slotId: "platform.systems", id: "beacon", moduleId: "org.example.beacon" }]);
   });
 });

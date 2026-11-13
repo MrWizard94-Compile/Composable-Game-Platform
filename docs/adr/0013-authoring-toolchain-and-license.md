@@ -6,7 +6,7 @@
 
 The repository is MIT, including the copyable examples and the first-party modules. `LICENSE` is the text. A module's `license` field, when present, must be an SPDX expression (`MIT`, `Apache-2.0`, `MIT OR Apache-2.0`) or `LicenseRef-Proprietary`. The placeholder "Not yet licensed" is a validation error. The host checks the shape. It does not fetch license text and it does not grant rights to a guest on the author's behalf. Omitting the field is still allowed for a package that has not chosen, but the examples and the modules in this repository set `MIT`.
 
-A portable module is produced, not hand-edited. `scripts/build-wasm-module.ts` writes `examples/wasm-module/module.wasm` from `templateGuest()` and writes Dune Growth's `module.wasm` and `bytes.ts` from `duneGrowthGuest()`. `scripts/verify-wasm.ts` fails when those bytes drift. The foundations workflow runs that check, the host tests, the browser-isolate tests, and `tsc -p tsconfig.foundations.json` on Node 22.
+A portable module is produced, not hand-edited. `scripts/build-wasm-module.ts` writes `examples/wasm-module/module.wasm` from `templateGuest()`, writes Dune Growth's `module.wasm` and `bytes.ts` from `duneGrowthGuest()`, and writes `examples/third-party-module/module.wasm` from that folder's `guest.json`. An author who compiles elsewhere omits `guest.json`. `scripts/check-wasm-module.ts` validates the manifest, refuses a sibling `module.ts`, and instantiates the binary. `scripts/verify-wasm.ts` fails when a generated binary drifts. The foundations workflow runs that check, the third-party package, the host tests, the browser-isolate tests, a Chromium worker test, and `tsc -p tsconfig.foundations.json` on Node 22. The typecheck includes the shared guest runtime.
 
 ## Consequences
 

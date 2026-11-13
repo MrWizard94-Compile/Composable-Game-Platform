@@ -1,3 +1,4 @@
+// @ts-check
 import { parentPort } from "node:worker_threads";
 import { createGuestRuntime } from "./wasm-guest-runtime.mjs";
 

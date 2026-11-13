@@ -7,7 +7,7 @@ import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
 import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { publish } from "./dispatch.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
-import { counterGuest, shutdownLoopGuest, storeGuest, templateGuest, callLoopGuest } from "./wasm-build.ts";
+import { counterGuest, shutdownLoopGuest, storeGuest, templateGuest, callLoopGuest, initFaultGuest, missingAbiGuest } from "./wasm-build.ts";
 import { createWasmBackend } from "./wasm-backend.ts";
 import { duneGrowthGuest } from "../modules/org.cgp.dune-growth/guest.ts";
 import { duneWasmBytes } from "../modules/org.cgp.dune-growth/bytes.ts";
@@ -289,6 +289,77 @@ describe("lifecycle termination", () => {
     assert.ok(elapsed >= 300, `budgeted calls overlapped or returned early (${elapsed}ms)`);
     await result.shutdown();
     assert.equal(backend.openSessions(), 0);
+  });
+});
+
+describe("host lifecycle", () => {
+  const link = { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] };
+
+  it("charges declared memory and returns it after release", async () => {
+    const one = storeGuest("{}");
+    const backend = createWasmBackend({ host: { maxMemoryBytes: 65536 } });
+    const first = await compose([pkg("org.example.one", one)], { backend, policy: wasmPolicy() });
+    assert.equal(first.runtimeActive, true, messages(first));
+    assert.equal(backend.resourceUsage().guests, 1);
+    assert.equal(backend.resourceUsage().memoryBytes, 65536);
+    assert.equal(backend.resourceUsage().binaryBytes, one.byteLength);
+    const second = await compose([pkg("org.example.two", one)], { backend, policy: wasmPolicy() });
+    assert.match(messages(second), /exceeds the host memory budget of 65536 bytes/);
+    assert.equal(backend.resourceUsage().memoryBytes, 65536);
+    await first.shutdown();
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+    await backend.dispose();
+  });
+
+  it("refunds a failed initialize and a failed instantiation", async () => {
+    const backend = createWasmBackend({ host: { maxGuests: 1, maxMemoryBytes: 65536 } });
+    const fault = await compose([pkg("org.example.fault", initFaultGuest(), link)], { backend, policy: wasmPolicy() });
+    assert.equal(fault.runtimeActive, false);
+    assert.match(messages(fault), /initialize|Guest hook status 1/i);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    const missing = await compose([pkg("org.example.missing", missingAbiGuest())], { backend, policy: wasmPolicy() });
+    assert.equal(missing.runtimeActive, false);
+    assert.match(messages(missing), /did not export the ABI/);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    const recovered = await compose([pkg("org.example.ok", storeGuest("{}"))], { backend, policy: wasmPolicy() });
+    assert.equal(recovered.runtimeActive, true, messages(recovered));
+    await recovered.shutdown();
+    assert.equal(backend.openSessions(), 0);
+  });
+
+  it("recreates compositions and disposes while shutdown is in flight", async () => {
+    const backend = createWasmBackend({ host: { maxGuests: 2, maxMemoryBytes: 65536 * 2 } });
+    const one = storeGuest("{}");
+    for (let i = 0; i < 6; i += 1) {
+      const result = await compose([pkg(`org.example.m${i}`, one)], { backend, policy: wasmPolicy() });
+      assert.equal(result.runtimeActive, true, messages(result));
+      await result.shutdown();
+      assert.equal(backend.resourceUsage().guests, 0);
+      assert.equal(backend.resourceUsage().memoryBytes, 0);
+    }
+    const batch = await Promise.all(
+      [0, 1, 2, 3].map((i) => compose([pkg(`org.example.c${i}`, one)], { backend, policy: wasmPolicy() })),
+    );
+    const active = batch.filter((result) => result.runtimeActive);
+    assert.equal(active.length, 2, batch.map((result) => messages(result)).join("\n"));
+    assert.equal(backend.resourceUsage().guests, 2);
+    assert.equal(backend.resourceUsage().memoryBytes, 131072);
+    await Promise.all(batch.map((result) => result.shutdown()));
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+
+    const live = await compose([pkg("org.example.live", one)], { backend, policy: wasmPolicy() });
+    assert.equal(live.runtimeActive, true, messages(live));
+    await Promise.all([live.shutdown(), backend.dispose(), live.shutdown()]);
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    const refused = await compose([pkg("org.example.after", one)], { backend, policy: wasmPolicy() });
+    assert.equal(refused.runtimeActive, false);
+    assert.match(messages(refused), /disposed/);
   });
 });
 

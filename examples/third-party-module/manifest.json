@@ -1,0 +1,10 @@
+{
+  "moduleId": "org.example.beacon",
+  "name": "Beacon",
+  "description": "A third-party guest built from guest.json. It is not part of the proof catalog.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "author": "Example Author",
+  "license": "MIT"
+}

@@ -1,0 +1,19 @@
+# ADR 0014 — Host accounting, log retention, and third-party guests
+
+**Status:** Accepted.
+
+## Decision
+
+A guest reservation is one hold. It is charged when the binary has passed inspection and before the worker is spawned, and it is refunded by that hold's flag. `release` and a failed load may both observe the same hold. The second refund does nothing. `release` does not subtract a session total that a concurrent refund also subtracts.
+
+`release` marks the session closed, cancels calls already waiting on a worker, and then waits until in-flight loads and hooks have finished their own cleanup. The worker is inserted into the session before that wait, so a worker spawned during the load is terminated before `release` resolves. `dispose` is the same wait for every open session, and it is single-flight. A session opened after `dispose` runs no guest.
+
+Host `maxMemoryBytes` is the sum of declared linear-memory maxima, in bytes, across every composition on that backend, including a load that has not finished. It is not process RSS. `isolateHeapMb` is not added to it. Composition `maxTotalMemoryBytes` uses the same unit for one session. Guest count and binary size follow the same in-flight rule. Host hook time stays cumulative.
+
+Log caps are UTF-8 bytes. The per-line cap applies to the message. The byte cap applies to the stored line, including the module prefix and the single `[log dropped]` marker. Completed sessions keep their logs only up to `maxRetainedSessions` (default 8) and `maxRetainedBytes` (default 16384). Live sessions are outside that retention cap. A discarded session's `takeLogs` returns nothing.
+
+`scripts/build-wasm-module.ts` compiles a folder whose `guest.json` lists contributions into `module.wasm`. An author who uses another toolchain omits `guest.json` and ships `module.wasm` plus `manifest.json` and no `module.ts`. `scripts/check-wasm-module.ts` validates that package and instantiates it on the Node isolate. `scripts/browser-wasm.ts` loads `wasm-worker-browser.mjs` in Chromium. The shared runtime is part of `tsc -p tsconfig.foundations.json`.
+
+## Consequences
+
+A second composition cannot borrow a host memory slot that a pending worker still holds, and a release cannot drive the ledger negative. Copy `examples/third-party-module` for a declarative guest, or replace `module.wasm` with the output of another compiler and run the check script. The browser test is a real worker, not the Node worker behind a fake `Worker` constructor.

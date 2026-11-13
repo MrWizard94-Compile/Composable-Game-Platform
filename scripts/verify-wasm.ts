@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { templateGuest } from "../src/foundations/wasm-build.ts";
+import { guestFromContributions, templateGuest, type GuestContribution } from "../src/foundations/wasm-build.ts";
 import { duneWasmBytes } from "../src/modules/org.cgp.dune-growth/bytes.ts";
 import { duneGrowthGuest } from "../src/modules/org.cgp.dune-growth/guest.ts";
 
@@ -19,6 +19,10 @@ const dune = duneGrowthGuest();
 const shipped = new Uint8Array(readFileSync(join(root, "src/modules/org.cgp.dune-growth/module.wasm")));
 const template = templateGuest();
 const example = new Uint8Array(readFileSync(join(root, "examples/wasm-module/module.wasm")));
+const thirdPartyDir = join(root, "examples/third-party-module");
+const thirdSpec = JSON.parse(readFileSync(join(thirdPartyDir, "guest.json"), "utf8")) as { contributions: GuestContribution[] };
+const thirdBuilt = guestFromContributions(thirdSpec.contributions);
+const thirdShipped = new Uint8Array(readFileSync(join(thirdPartyDir, "module.wasm")));
 
 if (!same(dune, duneWasmBytes) || !same(dune, shipped)) {
   console.error("Dune guest bytes do not match module.wasm or bytes.ts. Regenerate both from duneGrowthGuest().");
@@ -28,4 +32,10 @@ if (!same(template, example)) {
   console.error("examples/wasm-module/module.wasm does not match templateGuest().");
   process.exit(1);
 }
-console.log(`wasm ok  dune ${dune.byteLength} bytes  template ${template.byteLength} bytes`);
+if (!same(thirdBuilt, thirdShipped)) {
+  console.error("examples/third-party-module/module.wasm does not match guest.json. Run scripts/build-wasm-module.ts.");
+  process.exit(1);
+}
+console.log(
+  `wasm ok  dune ${dune.byteLength} bytes  template ${template.byteLength} bytes  third-party ${thirdShipped.byteLength} bytes`,
+);

@@ -1,7 +1,7 @@
 import { Worker } from "node:worker_threads";
-import { createIsolateBackend, inspectWasm, type GuestProcess, type HostBudget, type IsolateBackend, type LogBudget } from "./wasm-isolate.ts";
+import { createIsolateBackend, inspectWasm, type GuestProcess, type HostBudget, type IsolateBackend, type LogBudget, type ResourceUsage } from "./wasm-isolate.ts";
 
-export type { HostBudget, LogBudget };
+export type { HostBudget, LogBudget, ResourceUsage };
 export { inspectWasm };
 export type WasmBackend = IsolateBackend;
 

@@ -7,6 +7,8 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
+    "allowJs": true,
+    "checkJs": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "types": ["node"],
@@ -15,8 +17,13 @@
   "include": [
     "src/foundations/**/*.ts",
     "src/foundations/**/*.mts",
+    "src/foundations/wasm-guest-runtime.mjs",
+    "src/foundations/wasm-worker.mjs",
+    "src/foundations/wasm-worker-browser.mjs",
     "src/modules/**/*.ts",
     "scripts/verify-wasm.ts",
-    "scripts/build-wasm-module.ts"
+    "scripts/build-wasm-module.ts",
+    "scripts/check-wasm-module.ts",
+    "scripts/browser-wasm.ts"
   ]
 }

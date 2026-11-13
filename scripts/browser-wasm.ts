@@ -1,0 +1,120 @@
+import { createServer, type Server } from "node:http";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
+import { templateGuest, wasiGuest } from "../src/foundations/wasm-build.ts";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const types: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".json": "application/json; charset=utf-8",
+};
+
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Browser test server has no port."));
+        return;
+      }
+      resolve(address.port);
+    });
+  });
+}
+
+/**
+ * Loads the real browser worker in Chromium and runs one accepted guest and one refused guest.
+ * This is not the Node worker pretending to be a page.
+ */
+export async function runBrowserWasmCheck(): Promise<void> {
+  const store = Buffer.from(templateGuest()).toString("base64");
+  const wasi = Buffer.from(wasiGuest()).toString("base64");
+  const pageHtml = `<!doctype html><meta charset="utf-8"><title>browser isolate</title>`;
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/" || url.pathname === "/harness.html") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(pageHtml);
+      return;
+    }
+    const relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+    if (relative.includes("..")) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+    const path = join(root, relative);
+    if (!existsSync(path)) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" });
+    response.end(readFileSync(path));
+  });
+  const port = await listen(server);
+  const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+  try {
+    const page = await browser.newPage();
+    const failed: string[] = [];
+    page.on("pageerror", (error) => failed.push(error.message));
+    await page.goto(`http://127.0.0.1:${port}/harness.html`);
+    const result = await page.evaluate(
+      async ({ storeBytes, wasiBytes }) => {
+        const decode = (encoded: string) => {
+          const binary = atob(encoded);
+          const out = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+          return out;
+        };
+        const run = (encoded: string) =>
+          new Promise<{ ok: boolean; text: string; realWorker: boolean }>((resolve) => {
+            const worker = new Worker(new URL("/src/foundations/wasm-worker-browser.mjs", location.origin), { type: "module" });
+            const timer = setTimeout(() => {
+              worker.terminate();
+              resolve({ ok: false, text: "timed out", realWorker: worker instanceof Worker });
+            }, 5000);
+            worker.onmessage = (event: MessageEvent<{ ok?: boolean; text?: string }>) => {
+              const text = event.data?.text ?? "";
+              if (text === "loaded") {
+                worker.postMessage({ id: 2, op: "hook", hook: 0, json: "{}", maxBytes: 65536 });
+                return;
+              }
+              clearTimeout(timer);
+              worker.terminate();
+              resolve({ ok: event.data?.ok === true, text, realWorker: worker instanceof Worker });
+            };
+            worker.onerror = (event) => {
+              clearTimeout(timer);
+              resolve({ ok: false, text: event.message || "worker error", realWorker: worker instanceof Worker });
+            };
+            worker.postMessage({ id: 1, op: "load", wasm: decode(encoded), allowLog: false, maxBytes: 65536 });
+          });
+        return { good: await run(storeBytes), bad: await run(wasiBytes) };
+      },
+      { storeBytes: store, wasiBytes: wasi },
+    );
+    if (failed.length > 0) throw new Error(failed.join("\n"));
+    if (!result.good.realWorker || !result.good.ok || !result.good.text.includes("starter")) {
+      throw new Error(`Browser guest did not run: ${JSON.stringify(result.good)}`);
+    }
+    if (result.bad.ok || !/Unauthorized import wasi_snapshot_preview1/.test(result.bad.text)) {
+      throw new Error(`Browser guest accepted a forbidden import: ${JSON.stringify(result.bad)}`);
+    }
+  } finally {
+    await browser.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  await runBrowserWasmCheck();
+  console.log("browser wasm ok");
+}

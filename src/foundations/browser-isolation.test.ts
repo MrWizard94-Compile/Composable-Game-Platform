@@ -3,7 +3,7 @@ import { Worker } from "node:worker_threads";
 import { describe, it } from "node:test";
 import { createWasmBackend } from "./wasm-backend.ts";
 import { createBrowserWasmBackend } from "./wasm-browser.ts";
-import { createLogBuffer, type GuestProcess } from "./wasm-isolate.ts";
+import { createLogBuffer, clipUtf8, utf8Bytes, type GuestProcess } from "./wasm-isolate.ts";
 import { attachBrowserGuest } from "./wasm-worker-browser.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import type { ExecutionPolicy } from "./backend.ts";
@@ -169,6 +169,95 @@ describe("browser isolate policy", () => {
     await left.shutdown();
     await right.shutdown();
   });
+
+  it("refunds a pending worker once and waits for it to exit", async () => {
+    let spawned = 0;
+    let terminated = 0;
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const bytes = storeGuest("{}");
+    const backend = createBrowserWasmBackend({
+      host: { maxMemoryBytes: 65536 },
+      spawn() {
+        spawned += 1;
+        if (spawned === 1) return holdingProcess(gate, () => {
+          terminated += 1;
+        });
+        return immediateProcess();
+      },
+    });
+    const session = backend.open();
+    const pending = session.invoke({
+      moduleId: "org.example.pending",
+      hook: "register",
+      implementation: { wasm: bytes },
+      args: [],
+    });
+    await waitFor(() => spawned === 1 && backend.resourceUsage().guests === 1);
+    assert.equal(backend.resourceUsage().guests, 1);
+    assert.equal(backend.resourceUsage().memoryBytes, 65536);
+    const other = backend.open();
+    const blocked = await other.invoke({
+      moduleId: "org.example.blocked",
+      hook: "register",
+      implementation: { wasm: bytes },
+      args: [],
+    });
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) return;
+    assert.match(String(blocked.error), /host memory budget of 65536/);
+    assert.equal(spawned, 1);
+    await other.release();
+    let finished = false;
+    const done = session.release();
+    void done.then(() => {
+      finished = true;
+    });
+    await waitFor(() => terminated === 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(finished, false);
+    const again = session.release();
+    assert.equal(again, done);
+    openGate();
+    await done;
+    await pending;
+    assert.equal(finished, true);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+    const third = backend.open();
+    const accepted = await third.invoke({
+      moduleId: "org.example.third",
+      hook: "register",
+      implementation: { wasm: bytes },
+      args: [],
+    });
+    assert.equal(accepted.ok, true);
+    await third.release();
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.openSessions(), 0);
+  });
+
+  it("forgets completed logs past the retention cap", async () => {
+    const backend = createBrowserWasmBackend({
+      log: { maxBytes: 200, maxLines: 4, maxLine: 40, maxRetainedSessions: 1, maxRetainedBytes: 200 },
+      spawn: () => loggingProcess("alpha"),
+    });
+    const first = await compose([pkg("org.example.old", storeGuest("{}"))], { backend, policy: wasmPolicy() });
+    const second = await compose([pkg("org.example.new", storeGuest("{}"))], { backend, policy: wasmPolicy() });
+    assert.equal(first.runtimeActive, true, messages(first));
+    assert.equal(second.runtimeActive, true, messages(second));
+    const firstId = sessionOf(first).id;
+    const secondId = sessionOf(second).id;
+    await first.shutdown();
+    await second.shutdown();
+    assert.deepEqual(backend.takeLogs(firstId), []);
+    assert.ok(backend.takeLogs(secondId).some((line) => line.includes("alpha")));
+    assert.equal(backend.resourceUsage().guests, 0);
+  });
 });
 
 describe("log bounds", () => {
@@ -178,6 +267,18 @@ describe("log bounds", () => {
     buffer.push("org.example.a", "two");
     buffer.push("org.example.a", "three");
     assert.deepEqual(buffer.drain(), ["[org.example.a] one", "[log dropped]"]);
+  });
+
+  it("counts UTF-8 bytes and does not split a code point", () => {
+    assert.equal(clipUtf8("éé", 2), "é");
+    assert.equal(clipUtf8("😀", 3), "");
+    const buffer = createLogBuffer({ maxBytes: 12, maxLines: 8, maxLine: 8 });
+    buffer.push("m", "éééé");
+    buffer.push("m", "éééé");
+    const lines = buffer.drain();
+    assert.equal(lines[0], "[m] éééé");
+    assert.equal(utf8Bytes(lines[0] ?? ""), 12);
+    assert.equal(lines[1], "[log dropped]");
   });
 });
 
@@ -285,6 +386,53 @@ function stallingProcess(registerId: string, held: Array<() => void>, enter: () 
     removeErrorListener() {},
     terminate() {
       return Promise.resolve();
+    },
+  };
+}
+
+function loggingProcess(line: string): GuestProcess {
+  const listeners = new Set<(message: WorkerMessage) => void>();
+  return {
+    postMessage(message) {
+      const id = typeof message.id === "number" ? message.id : -1;
+      const text = message.op === "load" ? "loaded" : JSON.stringify({ ok: true, json: "{}", logs: [line] });
+      queueMicrotask(() => {
+        for (const listener of [...listeners]) listener({ id, ok: true, text });
+      });
+    },
+    addMessageListener(listener) {
+      listeners.add(listener);
+    },
+    removeMessageListener(listener) {
+      listeners.delete(listener);
+    },
+    addErrorListener() {},
+    removeErrorListener() {},
+    terminate() {
+      return Promise.resolve();
+    },
+  };
+}
+
+function holdingProcess(gate: Promise<void>, onTerminate: () => void): GuestProcess {
+  const listeners = new Set<(message: WorkerMessage) => void>();
+  let started = false;
+  return {
+    postMessage() {},
+    addMessageListener(listener) {
+      listeners.add(listener);
+    },
+    removeMessageListener(listener) {
+      listeners.delete(listener);
+    },
+    addErrorListener() {},
+    removeErrorListener() {},
+    terminate() {
+      if (!started) {
+        started = true;
+        onTerminate();
+      }
+      return gate;
     },
   };
 }

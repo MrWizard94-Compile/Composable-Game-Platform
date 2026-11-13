@@ -13,9 +13,16 @@ const PAGE = 65536;
 const MAX_TABLE = 256;
 
 export type HostBudget = {
-  /** Open guests across every composition on this backend. */
+  /** Open guests across every composition on this backend, including a load still in flight. */
   maxGuests?: number;
+  /**
+   * Sum of declared guest linear-memory maxima (maximum pages times 65536) across every
+   * composition on this backend, including a load that has reserved a worker but not finished.
+   * This is the address space the host agreed to instantiate. It is not process RSS, and it
+   * does not include `isolateHeapMb`. That field is a separate Node worker cap.
+   */
   maxMemoryBytes?: number;
+  /** Sum of guest binary sizes, including a load still in flight. */
   maxBinaryBytes?: number;
   /**
    * Cumulative host-side hook time for this backend.
@@ -26,9 +33,24 @@ export type HostBudget = {
 };
 
 export type LogBudget = {
+  /** UTF-8 bytes of stored lines, including the module prefix. */
   maxBytes: number;
   maxLines: number;
+  /** UTF-8 bytes of one log message, before the module prefix. */
   maxLine: number;
+  /** Completed compositions whose logs stay readable. Live sessions are outside this cap. */
+  maxRetainedSessions?: number;
+  /** UTF-8 bytes retained after release. Live sessions are outside this sum. */
+  maxRetainedBytes?: number;
+};
+
+export type ResourceUsage = {
+  guests: number;
+  memoryBytes: number;
+  binaryBytes: number;
+  hookMs: number;
+  retainedLogSessions: number;
+  retainedLogBytes: number;
 };
 
 export type WasmImport = { module: string; name: string; kind: "func" | "memory" | "table" | "global" };
@@ -68,9 +90,11 @@ export type GuestProcess = {
 
 export type IsolateBackend = ExecutionBackend & {
   dispose(): Promise<void>;
-  /** Drain one composition, or every composition when `sessionId` is omitted. */
+  /** Drain one composition, or every composition still retained when `sessionId` is omitted. */
   takeLogs(sessionId?: string): string[];
   openSessions(): number;
+  /** Host ledger. Memory is declared linear-memory maxima, not process RSS. */
+  resourceUsage(): ResourceUsage;
 };
 
 type Guest = {
@@ -84,6 +108,13 @@ type GuestAnswer = { ok: true; value: unknown } | { ok: false; error: string };
 type LogBuffer = {
   push(moduleId: string, line: string): void;
   drain(): string[];
+  byteLength(): number;
+};
+
+type Hold = {
+  binary: number;
+  memory: number;
+  open: boolean;
 };
 
 type HostLedger = {
@@ -95,7 +126,31 @@ type HostLedger = {
   admit<T>(job: () => Promise<T>): Promise<T>;
 };
 
-const DEFAULT_LOG: LogBudget = { maxBytes: 4096, maxLines: 32, maxLine: 240 };
+const DEFAULT_LOG: LogBudget = {
+  maxBytes: 4096,
+  maxLines: 32,
+  maxLine: 240,
+  maxRetainedSessions: 8,
+  maxRetainedBytes: 16384,
+};
+
+const textEncode = new TextEncoder();
+const textDecode = new TextDecoder();
+
+/** UTF-8 size of a stored log line. JavaScript string length is not byte size. */
+export function utf8Bytes(text: string): number {
+  return textEncode.encode(text).byteLength;
+}
+
+/** Cuts a string to a UTF-8 budget without splitting a code point. */
+export function clipUtf8(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const encoded = textEncode.encode(text);
+  if (encoded.byteLength <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+  return textDecode.decode(encoded.subarray(0, end));
+}
 
 function readUleb(bytes: Uint8Array, at: { i: number }): number {
   let result = 0;
@@ -205,23 +260,29 @@ export function createLogBuffer(budget: LogBudget): LogBuffer {
   let dropped = false;
   return {
     push(moduleId, line) {
-      const clipped = line.length > budget.maxLine ? line.slice(0, budget.maxLine) : line;
+      const clipped = clipUtf8(line, budget.maxLine);
       const stored = `[${moduleId}] ${clipped}`;
-      if (dropped || lines.length >= budget.maxLines || bytes + stored.length > budget.maxBytes) {
+      const size = utf8Bytes(stored);
+      if (dropped || lines.length >= budget.maxLines || bytes + size > budget.maxBytes) {
         if (!dropped) {
           dropped = true;
-          lines.push("[log dropped]");
+          const marker = "[log dropped]";
+          lines.push(marker);
+          bytes += utf8Bytes(marker);
         }
         return;
       }
       lines.push(stored);
-      bytes += stored.length;
+      bytes += size;
     },
     drain() {
       const out = lines.splice(0, lines.length);
       bytes = 0;
       dropped = false;
       return out;
+    },
+    byteLength() {
+      return bytes;
     },
   };
 }
@@ -284,11 +345,41 @@ export function createIsolateBackend(options: {
     maxLines: options.log?.maxLines ?? DEFAULT_LOG.maxLines,
     maxLine: options.log?.maxLine ?? DEFAULT_LOG.maxLine,
   };
+  const retention = {
+    sessions: options.log?.maxRetainedSessions ?? DEFAULT_LOG.maxRetainedSessions ?? 8,
+    bytes: options.log?.maxRetainedBytes ?? DEFAULT_LOG.maxRetainedBytes ?? 16384,
+  };
   const host = createHostLedger(options.host ?? {});
   const logs = new Map<string, LogBuffer>();
+  const retained: string[] = [];
   const live = new Set<ExecutionSession>();
   let serial = 0;
   let messageSerial = 0;
+  let disposed = false;
+  let disposing: Promise<void> | undefined;
+
+  function retain(sessionId: string) {
+    retained.push(sessionId);
+    const size = () => retained.reduce((sum, id) => sum + (logs.get(id)?.byteLength() ?? 0), 0);
+    while (retained.length > retention.sessions || (retained.length > 0 && size() > retention.bytes)) {
+      const id = retained.shift();
+      if (!id) break;
+      logs.delete(id);
+    }
+  }
+
+  function closedSession(): ExecutionSession {
+    return {
+      id: `${options.id}-disposed`,
+      async invoke() {
+        return { ok: false, error: new Error("This backend has been disposed.") };
+      },
+      async callPayload() {
+        return { ok: false, code: "threw", error: new Error("This backend has been disposed.") };
+      },
+      async release() {},
+    };
+  }
 
   const backend: IsolateBackend = {
     id: options.id,
@@ -311,6 +402,7 @@ export function createIsolateBackend(options: {
       return wasmBytes(implementation as HookCall["implementation"]) !== undefined;
     },
     open() {
+      if (disposed) return closedSession();
       const captured: IsolateLimits = {
         maxHookMs: limits.maxHookMs,
         maxMemoryBytes: limits.maxMemoryBytes,
@@ -322,23 +414,36 @@ export function createIsolateBackend(options: {
         isolateHeapMb: limits.isolateHeapMb,
       };
       const guests = new Map<string, Guest>();
+      const holds = new Set<Hold>();
       const cancelPending = new Set<() => void>();
+      const idleWaiters: Array<() => void> = [];
       const sessionLogs = createLogBuffer(logBudget);
       const admitComposition = captured.maxTotalHookMs !== undefined ? queue() : <T>(job: () => Promise<T>) => job();
       let guestCount = 0;
       let memoryUsed = 0;
       let binaryUsed = 0;
       let spentMs = 0;
+      let pendingWork = 0;
       let released = false;
       let releasing: Promise<void> | undefined;
       const session: ExecutionSession = {
         id: `${options.id}-${++serial}`,
-        invoke: (call) => runGuest(call),
-        callPayload: (payload, args) => callHandle(payload, args),
+        invoke: (call) => track(() => runGuest(call)),
+        callPayload: (payload, args) => track(() => callHandle(payload, args)),
         release,
       };
       logs.set(session.id, sessionLogs);
       live.add(session);
+
+      function track<T>(start: () => Promise<T>): Promise<T> {
+        pendingWork += 1;
+        return start().finally(() => {
+          pendingWork -= 1;
+          if (pendingWork === 0) {
+            for (const wake of idleWaiters.splice(0)) wake();
+          }
+        });
+      }
 
       function stopGuest(guest: Guest): Promise<void> {
         if (guest.stopped) return guest.stopped;
@@ -349,61 +454,70 @@ export function createIsolateBackend(options: {
 
       function release(): Promise<void> {
         if (releasing) return releasing;
+        released = true;
+        for (const cancel of [...cancelPending]) cancel();
+        cancelPending.clear();
         releasing = (async () => {
-          released = true;
-          for (const cancel of [...cancelPending]) cancel();
-          cancelPending.clear();
+          while (pendingWork > 0) {
+            await new Promise<void>((resolve) => idleWaiters.push(resolve));
+          }
           await Promise.all([...guests.values()].map((guest) => stopGuest(guest)));
-          host.guests -= guestCount;
-          host.memory -= memoryUsed;
-          host.binary -= binaryUsed;
-          guestCount = 0;
-          memoryUsed = 0;
-          binaryUsed = 0;
+          for (const hold of [...holds]) refund(hold);
           guests.clear();
           live.delete(session);
+          retain(session.id);
         })();
         return releasing;
       }
 
-      async function callHandle(payload: unknown, args: readonly unknown[]): Promise<PayloadResult> {
-        if (released) return { ok: false, code: "threw", error: new Error("This composition has been released.") };
-        if (!isAbiHandle(payload)) return { ok: false, code: "not-callable" };
+      function callHandle(payload: unknown, args: readonly unknown[]): Promise<PayloadResult> {
+        if (released) return Promise.resolve({ ok: false, code: "threw", error: new Error("This composition has been released.") });
+        if (!isAbiHandle(payload)) return Promise.resolve({ ok: false, code: "not-callable" });
         const guest = guests.get(payload.moduleId);
         if (!guest || guest.dead) {
-          return { ok: false, code: "threw", error: new Error(`Module "${payload.moduleId}" is not an active isolate.`) };
+          return Promise.resolve({ ok: false, code: "threw", error: new Error(`Module "${payload.moduleId}" is not an active isolate.`) });
         }
-        const answered = await callGuest(guest, payload.moduleId, {
+        return callGuest(guest, payload.moduleId, {
           op: "hook",
           hook: ABI_HOOK.call,
           json: JSON.stringify({ contributionId: payload.contributionId, arg: args[0], args }),
+        }).then((answered) => {
+          if (released) return { ok: false, code: "threw", error: new Error("This composition has been released.") };
+          if (!answered.ok) return { ok: false, code: "threw", error: new Error(answered.error) };
+          return { ok: true, value: answered.value };
         });
-        if (released) return { ok: false, code: "threw", error: new Error("This composition has been released.") };
-        if (!answered.ok) return { ok: false, code: "threw", error: new Error(answered.error) };
-        return { ok: true, value: answered.value };
       }
 
-      async function runGuest(call: HookCall): Promise<HookResult> {
-        if (released) return { ok: false, error: new Error("This composition has been released.") };
+      function runGuest(call: HookCall): Promise<HookResult> {
+        if (released) return Promise.resolve({ ok: false, error: new Error("This composition has been released.") });
         if (!options.supportsHeap && captured.isolateHeapMb !== undefined) {
-          return { ok: false, error: new Error(`Backend "${options.id}" cannot enforce isolateHeapMb. No module code ran.`) };
+          return Promise.resolve({ ok: false, error: new Error(`Backend "${options.id}" cannot enforce isolateHeapMb. No module code ran.`) });
         }
         const bytes = wasmBytes(call.implementation);
-        if (!bytes) return { ok: false, error: new Error(`Module "${call.moduleId}" has no WebAssembly binary.`) };
-        let guest = guests.get(call.moduleId);
-        if (!guest) {
-          const loaded = await loadGuest(call.moduleId, call.permissions ?? [], bytes);
-          const remembered = loaded.guest ?? { worker: null, dead: true };
-          if (!loaded.ok || released) {
-            remembered.dead = true;
-            if (loaded.ok) await stopGuest(remembered);
-            guests.set(call.moduleId, remembered);
-            const message = !loaded.ok ? loaded.error : "This composition has been released.";
-            return { ok: false, error: new Error(message) };
-          }
-          guest = remembered;
-          guests.set(call.moduleId, guest);
+        if (!bytes) return Promise.resolve({ ok: false, error: new Error(`Module "${call.moduleId}" has no WebAssembly binary.`) });
+        const existing = guests.get(call.moduleId);
+        if (!existing) return loadAndRun(call, bytes);
+        if (existing.dead) {
+          return Promise.resolve({ ok: false, error: new Error(`Module "${call.moduleId}" was stopped and was not restarted.`) });
         }
+        return runHook(existing, call);
+      }
+
+      async function loadAndRun(call: HookCall, bytes: Uint8Array): Promise<HookResult> {
+        const loaded = await loadGuest(call.moduleId, call.permissions ?? [], bytes);
+        const remembered = loaded.guest ?? { worker: null, dead: true };
+        if (!loaded.ok || released) {
+          remembered.dead = true;
+          if (loaded.ok) await stopGuest(remembered);
+          guests.set(call.moduleId, remembered);
+          const message = !loaded.ok ? loaded.error : "This composition has been released.";
+          return { ok: false, error: new Error(message) };
+        }
+        guests.set(call.moduleId, loaded.guest);
+        return runHook(loaded.guest, call);
+      }
+
+      async function runHook(guest: Guest, call: HookCall): Promise<HookResult> {
         if (guest.dead) return { ok: false, error: new Error(`Module "${call.moduleId}" was stopped and was not restarted.`) };
         const hook = ABI_HOOK[call.hook as HookName];
         const input = hook === ABI_HOOK.importState ? JSON.stringify(call.args[1] ?? null) : "{}";
@@ -439,25 +553,31 @@ export function createIsolateBackend(options: {
       ): Promise<{ ok: true; guest: Guest } | { ok: false; error: string; guest?: Guest }> {
         const refused = refuseBinary(moduleId, bytes, captured, permissions);
         if (refused) return { ok: false, error: refused };
-        const inspected = inspectWasm(bytes);
-        const memoryBytes =
-          "max" in inspected.memory && typeof inspected.memory.max === "number" ? inspected.memory.max * PAGE : captured.maxMemoryBytes;
-        const overBudget = reserve(moduleId, bytes.byteLength, memoryBytes);
-        if (overBudget) return { ok: false, error: overBudget };
+        const memoryBytes = declaredMemory(inspectWasm(bytes), captured);
+        const reserved = reserve(moduleId, bytes.byteLength, memoryBytes);
+        if (typeof reserved === "string") return { ok: false, error: reserved };
         const allowLog = permissions.includes("cgp.log") && captured.allow.has("cgp.log");
         const heapMb = captured.isolateHeapMb ?? Math.max(8, Math.ceil(captured.maxMemoryBytes / (1024 * 1024)) + 8);
-        const worker = options.spawn(heapMb);
+        let worker: GuestProcess;
+        try {
+          worker = options.spawn(heapMb);
+        } catch (error) {
+          refund(reserved);
+          return { ok: false, error: error instanceof Error ? error.message : "Could not start the isolate." };
+        }
         const guest: Guest = { worker, dead: false };
+        guests.set(moduleId, guest);
         const loaded = await callGuest(guest, moduleId, { op: "load", wasm: bytes, allowLog });
         if (!loaded.ok || released) {
-          refund(bytes.byteLength, memoryBytes);
+          refund(reserved);
           await stopGuest(guest);
-          return { ok: false, error: released ? "This composition has been released." : loaded.ok ? "This composition has been released." : loaded.error, guest };
+          const message = !loaded.ok ? loaded.error : "This composition has been released.";
+          return { ok: false, error: message, guest };
         }
         return { ok: true, guest };
       }
 
-      function reserve(moduleId: string, binaryBytes: number, memoryBytes: number): string | undefined {
+      function reserve(moduleId: string, binaryBytes: number, memoryBytes: number): Hold | string {
         if (captured.maxGuests !== undefined && guestCount + 1 > captured.maxGuests) {
           return `Module "${moduleId}" exceeds the composition guest budget of ${captured.maxGuests}.`;
         }
@@ -476,22 +596,30 @@ export function createIsolateBackend(options: {
         if (host.budget.maxMemoryBytes !== undefined && host.memory + memoryBytes > host.budget.maxMemoryBytes) {
           return `Module "${moduleId}" exceeds the host memory budget of ${host.budget.maxMemoryBytes} bytes.`;
         }
+        const hold: Hold = { binary: binaryBytes, memory: memoryBytes, open: true };
         guestCount += 1;
         memoryUsed += memoryBytes;
         binaryUsed += binaryBytes;
         host.guests += 1;
         host.memory += memoryBytes;
         host.binary += binaryBytes;
-        return undefined;
+        holds.add(hold);
+        return hold;
       }
 
-      function refund(binaryBytes: number, memoryBytes: number) {
+      function refund(hold: Hold) {
+        if (!hold.open) return;
+        hold.open = false;
+        holds.delete(hold);
         guestCount -= 1;
-        memoryUsed -= memoryBytes;
-        binaryUsed -= binaryBytes;
+        memoryUsed -= hold.memory;
+        binaryUsed -= hold.binary;
         host.guests -= 1;
-        host.memory -= memoryBytes;
-        host.binary -= binaryBytes;
+        host.memory -= hold.memory;
+        host.binary -= hold.binary;
+        if (guestCount < 0 || memoryUsed < 0 || binaryUsed < 0 || host.guests < 0 || host.memory < 0 || host.binary < 0) {
+          throw new Error("Host resource ledger went negative.");
+        }
       }
 
       function callGuest(guest: Guest, moduleId: string, message: Record<string, unknown>): Promise<GuestAnswer> {
@@ -562,8 +690,11 @@ export function createIsolateBackend(options: {
 
       return session;
     },
-    async dispose() {
-      await Promise.all([...live].map((session) => session.release()));
+    dispose() {
+      if (disposing) return disposing;
+      disposed = true;
+      disposing = Promise.all([...live].map((session) => session.release())).then(() => undefined);
+      return disposing;
     },
     takeLogs(sessionId) {
       if (sessionId !== undefined) return logs.get(sessionId)?.drain() ?? [];
@@ -573,6 +704,18 @@ export function createIsolateBackend(options: {
     },
     openSessions() {
       return live.size;
+    },
+    resourceUsage() {
+      let retainedLogBytes = 0;
+      for (const id of retained) retainedLogBytes += logs.get(id)?.byteLength() ?? 0;
+      return {
+        guests: host.guests,
+        memoryBytes: host.memory,
+        binaryBytes: host.binary,
+        hookMs: host.hookMs,
+        retainedLogSessions: retained.length,
+        retainedLogBytes,
+      };
     },
   };
 
@@ -599,6 +742,11 @@ function parseGuest(load: boolean, text: string, sink: LogBuffer, moduleId: stri
   } catch {
     return { ok: false, error: "Guest result was not JSON." };
   }
+}
+
+function declaredMemory(inspected: ReturnType<typeof inspectWasm>, captured: IsolateLimits): number {
+  if ("max" in inspected.memory && typeof inspected.memory.max === "number") return inspected.memory.max * PAGE;
+  return captured.maxMemoryBytes;
 }
 
 function refuseBinary(

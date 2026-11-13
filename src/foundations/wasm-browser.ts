@@ -28,7 +28,7 @@ export function createBrowserWasmBackend(options?: {
 }
 
 function defaultSpawn(): GuestProcess {
-  const worker = new Worker(new URL("./wasm-worker-browser.ts", import.meta.url), { type: "module" });
+  const worker = new Worker(new URL("./wasm-worker-browser.mjs", import.meta.url), { type: "module" });
   const wrappers = new Map<(message: WorkerMessage) => void, (event: MessageEvent) => void>();
   const errors = new Map<(error: Error) => void, (event: ErrorEvent) => void>();
   return {

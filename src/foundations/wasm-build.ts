@@ -653,3 +653,69 @@ export function templateGuest(): Uint8Array {
     }),
   );
 }
+
+export type GuestContribution = {
+  slotId: string;
+  id: string;
+  payload?: unknown;
+  order?: number;
+  dispatch?: boolean;
+};
+
+/** A third-party guest whose only behavior is the contributions in its register result. */
+export function guestFromContributions(contributions: readonly GuestContribution[]): Uint8Array {
+  return storeGuest(JSON.stringify({ contributions }));
+}
+
+/** Register succeeds. Initialize returns a failure status so the host rolls the composition back. */
+export function initFaultGuest(): Uint8Array {
+  const register = text(
+    JSON.stringify({
+      contributions: [{ slotId: "platform.systems", id: "fault", payload: { systemId: "fault" } }],
+    }),
+  );
+  const body = [
+    ...op.localGet(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(400),
+    ...op.globalSet(1),
+    ...op.i32Const(register.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Const(1),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+    data: [{ offset: 400, bytes: register }],
+  });
+}
+
+/** Passes the binary checks, instantiates, then fails because `cg_hook` is missing. */
+export function missingAbiGuest(): Uint8Array {
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc()],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: [
+      { name: "memory", kind: "mem", index: 0 },
+      { name: "cg_alloc", kind: "func", index: 0 },
+      { name: "cg_out_ptr", kind: "func", index: 1 },
+      { name: "cg_out_len", kind: "func", index: 2 },
+    ],
+  });
+}
