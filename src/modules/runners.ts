@@ -1,4 +1,5 @@
 import { contributionsFor, sessionOf, type CompositionResult } from "../foundations/host.ts";
+import { isAbiHandle } from "../foundations/abi.ts";
 import { publish, runPipeline, callService, type PipelineReport, type PublishReport, type ServiceReport } from "../foundations/dispatch.ts";
 
 export const SEASONS = ["spring", "summer", "autumn", "winter"] as const;
@@ -64,9 +65,7 @@ export async function advanceFlora(
   const strategies = contributionsFor(result, "flora.growth-model");
   const strategy = strategies[0]?.payload as StrategyPayload | undefined;
   const advance =
-    strategy && typeof strategy.advance === "function"
-      ? (strategy.advance as (species: SpeciesView, season: Season, stage: number) => number)
-      : undefined;
+    strategy && (typeof strategy.advance === "function" || isAbiHandle(strategy.advance)) ? strategy.advance : undefined;
   const rows: GrowthRow[] = [];
   for (const contribution of contributionsFor(result, "flora.plant-species")) {
     if (!isSpecies(contribution.payload)) {

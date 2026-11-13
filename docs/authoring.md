@@ -1,21 +1,22 @@
 # Writing a module
 
-Copy [examples/starter-module](../examples/starter-module). Change `moduleId`. A package is a folder with `manifest.json` and, if it has behavior, `module.ts` exporting `implementation`.
+Copy [examples/starter-module](../examples/starter-module) for JavaScript, or [examples/wasm-module](../examples/wasm-module) for a portable guest. Change `moduleId`. A package is a folder with `manifest.json` and, if it has behavior, either `module.ts` exporting `implementation` or `module.wasm`.
 
-The browser console can check a manifest. It does not load an implementation. Loading code is `compose()`.
+The browser console can check a manifest. It does not load an implementation by importing it. Loading code is `compose()`.
 
 ## Public entry
 
-Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` does not run module code under the default policy. The in-process backend grants filesystem, network, and os, and it cannot enforce limits. Pass `trust: "trusted-in-process"` or `policy: IN_PROCESS_POLICY` to opt in. Pass `backend` to replace it. This is not a sandbox.
+Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` does not run module code under the default policy. The in-process backend grants filesystem, network, and os, and it cannot enforce limits. Pass `trust: "trusted-in-process"` or `policy: IN_PROCESS_POLICY` to opt in. Pass `backend` to replace it. `createWasmBackend()` is the Node isolate. `createCrossBackend(isolate)` sends WebAssembly bytes to that isolate and JavaScript hooks to the in-process backend. `CROSS_POLICY` allows the in-process grants and sets a time and memory limit the isolate actually enforces. JavaScript on that same composition is still not limited.
 
 | Export | Use |
 |---|---|
 | `validateManifest` | Check one manifest before you compose. |
-| `compose` | Load packages. Pass `{ trust: "trusted-in-process" }` or omit it. |
+| `compose` | Load packages. Pass `{ trust: "trusted-in-process" }` or a backend. |
 | `contributionsFor` | Read a slot. The host does not interpret payloads. |
 | `publish`, `runPipeline`, `callService` | Caller-initiated execution. There is no tick. |
 | `captureSave`, `restoreSave` | JSON a module exports. Same major version only. |
 | `FOUNDATIONS_API` | The host version a `moduleApi` range must admit. Today `1.0.0`. |
+| `createWasmBackend`, `createCrossBackend`, `CROSS_POLICY` | Run a guest, or run guests and JavaScript in one composition. |
 
 ## Manifest
 
@@ -28,7 +29,7 @@ The schema is closed. An unknown field is an error. Versions are `major.minor.pa
 - `connectsTo`: a slot id and a contract reference (`platform.system/1` or a full version).
 - `exposesSlots`: slots this module owns. Kind is `singleton`, `policy`, `registry`, `pipeline`, `subscriber`, or `service`.
 - `save`: optional `{ "version": "1.0.0" }`. Exact. This module then owns one JSON slice. A document with two slices for that module is refused. Object keys are sorted. Array order is kept.
-- `permissions`: stored on the result. Not enforced. A list here is not a sandbox.
+- `permissions`: stored on the result. Not a sandbox for JavaScript. For a guest, `cgp.log` is linked only when this list and the policy's `allowCapabilities` both include it. Every other import is refused before the guest runs.
 
 A module cannot connect to a slot it owns. Two modules cannot own the same slot id.
 
@@ -49,19 +50,31 @@ export const implementation: ModuleImplementation = {
 
 `register` may `contribute` and may `keep` once. A second `keep` fails registration and rolls the composition back.
 
-`initialize` and `shutdown` receive `kept()` and `ownedSlot(slotId)`. `shutdown` runs in reverse initialization order. After `shutdown()`, the result is quiesced and dispatch and save refuse.
+`initialize` and `shutdown` receive `kept()` and `ownedSlot(slotId)`. `shutdown` runs in reverse initialization order. It is single-flight: a second call reports `already` and does not run the hooks again. If one module's shutdown throws, the host records it and continues with the rest. `release` still runs, including when a hook throws, so the composition's workers are terminated. After `shutdown()`, the result is quiesced and dispatch and save refuse.
 
 `exportState` returns JSON. `importState` receives a slice whose major version matches the manifest. The host does not migrate for you.
 
-A callable contribution is a function, or an object with a `handle` function. `publish` keeps going after a throw. `runPipeline` stops. `callService` calls the one provider. A service may return `undefined`. A pipeline stage may not.
+A callable contribution is a function, an object with a `handle` function, or an ABI handle. `publish` keeps going after a throw. `runPipeline` stops. `callService` calls the one provider. A service may return `undefined`. A pipeline stage may not.
 
 Contribution ids match `^[a-z][a-z0-9-]{0,64}$`. Order is `(order, module id, contribution id)`.
+
+## WebAssembly
+
+Copy `examples/wasm-module`. It has `manifest.json` and `module.wasm` and no `module.ts`. Discovery reads the bytes and does not instantiate them. The binary must export `memory` (one page maximum in the template), `cg_alloc`, `cg_hook`, `cg_out_ptr`, and `cg_out_len`. The only legal import is `cgp.abi.log`. See [abi.md](abi.md).
+
+`dispatch: true` on a contribution replaces that contribution's payload with an ABI handle. An object whose only key is `dispatch: true`, nested inside the payload, becomes a handle too. Later calls go back through hook `5`. The call JSON is `{ "contributionId", "arg", "args" }`. The result is JSON. A number result is a JSON number, not an object.
+
+`org.cgp.dune-growth` is the first guest that computes a real contribution. It is off by default. It provides the same growth capability as Seasonal Growth, so enabling both is a conflict. Its arithmetic is fixed-point hundredths: `delta = (growthHundredths * factorHundredths + 50) / 100`, with spring 120, summer 80, autumn 30, and winter 5.
+
+Aggregate budgets are optional fields on the policy: `maxGuests`, `maxTotalMemoryBytes`, `maxTotalBinaryBytes`, and `maxTotalHookMs`. Unset means unlimited. Only an isolating backend enforces them, and only for the composition that opened the session. A failed load refunds the guest, binary, and memory charge. Hook time is wall clock. Once it reaches the budget, further calls are refused. The in-process backend cannot enforce these, so a policy that sets them refuses that backend before any hook runs.
+
+`scripts/verify-wasm.ts` checks the shipped dune bytes and the template binary against the generators. The foundations workflow runs that check and the host tests on Node 22.
 
 ## What a refusal looks like
 
 `validateManifest` returns `{ ok: false, errors }` or `{ ok: true, manifest }`.
 
-`compose` isolates a bad manifest and can still activate its neighbors. A conflict, an ambiguous service, a cycle, a contract mismatch, a missing required slot, depth past 8, or a throw from `initialize` refuses the admitted graph. `result.runtimeActive` is false and `result.diagnostics` says why. Nothing from that graph stays registered.
+`compose` isolates a bad manifest and can still activate its neighbors. A conflict, an ambiguous service, a cycle, a contract mismatch, a missing required slot, depth past 8, or a throw from `initialize` refuses the admitted graph. `result.runtimeActive` is false and `result.diagnostics` says why. Nothing from that graph stays registered. The session is released.
 
 ## Profiles
 
@@ -71,4 +84,4 @@ A profile is a JSON document, not a list in host code. It pins module ids and ex
 
 ## What this is not
 
-Modules are trusted in-process code. There is no isolate, no resource limit, and no hot reload. The host does not know what a payload means.
+The in-process backend is trusted code. It is not an isolate and it cannot enforce a resource limit. A WebAssembly guest is an isolate: one worker, one memory, a time limit, and no filesystem, network, or operating-system import. A cross composition can hold both. JavaScript in that composition is still not sandboxed. There is no hot reload. The host does not know what a payload means.

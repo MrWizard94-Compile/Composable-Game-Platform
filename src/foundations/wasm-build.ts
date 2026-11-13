@@ -51,19 +51,31 @@ const op = {
   drop: [0x1a],
   localGet: (n: number) => [0x20, ...uleb(n)],
   localSet: (n: number) => [0x21, ...uleb(n)],
+  localTee: (n: number) => [0x22, ...uleb(n)],
   globalGet: (n: number) => [0x23, ...uleb(n)],
   globalSet: (n: number) => [0x24, ...uleb(n)],
   i32Const: (n: number) => [0x41, ...sleb(n)],
   i32Eqz: [0x45],
   i32Eq: [0x46],
   i32Ne: [0x47],
+  i32LtS: [0x48],
+  i32LtU: [0x49],
+  i32GtS: [0x4a],
   i32GtU: [0x4b],
+  i32LeU: [0x4d],
   i32GeU: [0x4f],
   i32Add: [0x6a],
+  i32Sub: [0x6b],
+  i32Mul: [0x6c],
+  i32DivU: [0x6e],
+  i32RemU: [0x70],
   i32Load8U: [0x2d, 0x00, 0x00],
   i32Store8: [0x3a, 0x00, 0x00],
   memoryGrow: [0x40, 0x00],
 };
+
+/** Opcode helpers for a guest built outside this file. */
+export const wasmOp = op;
 
 function funcBody(localCount: number, body: number[]): number[] {
   const locals = localCount > 0 ? [1, ...uleb(localCount), I32] : [0];
@@ -216,6 +228,15 @@ function standardExports(funcBase: number): WasmSpec["exports"] {
     { name: "cg_out_len", kind: "func", index: funcBase + 2 },
     { name: "cg_hook", kind: "func", index: funcBase + 3 },
   ];
+}
+
+/** `cg_alloc`, `cg_out_ptr`, and `cg_out_len`, in that order. A guest appends `cg_hook`. */
+export function abiSupportFuncs(): Fn[] {
+  return [allocFunc(), outPtrFunc(), outLenFunc()];
+}
+
+export function abiExports(funcBase: number): WasmSpec["exports"] {
+  return standardExports(funcBase);
 }
 
 /** Copies an imported JSON payload and later exports those same bytes. */
@@ -556,4 +577,41 @@ export function sharedGuest(): Uint8Array {
     globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
     exports: standardExports(0),
   });
+}
+
+/** Loops only while shutting down. Register and every other hook return. */
+export function shutdownLoopGuest(): Uint8Array {
+  const body = [
+    ...op.localGet(0),
+    ...op.i32Const(2),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.loop,
+    ...op.br(0),
+    ...op.end,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+  });
+}
+
+/** Copyable guest. It contributes one opaque record and does not import anything. */
+export function templateGuest(): Uint8Array {
+  return storeGuest(
+    JSON.stringify({
+      contributions: [
+        {
+          slotId: "platform.systems",
+          id: "starter",
+          payload: { systemId: "starter", label: "Starter" },
+        },
+      ],
+    }),
+  );
 }

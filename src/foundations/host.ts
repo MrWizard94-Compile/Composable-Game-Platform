@@ -1108,26 +1108,43 @@ export async function compose(packages: readonly ModulePackage[], options: Compo
   );
 
   let built: CompositionResult;
-  const shutdown = async (): Promise<ShutdownReport> => {
-    if (built.quiesced) return { already: true, order: [], diagnostics: [] };
+  let finishing: Promise<ShutdownReport> | undefined;
+  const shutdown = (): Promise<ShutdownReport> => {
+    if (finishing) return finishing.then(() => ({ already: true, order: [], diagnostics: [] }));
     built.quiesced = true;
     const shutdownDiagnostics: Diagnostic[] = [];
     const shutdownOrder = [...initialized].reverse();
-    for (const moduleId of shutdownOrder) {
-      const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
-      trace.push(`${moduleId}:shutdown`);
-      const failure = await callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
-      if (failure) {
-        shutdownDiagnostics.push(
-          errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${failure}`, {
-            phase: "shutdown",
-            moduleId,
-          }),
-        );
+    finishing = (async () => {
+      try {
+        for (const moduleId of shutdownOrder) {
+          const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
+          trace.push(`${moduleId}:shutdown`);
+          try {
+            const failure = await callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
+            if (failure) {
+              shutdownDiagnostics.push(
+                errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${failure}`, {
+                  phase: "shutdown",
+                  moduleId,
+                }),
+              );
+            }
+          } catch (caught) {
+            const message = caught instanceof Error ? caught.message : String(caught);
+            shutdownDiagnostics.push(
+              errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${message}`, {
+                phase: "shutdown",
+                moduleId,
+              }),
+            );
+          }
+        }
+      } finally {
+        await session.release();
       }
-    }
-    await session.release();
-    return { already: false, order: shutdownOrder, diagnostics: shutdownDiagnostics };
+      return { already: false, order: shutdownOrder, diagnostics: shutdownDiagnostics };
+    })();
+    return finishing;
   };
 
   built = assemble({

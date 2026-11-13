@@ -9,6 +9,8 @@ import seasonalManifest from "./org.cgp.seasonal-growth/manifest.json" with { ty
 import { implementation as seasonalGrowth } from "./org.cgp.seasonal-growth/module.ts";
 import acceleratedManifest from "./org.cgp.accelerated-growth/manifest.json" with { type: "json" };
 import { implementation as acceleratedGrowth } from "./org.cgp.accelerated-growth/module.ts";
+import duneManifest from "./org.cgp.dune-growth/manifest.json" with { type: "json" };
+import { duneWasmBytes } from "./org.cgp.dune-growth/bytes.ts";
 import lightingManifest from "./org.cgp.lighting-core/manifest.json" with { type: "json" };
 import { implementation as lightingCore } from "./org.cgp.lighting-core/module.ts";
 import pointManifest from "./org.cgp.point-lights/manifest.json" with { type: "json" };
@@ -83,6 +85,7 @@ export const CATALOG: readonly CatalogEntry[] = [
   entry("Flora", false, desertManifest, desertPlants),
   entry("Flora", true, seasonalManifest, seasonalGrowth),
   entry("Flora", false, acceleratedManifest, acceleratedGrowth),
+  entry("Flora", false, duneManifest, { wasm: duneWasmBytes }),
   entry("Lighting", true, lightingManifest, lightingCore),
   entry("Lighting", true, pointManifest, pointLights),
   entry("Lighting", true, directionalManifest, directionalLights),

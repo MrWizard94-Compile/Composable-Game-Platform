@@ -30,7 +30,15 @@ describe("packaged modules", () => {
     for (const found of discovered) {
       const bundled = CATALOG.find((item) => moduleIdOf(item.manifest) === moduleIdOf(found.manifest));
       assert.deepEqual(found.manifest, bundled?.manifest);
-      assert.equal(found.implementation, undefined);
+      const foundWasm = found.implementation?.wasm;
+      const bundledWasm = bundled?.implementation?.wasm;
+      if (foundWasm || bundledWasm) {
+        assert.ok(foundWasm instanceof Uint8Array);
+        assert.deepEqual(foundWasm, bundledWasm);
+        assert.equal(found.implementation?.register, undefined);
+      } else {
+        assert.equal(found.implementation, undefined);
+      }
     }
   });
 

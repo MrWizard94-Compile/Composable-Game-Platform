@@ -20,6 +20,14 @@ export type ExecutionPolicy = {
   maxMemoryBytes?: number;
   /** Imports an isolating backend may link. The in-process backend cannot enforce these. */
   allowCapabilities?: readonly string[];
+  /**
+   * Aggregate budgets. Only an isolating backend enforces them.
+   * Unset means unlimited. They are per composition, not per backend.
+   */
+  maxGuests?: number;
+  maxTotalMemoryBytes?: number;
+  maxTotalBinaryBytes?: number;
+  maxTotalHookMs?: number;
 };
 
 /** No implicit filesystem, network, or operating-system grant. No unenforced limit. */
@@ -178,7 +186,13 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
       message: `Backend "${backend.id}" grants ${extra.join(", ")}. The policy does not allow that, so no module code ran.`,
     };
   }
-  const asksForLimit = policy.maxHookMs !== undefined || policy.maxMemoryBytes !== undefined;
+  const asksForLimit =
+    policy.maxHookMs !== undefined ||
+    policy.maxMemoryBytes !== undefined ||
+    policy.maxGuests !== undefined ||
+    policy.maxTotalMemoryBytes !== undefined ||
+    policy.maxTotalBinaryBytes !== undefined ||
+    policy.maxTotalHookMs !== undefined;
   if (asksForLimit && !backend.enforcesLimits) {
     return {
       code: "trust.limits",
@@ -190,6 +204,18 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
   }
   if (policy.maxMemoryBytes !== undefined && (!Number.isFinite(policy.maxMemoryBytes) || policy.maxMemoryBytes <= 0)) {
     return { code: "trust.limits", message: "maxMemoryBytes must be a positive finite number." };
+  }
+  if (policy.maxGuests !== undefined && (!Number.isInteger(policy.maxGuests) || policy.maxGuests <= 0)) {
+    return { code: "trust.limits", message: "maxGuests must be a positive integer." };
+  }
+  if (policy.maxTotalMemoryBytes !== undefined && (!Number.isFinite(policy.maxTotalMemoryBytes) || policy.maxTotalMemoryBytes <= 0)) {
+    return { code: "trust.limits", message: "maxTotalMemoryBytes must be a positive finite number." };
+  }
+  if (policy.maxTotalBinaryBytes !== undefined && (!Number.isFinite(policy.maxTotalBinaryBytes) || policy.maxTotalBinaryBytes <= 0)) {
+    return { code: "trust.limits", message: "maxTotalBinaryBytes must be a positive finite number." };
+  }
+  if (policy.maxTotalHookMs !== undefined && (!Number.isFinite(policy.maxTotalHookMs) || policy.maxTotalHookMs <= 0)) {
+    return { code: "trust.limits", message: "maxTotalHookMs must be a positive finite number." };
   }
   if (policy.allowCapabilities !== undefined) {
     const names = policy.allowCapabilities;

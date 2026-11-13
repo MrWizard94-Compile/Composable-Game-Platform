@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { ABI_HOOK, ABI_ID, isAbiHandle, type AbiContribution } from "./abi.ts";
+import { ABI_HOOK, isAbiHandle, guestContributions } from "./abi.ts";
 import type { ExecutionBackend, ExecutionPolicy, ExecutionSession, HookCall, HookName, HookResult, PayloadResult } from "./backend.ts";
 
 const PAGE = 65536;
@@ -9,6 +9,10 @@ type Limits = {
   maxHookMs: number;
   maxMemoryBytes: number;
   allow: Set<string>;
+  maxGuests?: number;
+  maxTotalMemoryBytes?: number;
+  maxTotalBinaryBytes?: number;
+  maxTotalHookMs?: number;
 };
 
 type Guest = {
@@ -176,6 +180,10 @@ export function createWasmBackend(options?: {
       if (policy.maxHookMs !== undefined) limits.maxHookMs = policy.maxHookMs;
       if (policy.maxMemoryBytes !== undefined) limits.maxMemoryBytes = policy.maxMemoryBytes;
       limits.allow = new Set(policy.allowCapabilities ?? []);
+      limits.maxGuests = policy.maxGuests;
+      limits.maxTotalMemoryBytes = policy.maxTotalMemoryBytes;
+      limits.maxTotalBinaryBytes = policy.maxTotalBinaryBytes;
+      limits.maxTotalHookMs = policy.maxTotalHookMs;
     },
     recognizesPayload: isAbiHandle,
     hasHook(implementation, hook) {
@@ -187,9 +195,17 @@ export function createWasmBackend(options?: {
         maxHookMs: limits.maxHookMs,
         maxMemoryBytes: limits.maxMemoryBytes,
         allow: new Set(limits.allow),
+        maxGuests: limits.maxGuests,
+        maxTotalMemoryBytes: limits.maxTotalMemoryBytes,
+        maxTotalBinaryBytes: limits.maxTotalBinaryBytes,
+        maxTotalHookMs: limits.maxTotalHookMs,
       };
       const guests = new Map<string, Guest>();
       const cancelPending = new Set<() => void>();
+      let guestCount = 0;
+      let memoryUsed = 0;
+      let binaryUsed = 0;
+      let spentMs = 0;
       let released = false;
       const session: ExecutionSession = {
         id: `wasm-${++serial}`,
@@ -258,7 +274,15 @@ export function createWasmBackend(options?: {
         }
         if (hook === ABI_HOOK.register) {
           try {
-            applyContributions(call.moduleId, call.args[0], answered.value);
+            const rows = guestContributions(call.moduleId, answered.value);
+            const contribute =
+              call.args[0] && typeof call.args[0] === "object" && "contribute" in call.args[0]
+                ? (call.args[0] as { contribute?: (slotId: string, contribution: { id: string; order?: number; payload: unknown }) => void })
+                    .contribute
+                : undefined;
+            if (typeof contribute === "function") {
+              for (const row of rows) contribute(row.slotId, { id: row.id, order: row.order, payload: row.payload });
+            }
           } catch (error) {
             stopGuest(guest);
             return { ok: false, error: error instanceof Error ? error : new Error("Guest contributions were refused.") };
@@ -274,6 +298,13 @@ export function createWasmBackend(options?: {
       ): Promise<{ ok: true; guest: Guest } | { ok: false; error: string; guest?: Guest }> {
         const refused = refuseBinary(moduleId, bytes, captured, permissions);
         if (refused) return { ok: false, error: refused };
+        const inspected = inspectWasm(bytes);
+        const memoryBytes =
+          "max" in inspected.memory && typeof inspected.memory.max === "number"
+            ? inspected.memory.max * PAGE
+            : captured.maxMemoryBytes;
+        const overBudget = reserve(moduleId, bytes.byteLength, memoryBytes);
+        if (overBudget) return { ok: false, error: overBudget };
         const allowLog = permissions.includes("cgp.log") && captured.allow.has("cgp.log");
         const heapMb = Math.max(8, Math.ceil(captured.maxMemoryBytes / (1024 * 1024)) + 8);
         const worker = new Worker(new URL("./wasm-worker.mjs", import.meta.url), {
@@ -291,26 +322,55 @@ export function createWasmBackend(options?: {
         });
         const loaded = await callGuest(guest, { op: "load", wasm: bytes, allowLog });
         if (!loaded.ok) {
+          refund(bytes.byteLength, memoryBytes);
           stopGuest(guest);
           return { ok: false, error: released ? "This composition has been released." : loaded.error, guest };
         }
         if (released) {
+          refund(bytes.byteLength, memoryBytes);
           stopGuest(guest);
           return { ok: false, error: "This composition has been released.", guest };
         }
         return { ok: true, guest };
       }
 
+      function reserve(moduleId: string, binaryBytes: number, memoryBytes: number): string | undefined {
+        if (captured.maxGuests !== undefined && guestCount + 1 > captured.maxGuests) {
+          return `Module "${moduleId}" exceeds the composition guest budget of ${captured.maxGuests}.`;
+        }
+        if (captured.maxTotalBinaryBytes !== undefined && binaryUsed + binaryBytes > captured.maxTotalBinaryBytes) {
+          return `Module "${moduleId}" exceeds the composition binary budget of ${captured.maxTotalBinaryBytes} bytes.`;
+        }
+        if (captured.maxTotalMemoryBytes !== undefined && memoryUsed + memoryBytes > captured.maxTotalMemoryBytes) {
+          return `Module "${moduleId}" exceeds the composition memory budget of ${captured.maxTotalMemoryBytes} bytes.`;
+        }
+        guestCount += 1;
+        binaryUsed += binaryBytes;
+        memoryUsed += memoryBytes;
+        return undefined;
+      }
+
+      function refund(binaryBytes: number, memoryBytes: number) {
+        guestCount -= 1;
+        binaryUsed -= binaryBytes;
+        memoryUsed -= memoryBytes;
+      }
+
       function callGuest(guest: Guest, message: Record<string, unknown>): Promise<GuestAnswer> {
         if (released) return Promise.resolve({ ok: false, error: "This composition has been released." });
         if (guest.dead || !guest.worker) return Promise.resolve({ ok: false, error: "The isolate was stopped." });
+        if (captured.maxTotalHookMs !== undefined && spentMs >= captured.maxTotalHookMs) {
+          return Promise.resolve({ ok: false, error: "Composition hook budget exceeded." });
+        }
         const worker = guest.worker;
         const id = ++messageSerial;
+        const started = Date.now();
         return new Promise((resolve) => {
           let settled = false;
           const finish = (answer: GuestAnswer) => {
             if (settled) return;
             settled = true;
+            if (captured.maxTotalHookMs !== undefined) spentMs += Math.max(0, Date.now() - started);
             clearTimeout(timer);
             cancelPending.delete(cancel);
             worker.off("message", onMessage);
@@ -416,22 +476,4 @@ function refuseBinary(
     }
   }
   return undefined;
-}
-
-function applyContributions(moduleId: string, ctx: unknown, value: unknown) {
-  const contribute = ctx && typeof ctx === "object" && "contribute" in ctx ? (ctx as { contribute?: unknown }).contribute : undefined;
-  if (typeof contribute !== "function") return;
-  const row = value && typeof value === "object" ? (value as { contributions?: unknown }).contributions : undefined;
-  if (row === undefined) return;
-  if (!Array.isArray(row)) throw new Error("Register result contributions must be an array.");
-  for (const item of row) {
-    const contribution = item as AbiContribution;
-    if (!contribution || typeof contribution.slotId !== "string" || typeof contribution.id !== "string") {
-      throw new Error("A guest contribution is missing a slot or an id.");
-    }
-    const payload = contribution.dispatch
-      ? { abi: ABI_ID, moduleId, contributionId: contribution.id }
-      : contribution.payload;
-    contribute(contribution.slotId, { id: contribution.id, order: contribution.order, payload });
-  }
 }

@@ -31,6 +31,7 @@ Query Core owns a service slot. `callService` invokes the one provider and retur
 ## Run the tests
 
 ```sh
+node --experimental-strip-types scripts/verify-wasm.ts
 node --experimental-strip-types --test \
   src/foundations/semver.test.ts \
   src/foundations/host.test.ts \
@@ -38,6 +39,8 @@ node --experimental-strip-types --test \
   src/foundations/save.test.ts \
   src/foundations/authoring.test.ts \
   src/foundations/profile.test.ts \
+  src/foundations/isolation.test.ts \
+  src/foundations/stress.test.ts \
   src/modules/composition.test.ts
 ```
 
@@ -51,7 +54,8 @@ node --experimental-strip-types src/modules/headless-demo.ts
 
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
 - `src/modules/*` — packaged proofs. One folder per module.
-- `examples/starter-module` — a copyable package. See [docs/authoring.md](docs/authoring.md).
+- `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
+- `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.
 - `profiles/*.json` — composition pins. A different packaged version refuses the chip. The host does not upgrade.
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.
