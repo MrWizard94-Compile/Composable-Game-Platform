@@ -957,6 +957,86 @@ describe("deterministic simulation", () => {
     }
   });
 
+  it("refuses a capture from an async completion subscriber after await", async () => {
+    const wasm = createWasmBackend();
+    try {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let mark = () => {};
+      const entered = new Promise<void>((resolve) => {
+        mark = resolve;
+      });
+      const heard: number[] = [];
+      let nestedCode = "";
+      let live: Awaited<ReturnType<typeof open>> | undefined;
+      const late = {
+        manifest: manifest("org.example.sim-async", {
+          save: { version: "1.0.0" },
+          requires: [{ capability: "sim.core", version: "^1.0.0" }],
+          connectsTo: [{ slot: "sim.completed", contract: "sim.completed/1" }],
+        }),
+        implementation: {
+          register(ctx: {
+            keep: (value: unknown) => void;
+            contribute: (slotId: string, contribution: { id: string; order: number; payload: (event: unknown) => Promise<void> }) => void;
+          }) {
+            ctx.keep({ heard });
+            ctx.contribute("sim.completed", {
+              id: "late",
+              order: -1,
+              async payload(event: unknown) {
+                const tick =
+                  event && typeof event === "object" && "tick" in event ? (event as { tick?: unknown }).tick : undefined;
+                const host = live;
+                if (!host) throw new Error("missing composition");
+                mark();
+                await gate;
+                const report = await captureSave(host);
+                nestedCode = report.notices[0]?.code ?? "";
+                if (typeof tick === "number") heard.push(tick);
+              },
+            });
+          },
+          exportState() {
+            return { heard: [...heard] };
+          },
+        },
+      };
+      const result = await open([...packagesFor([...SIM_IDS]), late], wasm, "sim-async-subscriber");
+      live = result;
+      await plant(result, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const pending = advanceSimulation(result, { tick: 1, delta: 1, inputs: DRIVES });
+      await entered;
+      const mid = await readSimulation(result);
+      if (!mid.ok) assert.fail(mid.reason);
+      assert.equal(mid.state.tick, 1);
+      assert.deepEqual(heard, []);
+      let captureDone = false;
+      const shot = captureSave(result).then((report) => {
+        captureDone = true;
+        return report;
+      });
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      assert.equal(captureDone, false);
+      release();
+      const step = await pending;
+      assert.equal(step.ok, true, step.ok ? "" : step.reason);
+      assert.equal(nestedCode, "save.reentrant");
+      const captured = await shot;
+      assert.equal(captured.ok, true, captured.notices.map((item) => item.message).join("\n"));
+      assert.deepEqual(slice(captured.document, "org.cgp.sim-ledger"), { tick: 1, entities: at(1) });
+      assert.deepEqual(slice(captured.document, "org.cgp.sim-witness"), { heard: [1] });
+      assert.deepEqual(slice(captured.document, "org.example.sim-async"), { heard: [1] });
+      await result.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
   it("matches the mixed proof in Chromium, including after save and restore", { timeout: 90_000 }, async () => {
     const report = await runBrowserSimulationCheck();
     const heard = Array.from({ length: 80 }, (_, index) => index + 1);
@@ -984,6 +1064,18 @@ describe("deterministic simulation", () => {
     assert.deepEqual(report.subscriberLedger, { tick: 1, entities: at(1) });
     assert.deepEqual(report.subscriberWitness, { heard: [1] });
     assert.deepEqual(report.subscriberLate, { heard: [1] });
+    assert.equal(report.context.importOwn, "save.reentrant");
+    assert.equal(report.context.foreignOk, true);
+    assert.equal(report.context.exportOwn, "save.reentrant");
+    assert.equal(report.context.exportRestore, "save.reentrant");
+    assert.equal(report.context.pairHeld, true);
+    assert.deepEqual(report.context.pairA, { n: 2 });
+    assert.deepEqual(report.context.pairB, { n: 8 });
+    assert.deepEqual(report.context.serviceEarly, { n: 1 });
+    assert.deepEqual(report.context.serviceLate, { n: 7 });
+    assert.equal(report.context.subscriberOwn, "save.reentrant");
+    assert.deepEqual(report.context.subscriberLedger, { tick: 1, entities: at(1) });
+    assert.deepEqual(report.context.subscriberLate, { heard: [1] });
     assert.equal(report.sessions, 0);
     assert.equal(report.guests, 0);
     assert.equal(report.memoryBytes, 0);

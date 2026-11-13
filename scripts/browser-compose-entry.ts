@@ -91,6 +91,20 @@ export async function runBrowserSimulation(): Promise<{
   subscriberLedger: unknown;
   subscriberWitness: unknown;
   subscriberLate: unknown;
+  context: {
+    importOwn: string;
+    foreignOk: boolean;
+    exportOwn: string;
+    exportRestore: string;
+    pairHeld: boolean;
+    pairA: unknown;
+    pairB: unknown;
+    serviceEarly: unknown;
+    serviceLate: unknown;
+    subscriberOwn: string;
+    subscriberLedger: unknown;
+    subscriberLate: unknown;
+  };
   sessions: number;
   guests: number;
   memoryBytes: number;
@@ -219,6 +233,8 @@ export async function runBrowserSimulation(): Promise<{
 
     const paired = await browserPairedRestore(backend);
     const subscriber = await browserSubscriberSnapshot(backend, packages);
+    const context = await browserContextProof(backend);
+    const asyncSubscriber = await browserAsyncSubscriber(backend, packages);
 
     await finish(continuous);
     await finish(next);
@@ -250,6 +266,20 @@ export async function runBrowserSimulation(): Promise<{
       subscriberLedger: subscriber.ledger,
       subscriberWitness: subscriber.witness,
       subscriberLate: subscriber.late,
+      context: {
+        importOwn: context.importOwn,
+        foreignOk: context.foreignOk,
+        exportOwn: context.exportOwn,
+        exportRestore: context.exportRestore,
+        pairHeld: context.pairHeld,
+        pairA: context.pairA,
+        pairB: context.pairB,
+        serviceEarly: context.serviceEarly,
+        serviceLate: context.serviceLate,
+        subscriberOwn: asyncSubscriber.own,
+        subscriberLedger: asyncSubscriber.ledger,
+        subscriberLate: asyncSubscriber.late,
+      },
       sessions: backend.openSessions(),
       guests: usage.guests,
       memoryBytes: usage.memoryBytes,
@@ -450,4 +480,367 @@ async function browserSubscriberSnapshot(
   } finally {
     if (result.runtimeActive && !result.quiesced) await result.shutdown();
   }
+}
+
+async function browserAsyncSubscriber(
+  backend: Parameters<typeof createCrossBackend>[0],
+  packages: ReturnType<typeof packagesFor>,
+) {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let mark = () => {};
+  const entered = new Promise<void>((resolve) => {
+    mark = resolve;
+  });
+  const heard: number[] = [];
+  let own = "";
+  let live: CompositionResult | undefined;
+  const late = {
+    manifest: {
+      moduleId: "org.example.sim-async",
+      name: "async",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      save: { version: "1.0.0" },
+      requires: [{ capability: "sim.core", version: "^1.0.0" }],
+      connectsTo: [{ slot: "sim.completed", contract: "sim.completed/1" }],
+    },
+    implementation: {
+      register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; order: number; payload: (event: unknown) => Promise<void> }) => void }) {
+        ctx.keep({ heard });
+        ctx.contribute("sim.completed", {
+          id: "late",
+          order: -1,
+          async payload(event: unknown) {
+            const tick = event && typeof event === "object" && "tick" in event ? (event as { tick?: unknown }).tick : undefined;
+            const host = live;
+            if (!host) throw new Error("missing composition");
+            mark();
+            await gate;
+            const report = await captureSave(host);
+            own = report.notices[0]?.code ?? "";
+            if (typeof tick === "number") heard.push(tick);
+          },
+        });
+      },
+      exportState() {
+        return { heard: [...heard] };
+      },
+    },
+  };
+  const result = await compose([...packages, late], {
+    backend: createCrossBackend(backend),
+    policy: CROSS_POLICY,
+    profileName: "sim-browser-async",
+  });
+  if (!result.runtimeActive) throw new Error(result.diagnostics.map((item) => item.message).join("\n"));
+  live = result;
+  try {
+    const first = await seedSimulation(result, { id: "e1", x: 0, y: 0 });
+    if (!first.ok) throw new Error(first.reason);
+    const second = await seedSimulation(result, { id: "e2", x: 10, y: 0 });
+    if (!second.ok) throw new Error(second.reason);
+    const pending = advanceSimulation(result, { tick: 1, delta: 1, inputs: PROOF_DRIVES });
+    await entered;
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone) throw new Error("Capture returned before the async subscriber finished.");
+    release();
+    const step = await pending;
+    if (!step.ok) throw new Error(step.reason);
+    const captured = await shot;
+    if (!captured.ok) throw new Error(captured.notices.map((item) => item.message).join("\n"));
+    return {
+      own,
+      ledger: sliceOf(captured.document, "org.cgp.sim-ledger"),
+      late: sliceOf(captured.document, "org.example.sim-async"),
+    };
+  } finally {
+    if (result.runtimeActive && !result.quiesced) await result.shutdown();
+  }
+}
+
+function savedModule(id: string, hooks: Record<string, unknown>) {
+  return {
+    manifest: {
+      moduleId: id,
+      name: id.split(".").at(-1) ?? id,
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      save: { version: "1.0.0" },
+    },
+    implementation: hooks,
+  };
+}
+
+async function browserContextProof(backend: Parameters<typeof createCrossBackend>[0]) {
+  const openJs = async (packages: readonly unknown[], profileName: string) => {
+    const result = await compose(packages as never, {
+      backend: createCrossBackend(backend),
+      policy: CROSS_POLICY,
+      profileName,
+    });
+    if (!result.runtimeActive) throw new Error(result.diagnostics.map((item) => item.message).join("\n"));
+    return result;
+  };
+  let releaseImport = () => {};
+  const importGate = new Promise<void>((resolve) => {
+    releaseImport = resolve;
+  });
+  let markImport = () => {};
+  const importEntered = new Promise<void>((resolve) => {
+    markImport = resolve;
+  });
+  let importLive: CompositionResult | undefined;
+  let idleLive: CompositionResult | undefined;
+  let importOwn = "";
+  let foreignOk = false;
+  const importing = savedModule("org.example.early", {
+    register(ctx: { keep: (value: unknown) => void }) {
+      ctx.keep({ n: 0 });
+    },
+    exportState(ctx: { kept: () => unknown }) {
+      const state = ctx.kept() as { n?: unknown } | undefined;
+      return { n: typeof state?.n === "number" ? state.n : 0 };
+    },
+    async importState(ctx: { kept: () => unknown }, saved: unknown) {
+      const state = ctx.kept() as { n: number } | undefined;
+      const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+      markImport();
+      await importGate;
+      const host = importLive;
+      const other = idleLive;
+      if (!host || !other) throw new Error("missing composition");
+      const refused = await captureSave(host);
+      const foreign = await captureSave(other);
+      importOwn = refused.notices[0]?.code ?? "";
+      foreignOk = foreign.ok && foreign.notices.every((item) => item.code !== "save.reentrant");
+      if (state && typeof n === "number") state.n = n;
+    },
+  });
+  const idleModule = savedModule("org.example.idle", {
+    register(ctx: { keep: (value: unknown) => void }) {
+      ctx.keep({ n: 0 });
+    },
+    exportState() {
+      return { n: 0 };
+    },
+  });
+  const imported = await openJs([importing], "sim-browser-import");
+  const idle = await openJs([idleModule], "sim-browser-idle");
+  importLive = imported;
+  idleLive = idle;
+  const restoring = restoreSave(imported, {
+    foundationsApi: "1.0.0",
+    profileName: imported.profileName,
+    fingerprint: imported.fingerprint,
+    slices: [{ moduleId: "org.example.early", version: "1.0.0", payload: { n: 4 } }],
+  });
+  await importEntered;
+  const idleShot = await captureSave(idle);
+  if (!idleShot.ok || idleShot.document.slices[0]?.payload && (idleShot.document.slices[0].payload as { n: number }).n !== 0) {
+    throw new Error("An outside capture was contaminated by another composition.");
+  }
+  releaseImport();
+  const restored = await restoring;
+  if (!restored.ok) throw new Error(restored.notices.map((item) => item.message).join("\n"));
+  await imported.shutdown();
+  await idle.shutdown();
+
+  let exportLive: CompositionResult | undefined;
+  let exportOwn = "";
+  let exportRestore = "";
+  const box = savedModule("org.example.box", {
+    register(ctx: { keep: (value: unknown) => void }) {
+      ctx.keep({ n: 3 });
+    },
+    async exportState(ctx: { kept: () => unknown }) {
+      const state = ctx.kept() as { n?: unknown } | undefined;
+      const n = typeof state?.n === "number" ? state.n : 0;
+      await Promise.resolve();
+      const host = exportLive;
+      if (!host) throw new Error("missing composition");
+      const refused = await captureSave(host);
+      const nested = await restoreSave(host, {
+        foundationsApi: "1.0.0",
+        profileName: host.profileName,
+        fingerprint: host.fingerprint,
+        slices: [{ moduleId: "org.example.box", version: "1.0.0", payload: { n: 1 } }],
+      });
+      exportOwn = refused.notices[0]?.code ?? "";
+      exportRestore = nested.notices[0]?.code ?? "";
+      return { n };
+    },
+  });
+  const exporting = await openJs([box], "sim-browser-export");
+  exportLive = exporting;
+  const exported = await captureSave(exporting);
+  if (!exported.ok) throw new Error(exported.notices.map((item) => item.message).join("\n"));
+  await exporting.shutdown();
+
+  let releaseA = () => {};
+  let releaseB = () => {};
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const gateB = new Promise<void>((resolve) => {
+    releaseB = resolve;
+  });
+  let markA = () => {};
+  let markB = () => {};
+  const enteredA = new Promise<void>((resolve) => {
+    markA = resolve;
+  });
+  const enteredB = new Promise<void>((resolve) => {
+    markB = resolve;
+  });
+  let liveA: CompositionResult | undefined;
+  let liveB: CompositionResult | undefined;
+  const held = (mark: () => void, gate: Promise<void>, self: () => CompositionResult | undefined) =>
+    savedModule("org.example.held", {
+      register(ctx: { keep: (value: unknown) => void }) {
+        ctx.keep({ n: 0 });
+      },
+      exportState(ctx: { kept: () => unknown }) {
+        const state = ctx.kept() as { n?: unknown } | undefined;
+        return { n: typeof state?.n === "number" ? state.n : 0 };
+      },
+      async importState(ctx: { kept: () => unknown }, saved: unknown) {
+        const state = ctx.kept() as { n: number } | undefined;
+        const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+        mark();
+        await gate;
+        const host = self();
+        if (!host) throw new Error("missing composition");
+        const refused = await captureSave(host);
+        if (refused.notices[0]?.code !== "save.reentrant") throw new Error("Held import was not refused.");
+        if (state && typeof n === "number") state.n = n;
+      },
+    });
+  const first = await openJs([held(markA, gateA, () => liveA)], "sim-browser-a");
+  const second = await openJs([held(markB, gateB, () => liveB)], "sim-browser-b");
+  liveA = first;
+  liveB = second;
+  const doc = (result: CompositionResult, n: number) => ({
+    foundationsApi: "1.0.0",
+    profileName: result.profileName,
+    fingerprint: result.fingerprint,
+    slices: [{ moduleId: "org.example.held", version: "1.0.0", payload: { n } }],
+  });
+  const restoringA = restoreSave(first, doc(first, 2));
+  const restoringB = restoreSave(second, doc(second, 8));
+  await enteredA;
+  await enteredB;
+  let doneB = false;
+  const shotB = captureSave(second).then((report) => {
+    doneB = true;
+    return report;
+  });
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+  if (doneB) throw new Error("Capture of B finished during B's restore.");
+  releaseA();
+  const restoredA = await restoringA;
+  if (!restoredA.ok) throw new Error(restoredA.notices.map((item) => item.message).join("\n"));
+  const shotA = await captureSave(first);
+  if (doneB) throw new Error("Finishing A released B's capture.");
+  releaseB();
+  const restoredB = await restoringB;
+  const capturedB = await shotB;
+  if (!restoredB.ok || !shotA.ok || !capturedB.ok) throw new Error("Pair restore did not finish.");
+  await first.shutdown();
+  await second.shutdown();
+
+  let releaseService = () => {};
+  const serviceGate = new Promise<void>((resolve) => {
+    releaseService = resolve;
+  });
+  let markService = () => {};
+  const serviceEntered = new Promise<void>((resolve) => {
+    markService = resolve;
+  });
+  const late = { n: 0 };
+  const serviceEarly = savedModule("org.example.early", {
+    register(ctx: { keep: (value: unknown) => void }) {
+      ctx.keep({ n: 1 });
+    },
+    async exportState(ctx: { kept: () => unknown }) {
+      const state = ctx.kept() as { n?: unknown } | undefined;
+      const n = typeof state?.n === "number" ? state.n : 0;
+      markService();
+      await serviceGate;
+      return { n };
+    },
+  });
+  const serviceLate = savedModule("org.example.late", {
+    register(ctx: { keep: (value: unknown) => void }) {
+      ctx.keep(late);
+    },
+    exportState() {
+      return { n: late.n };
+    },
+  });
+  const desk = {
+    manifest: {
+      moduleId: "org.example.desk",
+      name: "desk",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      exposesSlots: [
+        {
+          slotId: "example.ask",
+          contract: "example.answer",
+          contractVersion: "1.0.0",
+          kind: "service",
+          required: false,
+        },
+      ],
+    },
+    implementation: {},
+  };
+  const bump = {
+    manifest: {
+      moduleId: "org.example.bump",
+      name: "bump",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+    },
+    implementation: {
+      register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+        ctx.contribute("example.ask", {
+          id: "bump",
+          payload() {
+            late.n += 7;
+          },
+        });
+      },
+    },
+  };
+  const serving = await openJs([desk, bump, serviceEarly, serviceLate], "sim-browser-service");
+  const pendingService = captureSave(serving);
+  await serviceEntered;
+  const bumped = await callService(serving, "example.ask", undefined);
+  if (!bumped.ok) throw new Error(bumped.reason ?? "bump failed");
+  releaseService();
+  const served = await pendingService;
+  if (!served.ok) throw new Error(served.notices.map((item) => item.message).join("\n"));
+  await serving.shutdown();
+
+  return {
+    importOwn,
+    foreignOk,
+    exportOwn,
+    exportRestore,
+    pairHeld: true,
+    pairA: sliceOf(shotA.document, "org.example.held"),
+    pairB: sliceOf(capturedB.document, "org.example.held"),
+    serviceEarly: sliceOf(served.document, "org.example.early"),
+    serviceLate: sliceOf(served.document, "org.example.late"),
+  };
 }

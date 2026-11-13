@@ -152,6 +152,9 @@ export async function runBrowserCompositionCheck(): Promise<void> {
       format: "esm",
       platform: "browser",
       target: "es2022",
+      // Native await does not call Promise.prototype.then. Chromium has no
+      // async-context API, so the page's composition frame follows lowered awaits.
+      supported: { "async-await": false },
       outfile: join(dir, "compose.js"),
     });
     // esbuild leaves `new URL("./wasm-worker-browser.mjs", import.meta.url)` intact.
@@ -223,6 +226,20 @@ export type BrowserSimReport = {
   subscriberLedger: unknown;
   subscriberWitness: unknown;
   subscriberLate: unknown;
+  context: {
+    importOwn: string;
+    foreignOk: boolean;
+    exportOwn: string;
+    exportRestore: string;
+    pairHeld: boolean;
+    pairA: unknown;
+    pairB: unknown;
+    serviceEarly: unknown;
+    serviceLate: unknown;
+    subscriberOwn: string;
+    subscriberLedger: unknown;
+    subscriberLate: unknown;
+  };
   sessions: number;
   guests: number;
   memoryBytes: number;
@@ -264,6 +281,9 @@ export async function runBrowserSimulationCheck(): Promise<BrowserSimReport> {
       format: "esm",
       platform: "browser",
       target: "es2022",
+      // Native await does not call Promise.prototype.then. Chromium has no
+      // async-context API, so the page's composition frame follows lowered awaits.
+      supported: { "async-await": false },
       outfile: join(dir, "compose.js"),
     });
     cpSync(join(root, "src/foundations/wasm-worker-browser.mjs"), join(dir, "wasm-worker-browser.mjs"));

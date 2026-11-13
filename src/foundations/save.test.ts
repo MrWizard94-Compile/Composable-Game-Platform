@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { compose as hostCompose, moduleMemory, type ComposeOptions, type ModulePackage } from "./host.ts";
 import { IN_PROCESS_POLICY } from "./backend.ts";
+import { callService } from "./dispatch.ts";
 import { captureSave, restoreSave } from "./save.ts";
 
 function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}) {
@@ -68,6 +69,10 @@ const owner = pkg(
 );
 
 describe("capture and restore", () => {
+  it("does not replace Promise.prototype.then on Node", () => {
+    assert.match(Function.prototype.toString.call(Promise.prototype.then), /\[native code\]/);
+  });
+
   it("round-trips JSON and leaves a different major untouched", async () => {
     const result = await compose([owner, counter("org.example.count")], { profileName: "preview" });
     const implementation = result.contributions[0]?.payload;
@@ -583,5 +588,312 @@ describe("capture and restore", () => {
     const done = await captureSave(result);
     assert.deepEqual(done.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 4 });
     assert.deepEqual(done.document.slices.find((item) => item.moduleId === "org.example.tail")?.payload, { n: 4 });
+  });
+
+  it("refuses a save from an async importState after await", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let mark = () => {};
+    const entered = new Promise<void>((resolve) => {
+      mark = resolve;
+    });
+    let live: Awaited<ReturnType<typeof compose>> | undefined;
+    let idle: Awaited<ReturnType<typeof compose>> | undefined;
+    let own = "";
+    let foreignOk = false;
+    const early = pkg(
+      moduleManifest("org.example.early", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 0 });
+          ctx.contribute("example.listeners", { id: "early", payload() {} });
+        },
+        exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          return { n: typeof state?.n === "number" ? state.n : 0 };
+        },
+        async importState(ctx, saved) {
+          const state = ctx.kept() as { n: number } | undefined;
+          const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+          mark();
+          await gate;
+          const host = live;
+          const other = idle;
+          if (!host || !other) throw new Error("missing composition");
+          const refused = await captureSave(host);
+          const foreign = await captureSave(other);
+          own = refused.notices[0]?.code ?? "";
+          foreignOk = foreign.ok && foreign.notices.every((item) => item.code !== "save.reentrant");
+          if (state && typeof n === "number") state.n = n;
+        },
+      },
+    );
+    const result = await compose([owner, early, counter("org.example.tail")]);
+    const other = await compose([owner, counter("org.example.other")]);
+    live = result;
+    idle = other;
+    const restoring = restoreSave(result, {
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.early", version: "1.0.0", payload: { n: 4 } },
+        { moduleId: "org.example.tail", version: "1.0.0", payload: { n: 4 } },
+      ],
+    });
+    await entered;
+    const idleShot = await captureSave(other);
+    assert.equal(idleShot.ok, true, idleShot.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(idleShot.document.slices.find((item) => item.moduleId === "org.example.other")?.payload, { n: 0 });
+    let captureDone = false;
+    const waiting = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(captureDone, false);
+    release();
+    const restored = await restoring;
+    const captured = await waiting;
+    assert.equal(restored.ok, true, restored.notices.map((item) => item.message).join("\n"));
+    assert.equal(own, "save.reentrant");
+    assert.equal(foreignOk, true);
+    assert.equal(captured.ok, true, captured.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 4 });
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.tail")?.payload, { n: 4 });
+    assert.match(Function.prototype.toString.call(Promise.prototype.then), /\[native code\]/);
+  });
+
+  it("refuses a save from an async exportState after await", async () => {
+    let live: Awaited<ReturnType<typeof compose>> | undefined;
+    let own = "";
+    let restoreCode = "";
+    const box = pkg(
+      moduleManifest("org.example.box", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 3 });
+          ctx.contribute("example.listeners", { id: "box", payload() {} });
+        },
+        async exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          const n = typeof state?.n === "number" ? state.n : 0;
+          await Promise.resolve();
+          const host = live;
+          if (!host) throw new Error("missing composition");
+          const refused = await captureSave(host);
+          const nested = await restoreSave(host, {
+            foundationsApi: "1.0.0",
+            profileName: host.profileName,
+            fingerprint: host.fingerprint,
+            slices: [{ moduleId: "org.example.box", version: "1.0.0", payload: { n: 1 } }],
+          });
+          own = refused.notices[0]?.code ?? "";
+          restoreCode = nested.notices[0]?.code ?? "";
+          return { n };
+        },
+        importState(ctx, saved) {
+          const state = ctx.kept() as { n: number } | undefined;
+          const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+          if (state && typeof n === "number") state.n = n;
+        },
+      },
+    );
+    const result = await compose([owner, box]);
+    live = result;
+    const captured = await captureSave(result);
+    assert.equal(captured.ok, true, captured.notices.map((item) => item.message).join("\n"));
+    assert.equal(own, "save.reentrant");
+    assert.equal(restoreCode, "save.reentrant");
+    assert.deepEqual(captured.document.slices[0]?.payload, { n: 3 });
+    assert.deepEqual(moduleMemory(result, "org.example.box"), { n: 3 });
+  });
+
+  it("does not let one composition's hook refuse or snapshot the other", async () => {
+    let releaseA = () => {};
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let releaseB = () => {};
+    const gateB = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    let markA = () => {};
+    const enteredA = new Promise<void>((resolve) => {
+      markA = resolve;
+    });
+    let markB = () => {};
+    const enteredB = new Promise<void>((resolve) => {
+      markB = resolve;
+    });
+    let liveA: Awaited<ReturnType<typeof compose>> | undefined;
+    let liveB: Awaited<ReturnType<typeof compose>> | undefined;
+    let ownA = "";
+    const make = (mark: () => void, gate: Promise<void>, self: () => Awaited<ReturnType<typeof compose>> | undefined, record?: (code: string) => void) =>
+      pkg(
+        moduleManifest("org.example.held", {
+          save: { version: "1.0.0" },
+          connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+        }),
+        {
+          register(ctx) {
+            ctx.keep({ n: 0 });
+            ctx.contribute("example.listeners", { id: "held", payload() {} });
+          },
+          exportState(ctx) {
+            const state = ctx.kept() as { n?: unknown } | undefined;
+            return { n: typeof state?.n === "number" ? state.n : 0 };
+          },
+          async importState(ctx, saved) {
+            const state = ctx.kept() as { n: number } | undefined;
+            const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+            mark();
+            await gate;
+            const host = self();
+            if (!host) throw new Error("missing composition");
+            const refused = await captureSave(host);
+            record?.(refused.notices[0]?.code ?? "");
+            if (state && typeof n === "number") state.n = n;
+          },
+        },
+      );
+    const first = await compose([owner, make(markA, gateA, () => liveA, (code) => { ownA = code; })]);
+    const second = await compose([owner, make(markB, gateB, () => liveB)]);
+    const idle = await compose([owner, counter("org.example.idle")]);
+    liveA = first;
+    liveB = second;
+    const document = (result: Awaited<ReturnType<typeof compose>>, n: number) => ({
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [{ moduleId: "org.example.held", version: "1.0.0", payload: { n } }],
+    });
+    const restoringA = restoreSave(first, document(first, 2));
+    const restoringB = restoreSave(second, document(second, 8));
+    await enteredA;
+    await enteredB;
+    const idleShot = await captureSave(idle);
+    assert.equal(idleShot.ok, true);
+    assert.deepEqual(idleShot.document.slices[0]?.payload, { n: 0 });
+    let doneA = false;
+    let doneB = false;
+    const shotA = captureSave(first).then((report) => {
+      doneA = true;
+      return report;
+    });
+    const shotB = captureSave(second).then((report) => {
+      doneB = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(doneA, false);
+    assert.equal(doneB, false);
+    assert.deepEqual(moduleMemory(second, "org.example.held"), { n: 0 });
+    releaseA();
+    const restoredA = await restoringA;
+    const capturedA = await shotA;
+    assert.equal(doneB, false);
+    assert.equal(restoredA.ok, true, restoredA.notices.map((item) => item.message).join("\n"));
+    assert.equal(ownA, "save.reentrant");
+    assert.deepEqual(capturedA.document.slices[0]?.payload, { n: 2 });
+    assert.deepEqual(moduleMemory(second, "org.example.held"), { n: 0 });
+    releaseB();
+    const restoredB = await restoringB;
+    const capturedB = await shotB;
+    assert.equal(restoredB.ok, true, restoredB.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(capturedB.document.slices[0]?.payload, { n: 8 });
+    assert.deepEqual(capturedA.document.slices[0]?.payload, { n: 2 });
+  });
+
+  it("lets a direct service change only the slices exported after the call", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let mark = () => {};
+    const entered = new Promise<void>((resolve) => {
+      mark = resolve;
+    });
+    const late = { n: 0 };
+    const early = pkg(
+      moduleManifest("org.example.early", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 1 });
+          ctx.contribute("example.listeners", { id: "early", payload() {} });
+        },
+        async exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          const n = typeof state?.n === "number" ? state.n : 0;
+          mark();
+          await gate;
+          return { n };
+        },
+      },
+    );
+    const next = pkg(
+      moduleManifest("org.example.late", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep(late);
+          ctx.contribute("example.listeners", { id: "late", payload() {} });
+        },
+        exportState() {
+          return { n: late.n };
+        },
+      },
+    );
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.answer",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const bump = pkg(
+      moduleManifest("org.example.bump", {
+        connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            payload() {
+              late.n += 7;
+            },
+          });
+        },
+      },
+    );
+    const result = await compose([owner, desk, bump, early, next]);
+    const pending = captureSave(result);
+    await entered;
+    const bumped = await callService(result, "example.ask", undefined);
+    assert.equal(bumped.ok, true, bumped.reason ?? "");
+    release();
+    const captured = await pending;
+    assert.equal(captured.ok, true, captured.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 1 });
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, { n: 7 });
   });
 });

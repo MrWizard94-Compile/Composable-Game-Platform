@@ -1,7 +1,7 @@
 import type { HookCall } from "./backend.ts";
 import type { CompositionResult, LifecycleContext } from "./host.ts";
 import { FOUNDATIONS_API, backendOf, moduleImplementation, moduleMemory, runExclusive, sessionOf } from "./host.ts";
-import { inSaveZone } from "./save-zone.ts";
+import { inSaveZone, runInSaveZone } from "./save-zone.ts";
 import { parseSemVer } from "./semver.ts";
 
 /**
@@ -116,7 +116,7 @@ function sameMajor(left: string, right: string): boolean {
 }
 
 export function captureSave(result: CompositionResult): Promise<CaptureReport> {
-  if (inSaveZone()) {
+  if (inSaveZone(result)) {
     return Promise.resolve({
       ok: false,
       document: emptyDocument(result),
@@ -149,12 +149,14 @@ async function captureBody(result: CompositionResult): Promise<CaptureReport> {
       continue;
     }
     let payload: unknown;
-    const exported = await sessionOf(result).invoke({
-      moduleId,
-      hook: "exportState",
-      implementation: implementation as HookCall["implementation"],
-      args: [life(result, moduleId)],
-    });
+    const exported = await runInSaveZone(result, () =>
+      sessionOf(result).invoke({
+        moduleId,
+        hook: "exportState",
+        implementation: implementation as HookCall["implementation"],
+        args: [life(result, moduleId)],
+      }),
+    );
     if (!exported.ok) {
       const message = exported.error instanceof Error ? exported.error.message : "exportState threw a non-error value.";
       notices.push(notice("error", "save.threw", message, moduleId));
@@ -174,7 +176,7 @@ async function captureBody(result: CompositionResult): Promise<CaptureReport> {
 }
 
 export function restoreSave(result: CompositionResult, document: unknown): Promise<RestoreReport> {
-  if (inSaveZone()) {
+  if (inSaveZone(result)) {
     return Promise.resolve({
       ok: false,
       applied: [],
@@ -322,12 +324,14 @@ async function restoreBody(result: CompositionResult, document: unknown): Promis
   const prior = new Map<string, unknown>();
   let halted = false;
   for (const item of planned) {
-    const exported = await sessionOf(result).invoke({
-      moduleId: item.moduleId,
-      hook: "exportState",
-      implementation: item.implementation,
-      args: [life(result, item.moduleId)],
-    });
+    const exported = await runInSaveZone(result, () =>
+      sessionOf(result).invoke({
+        moduleId: item.moduleId,
+        hook: "exportState",
+        implementation: item.implementation,
+        args: [life(result, item.moduleId)],
+      }),
+    );
     if (!exported.ok) {
       const message = exported.error instanceof Error ? exported.error.message : "exportState threw a non-error value.";
       notices.push(notice("error", "save.threw", message, item.moduleId));
@@ -348,12 +352,14 @@ async function restoreBody(result: CompositionResult, document: unknown): Promis
   const applied: string[] = [];
   if (!halted) {
     for (const item of planned) {
-      const imported = await sessionOf(result).invoke({
-        moduleId: item.moduleId,
-        hook: "importState",
-        implementation: item.implementation,
-        args: [life(result, item.moduleId), item.payload],
-      });
+      const imported = await runInSaveZone(result, () =>
+        sessionOf(result).invoke({
+          moduleId: item.moduleId,
+          hook: "importState",
+          implementation: item.implementation,
+          args: [life(result, item.moduleId), item.payload],
+        }),
+      );
       if (!imported.ok) {
         const message = imported.error instanceof Error ? imported.error.message : "importState threw a non-error value.";
         notices.push(notice("error", "save.threw", message, item.moduleId));
@@ -361,12 +367,14 @@ async function restoreBody(result: CompositionResult, document: unknown): Promis
         for (const moduleId of [...applied, item.moduleId]) {
           const previous = prior.get(moduleId);
           const owner = planned.find((entry) => entry.moduleId === moduleId);
-          const back = await sessionOf(result).invoke({
-            moduleId,
-            hook: "importState",
-            implementation: owner?.implementation,
-            args: [life(result, moduleId), previous],
-          });
+          const back = await runInSaveZone(result, () =>
+            sessionOf(result).invoke({
+              moduleId,
+              hook: "importState",
+              implementation: owner?.implementation,
+              args: [life(result, moduleId), previous],
+            }),
+          );
           if (!back.ok) {
             const rollbackMessage = back.error instanceof Error ? back.error.message : "importState threw a non-error value.";
             notices.push(notice("error", "save.rollback", rollbackMessage, moduleId));

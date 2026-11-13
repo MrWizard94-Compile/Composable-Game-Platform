@@ -1,5 +1,6 @@
 import type { CompositionResult, ContributionRecord } from "./host.ts";
 import { contributionsFor, sessionOf } from "./host.ts";
+import { runInSaveZone } from "./save-zone.ts";
 
 /**
  * Caller-initiated execution for three slot kinds.
@@ -68,7 +69,7 @@ export type ServiceReport = {
 const NOT_CALLABLE = Symbol("not-callable");
 
 async function callHandler(result: CompositionResult, payload: unknown, arg: unknown): Promise<unknown | typeof NOT_CALLABLE> {
-  const outcome = await sessionOf(result).callPayload(payload, [arg]);
+  const outcome = await runInSaveZone(result, () => sessionOf(result).callPayload(payload, [arg]));
   if (!outcome.ok && outcome.code === "not-callable") return NOT_CALLABLE;
   if (!outcome.ok) throw outcome.error;
   // A handler may be async. The promise is the call, not a value for the next stage.
