@@ -68,6 +68,8 @@ export type WasmTableLimit = { min: number; max: number | null; shared: boolean 
 type IsolateLimits = {
   maxHookMs: number;
   maxMemoryBytes: number;
+  /** Per-module binary cap. Independent of `maxMemoryBytes`. */
+  maxBinaryBytes: number;
   allow: Set<string>;
   maxGuests?: number;
   maxTotalMemoryBytes?: number;
@@ -258,18 +260,27 @@ export function createLogBuffer(budget: LogBudget): LogBuffer {
   const lines: string[] = [];
   let bytes = 0;
   let dropped = false;
+  const noteDrop = () => {
+    dropped = true;
+    const marker = "[log dropped]";
+    const markerSize = utf8Bytes(marker);
+    if (markerSize > budget.maxBytes) return;
+    while (lines.length > 0 && bytes + markerSize > budget.maxBytes) {
+      const removed = lines.shift();
+      if (removed !== undefined) bytes -= utf8Bytes(removed);
+    }
+    if (bytes + markerSize <= budget.maxBytes) {
+      lines.push(marker);
+      bytes += markerSize;
+    }
+  };
   return {
     push(moduleId, line) {
       const clipped = clipUtf8(line, budget.maxLine);
       const stored = `[${moduleId}] ${clipped}`;
       const size = utf8Bytes(stored);
       if (dropped || lines.length >= budget.maxLines || bytes + size > budget.maxBytes) {
-        if (!dropped) {
-          dropped = true;
-          const marker = "[log dropped]";
-          lines.push(marker);
-          bytes += utf8Bytes(marker);
-        }
+        if (!dropped) noteDrop();
         return;
       }
       lines.push(stored);
@@ -304,9 +315,10 @@ function createHostLedger(budget: HostBudget): HostLedger {
   return { guests: 0, memory: 0, binary: 0, hookMs: 0, budget, admit };
 }
 
-function applyPolicy(limits: IsolateLimits, policy: ExecutionPolicy) {
+function applyPolicy(limits: IsolateLimits, policy: ExecutionPolicy, binaryDefault: number) {
   if (policy.maxHookMs !== undefined) limits.maxHookMs = policy.maxHookMs;
   if (policy.maxMemoryBytes !== undefined) limits.maxMemoryBytes = policy.maxMemoryBytes;
+  limits.maxBinaryBytes = policy.maxBinaryBytes ?? binaryDefault;
   limits.allow = new Set(policy.allowCapabilities ?? []);
   limits.maxGuests = policy.maxGuests;
   limits.maxTotalMemoryBytes = policy.maxTotalMemoryBytes;
@@ -331,13 +343,16 @@ export function createIsolateBackend(options: {
   spawn: (heapMb: number) => GuestProcess;
   maxHookMs?: number;
   maxMemoryBytes?: number;
+  maxBinaryBytes?: number;
   allowCapabilities?: readonly string[];
   host?: HostBudget;
   log?: Partial<LogBudget>;
 }): IsolateBackend {
+  const binaryDefault = options.maxBinaryBytes ?? PAGE;
   const limits: IsolateLimits = {
     maxHookMs: options.maxHookMs ?? 1000,
     maxMemoryBytes: options.maxMemoryBytes ?? PAGE,
+    maxBinaryBytes: binaryDefault,
     allow: new Set(options.allowCapabilities ?? []),
   };
   const logBudget: LogBudget = {
@@ -395,7 +410,7 @@ export function createIsolateBackend(options: {
       return undefined;
     },
     configure(policy) {
-      applyPolicy(limits, policy);
+      applyPolicy(limits, policy, binaryDefault);
     },
     recognizesPayload: isAbiHandle,
     hasHook(implementation) {
@@ -406,6 +421,7 @@ export function createIsolateBackend(options: {
       const captured: IsolateLimits = {
         maxHookMs: limits.maxHookMs,
         maxMemoryBytes: limits.maxMemoryBytes,
+        maxBinaryBytes: limits.maxBinaryBytes,
         allow: new Set(limits.allow),
         maxGuests: limits.maxGuests,
         maxTotalMemoryBytes: limits.maxTotalMemoryBytes,
@@ -676,6 +692,7 @@ export function createIsolateBackend(options: {
             ...message,
             id,
             maxBytes: captured.maxMemoryBytes,
+            maxBinaryBytes: captured.maxBinaryBytes,
             maxLogBytes: logBudget.maxBytes,
             maxLogLines: logBudget.maxLines,
             maxLogLine: logBudget.maxLine,
@@ -755,8 +772,8 @@ function refuseBinary(
   captured: IsolateLimits,
   permissions: readonly string[],
 ): string | undefined {
-  if (bytes.byteLength > captured.maxMemoryBytes) {
-    return `Module "${moduleId}" binary is ${bytes.byteLength} bytes. The limit is ${captured.maxMemoryBytes}.`;
+  if (bytes.byteLength > captured.maxBinaryBytes) {
+    return `Module "${moduleId}" binary is ${bytes.byteLength} bytes. The binary limit is ${captured.maxBinaryBytes}.`;
   }
   let inspected: ReturnType<typeof inspectWasm>;
   try {

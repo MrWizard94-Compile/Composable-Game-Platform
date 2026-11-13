@@ -12,5 +12,11 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "22.16.5",
+    "esbuild": "0.28.2",
+    "playwright": "1.64.0",
+    "typescript": "5.7.3"
   }
 }

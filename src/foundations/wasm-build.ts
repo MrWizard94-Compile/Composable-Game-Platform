@@ -31,7 +31,7 @@ function sleb(value: number): number[] {
 }
 
 function name(text: string): number[] {
-  const bytes = [...Buffer.from(text)];
+  const bytes = [...new TextEncoder().encode(text)];
   return [...uleb(bytes.length), ...bytes];
 }
 
@@ -243,13 +243,21 @@ export function abiExports(funcBase: number): WasmSpec["exports"] {
 export function storeGuest(registerJson: string): Uint8Array {
   const register = text(registerJson);
   const initial = text('{"count":0}');
+  const registerAt = 400;
+  const heapAt = 1024;
+  const stateLimit = 128;
+  // State sits at 512 unless the register blob needs that room. The two must not overlap.
+  const stateAt = Math.max(512, registerAt + register.length);
+  if (stateAt + stateLimit > heapAt) {
+    throw new Error(`Register payload is ${register.length} bytes. It must end before the guest heap.`);
+  }
   const copy: number[] = [
     ...op.localGet(0),
     ...op.i32Const(4),
     ...op.i32Eq,
     ...op.if,
     ...op.localGet(2),
-    ...op.i32Const(128),
+    ...op.i32Const(stateLimit),
     ...op.i32GtU,
     ...op.if,
     ...op.i32Const(1),
@@ -264,7 +272,7 @@ export function storeGuest(registerJson: string): Uint8Array {
     ...op.i32GeU,
     ...op.brIf(1),
     ...op.localGet(3),
-    ...op.i32Const(512),
+    ...op.i32Const(stateAt),
     ...op.i32Add,
     ...op.localGet(1),
     ...op.localGet(3),
@@ -278,7 +286,7 @@ export function storeGuest(registerJson: string): Uint8Array {
     ...op.br(0),
     ...op.end,
     ...op.end,
-    ...op.i32Const(512),
+    ...op.i32Const(stateAt),
     ...op.globalSet(1),
     ...op.localGet(2),
     ...op.globalSet(2),
@@ -290,14 +298,14 @@ export function storeGuest(registerJson: string): Uint8Array {
     ...op.localGet(0),
     ...op.i32Eqz,
     ...op.if,
-    ...op.i32Const(400),
+    ...op.i32Const(registerAt),
     ...op.globalSet(1),
     ...op.i32Const(register.length),
     ...op.globalSet(2),
     ...op.i32Const(0),
     ...op.ret,
     ...op.end,
-    ...op.i32Const(512),
+    ...op.i32Const(stateAt),
     ...op.globalSet(1),
     ...op.globalGet(3),
     ...op.globalSet(2),
@@ -307,11 +315,11 @@ export function storeGuest(registerJson: string): Uint8Array {
     types: STANDARD_TYPES,
     funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, locals: 1, body: copy }],
     memory: { min: 1, max: 1 },
-    globals: [{ init: 1024 }, { init: 512 }, { init: initial.length }, { init: initial.length }],
+    globals: [{ init: heapAt }, { init: stateAt }, { init: initial.length }, { init: initial.length }],
     exports: standardExports(0),
     data: [
-      { offset: 400, bytes: register },
-      { offset: 512, bytes: initial },
+      { offset: registerAt, bytes: register },
+      { offset: stateAt, bytes: initial },
     ],
   });
 }
@@ -702,6 +710,19 @@ export function initFaultGuest(): Uint8Array {
     exports: standardExports(0),
     data: [{ offset: 400, bytes: register }],
   });
+}
+
+/** Appends a custom section so the file can be larger than the guest's linear memory. */
+export function withCustomPadding(bytes: Uint8Array, padding: number): Uint8Array {
+  const payload = 1 + padding;
+  const size = uleb(payload);
+  const section = new Uint8Array(1 + size.length + payload);
+  section[0] = 0;
+  section.set(size, 1);
+  const out = new Uint8Array(bytes.byteLength + section.byteLength);
+  out.set(bytes, 0);
+  out.set(section, bytes.byteLength);
+  return out;
 }
 
 /** Passes the binary checks, instantiates, then fails because `cg_hook` is missing. */

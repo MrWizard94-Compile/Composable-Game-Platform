@@ -16,6 +16,7 @@ type WorkerMessage = { id?: number; ok?: boolean; text?: string };
 export function createWasmBackend(options?: {
   maxHookMs?: number;
   maxMemoryBytes?: number;
+  maxBinaryBytes?: number;
   allowCapabilities?: readonly string[];
   host?: HostBudget;
   log?: Partial<LogBudget>;
@@ -25,6 +26,7 @@ export function createWasmBackend(options?: {
     supportsHeap: true,
     maxHookMs: options?.maxHookMs,
     maxMemoryBytes: options?.maxMemoryBytes,
+    maxBinaryBytes: options?.maxBinaryBytes,
     allowCapabilities: options?.allowCapabilities,
     host: options?.host,
     log: options?.log,

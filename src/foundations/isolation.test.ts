@@ -23,6 +23,7 @@ import {
   unboundedGuest,
   wasiGuest,
   wideGuest,
+  withCustomPadding,
 } from "./wasm-build.ts";
 
 function manifest(moduleId: string, extra: Record<string, unknown> = {}) {
@@ -41,6 +42,10 @@ function wasmPolicy(extra: Partial<ExecutionPolicy> = {}): ExecutionPolicy {
 
 function pkg(moduleId: string, wasm: Uint8Array, extra: Record<string, unknown> = {}, implementationExtra: Record<string, unknown> = {}): ModulePackage {
   return { manifest: manifest(moduleId, extra), implementation: { wasm, ...implementationExtra } };
+}
+
+function messages(result: { diagnostics: Array<{ message: string }> }): string {
+  return result.diagnostics.map((item) => item.message).join("\n");
 }
 
 describe("isolated wasm execution", () => {
@@ -85,6 +90,36 @@ describe("isolated wasm execution", () => {
     assert.match(foreign.diagnostics.map((item) => item.message).join("\n"), /Unauthorized import node:fs.log/);
     assert.equal(backend.openSessions(), 0);
     backend.dispose();
+  });
+
+  it("limits a guest binary separately from its linear memory", async () => {
+    const backend = createWasmBackend();
+    const small = storeGuest("{}");
+    const tight = await compose([pkg("org.example.small", small)], {
+      backend,
+      policy: wasmPolicy({ maxBinaryBytes: 32, maxMemoryBytes: 65536 }),
+    });
+    assert.equal(tight.runtimeActive, false);
+    assert.match(messages(tight), new RegExp(`binary is ${small.byteLength} bytes\\. The binary limit is 32\\.`));
+    assert.doesNotMatch(messages(tight), /memory maximum/);
+
+    const padded = withCustomPadding(small, 70_000);
+    assert.ok(padded.byteLength > 65536);
+    const memory = await compose([pkg("org.example.wide-file", padded)], {
+      backend,
+      policy: wasmPolicy({ maxMemoryBytes: 65536 }),
+    });
+    assert.match(messages(memory), /binary limit is 65536/);
+    const allowed = await compose([pkg("org.example.wide-file", padded)], {
+      backend,
+      policy: wasmPolicy({ maxMemoryBytes: 65536, maxBinaryBytes: padded.byteLength }),
+    });
+    assert.equal(allowed.runtimeActive, true, messages(allowed));
+    assert.equal(backend.resourceUsage().memoryBytes, 65536);
+    assert.equal(backend.resourceUsage().binaryBytes, padded.byteLength);
+    await allowed.shutdown();
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+    await backend.dispose();
   });
 
   it("stops an infinite loop and still runs a later module", async () => {

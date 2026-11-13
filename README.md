@@ -31,6 +31,8 @@ Query Core owns a service slot. `callService` invokes the one provider and retur
 ## Run the tests
 
 ```sh
+npm ci
+npx playwright install chromium
 node --experimental-strip-types scripts/build-wasm-module.ts
 node --experimental-strip-types scripts/verify-wasm.ts
 node --experimental-strip-types --test \
@@ -49,6 +51,8 @@ npx tsc -p tsconfig.foundations.json --noEmit
 node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
 node --experimental-strip-types scripts/browser-wasm.ts
 ```
+
+`npm ci` installs the development dependencies in `package.json`: TypeScript, `@types/node`, esbuild, and Playwright. Chromium is installed after that, and the typecheck runs only once those packages are present.
 
 Headless proof:
 

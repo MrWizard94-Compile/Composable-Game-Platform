@@ -1,7 +1,9 @@
 import { createServer, type Server } from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync, cpSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import esbuild from "esbuild";
 import { chromium } from "playwright";
 import { templateGuest, wasiGuest } from "../src/foundations/wasm-build.ts";
 
@@ -95,7 +97,7 @@ export async function runBrowserWasmCheck(): Promise<void> {
               clearTimeout(timer);
               resolve({ ok: false, text: event.message || "worker error", realWorker: worker instanceof Worker });
             };
-            worker.postMessage({ id: 1, op: "load", wasm: decode(encoded), allowLog: false, maxBytes: 65536 });
+            worker.postMessage({ id: 1, op: "load", wasm: decode(encoded), allowLog: false, maxBytes: 65536, maxBinaryBytes: 65536 });
           });
         return { good: await run(storeBytes), bad: await run(wasiBytes) };
       },
@@ -114,7 +116,96 @@ export async function runBrowserWasmCheck(): Promise<void> {
   }
 }
 
+/**
+ * Bundles the host and runs `createBrowserWasmBackend()` inside Chromium.
+ * The worker is the browser's Worker, not a test double.
+ */
+export async function runBrowserCompositionCheck(): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "cgp-browser-"));
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/" || url.pathname === "/harness.html") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><meta charset=\"utf-8\"><title>browser composition</title>");
+      return;
+    }
+    const relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+    if (relative.includes("..")) {
+      response.writeHead(403);
+      response.end();
+      return;
+    }
+    const path = join(dir, relative);
+    if (!existsSync(path)) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { "content-type": types[extname(path)] ?? "text/javascript; charset=utf-8" });
+    response.end(readFileSync(path));
+  });
+  try {
+    await esbuild.build({
+      absWorkingDir: root,
+      entryPoints: ["scripts/browser-compose-entry.ts"],
+      bundle: true,
+      format: "esm",
+      platform: "browser",
+      target: "es2022",
+      outfile: join(dir, "compose.js"),
+    });
+    // esbuild leaves `new URL("./wasm-worker-browser.mjs", import.meta.url)` intact.
+    // Publish that module and the runtime it imports beside the bundle so Chromium loads the real worker.
+    cpSync(join(root, "src/foundations/wasm-worker-browser.mjs"), join(dir, "wasm-worker-browser.mjs"));
+    cpSync(join(root, "src/foundations/wasm-guest-runtime.mjs"), join(dir, "wasm-guest-runtime.mjs"));
+    const port = await listen(server);
+    const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+    try {
+      const page = await browser.newPage();
+      const failed: string[] = [];
+      page.on("pageerror", (error) => failed.push(error.message));
+      page.on("console", (message) => {
+        if (message.type() === "error") failed.push(message.text());
+      });
+      await page.goto(`http://127.0.0.1:${port}/harness.html`);
+      const report = await page.evaluate(async (href: string) => {
+        const loaded = (await import(href)) as {
+          runBrowserComposition: () => Promise<{
+            active: boolean;
+            contributionId: string;
+            wasi: string;
+            padded: boolean;
+            paddedDetail: string;
+            sessions: number;
+            detail: string;
+          }>;
+        };
+        return loaded.runBrowserComposition();
+      }, "/compose.js");
+      if (failed.length > 0) throw new Error(failed.join("\n"));
+      if (report.active !== true || report.contributionId !== "starter") {
+        throw new Error(`Browser composition did not contribute: ${JSON.stringify(report)}`);
+      }
+      if (typeof report.wasi !== "string" || !/Unauthorized import wasi_snapshot_preview1/.test(report.wasi)) {
+        throw new Error(`Browser composition accepted a forbidden import: ${JSON.stringify(report)}`);
+      }
+      if (report.padded !== true) {
+        throw new Error(`Browser composition tied binary size to linear memory: ${JSON.stringify(report)}`);
+      }
+      if (report.sessions !== 0) {
+        throw new Error(`Browser composition left a session open: ${JSON.stringify(report)}`);
+      }
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   await runBrowserWasmCheck();
+  await runBrowserCompositionCheck();
   console.log("browser wasm ok");
 }

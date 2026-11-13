@@ -12,15 +12,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install the typechecker
-        run: npm install --no-save --no-fund --no-audit typescript@5.7.3 @types/node@22.16.5
+      - name: Install development dependencies
+        run: npm ci --no-fund --no-audit
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
       - name: Typecheck foundations, the browser isolate, and the shared runtime
         run: npx tsc -p tsconfig.foundations.json --noEmit
       - name: Verify shipped WebAssembly
         run: node --experimental-strip-types scripts/verify-wasm.ts
       - name: Check the third-party guest package
         run: node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
-      - name: Install Chromium for the browser isolate
-        run: npm install --no-save --no-fund --no-audit playwright@1.62.0 && npx playwright install --with-deps chromium
       - name: Foundations, browser isolation, composition, and stress
         run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/modules/composition.test.ts

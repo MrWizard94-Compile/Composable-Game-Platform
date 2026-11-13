@@ -24,6 +24,7 @@
     "scripts/verify-wasm.ts",
     "scripts/build-wasm-module.ts",
     "scripts/check-wasm-module.ts",
-    "scripts/browser-wasm.ts"
+    "scripts/browser-wasm.ts",
+    "scripts/browser-compose-entry.ts"
   ]
 }

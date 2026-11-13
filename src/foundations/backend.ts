@@ -17,7 +17,10 @@ export type HostGrant = (typeof HOST_GRANTS)[number];
 export type ExecutionPolicy = {
   allowGrants: readonly HostGrant[];
   maxHookMs?: number;
+  /** Declared linear-memory maximum for one guest. Not the binary size. */
   maxMemoryBytes?: number;
+  /** One guest's WebAssembly binary. Not the linear-memory maximum and not the composition sum. */
+  maxBinaryBytes?: number;
   /** Imports an isolating backend may link. The in-process backend cannot enforce these. */
   allowCapabilities?: readonly string[];
   /**
@@ -199,6 +202,7 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
   const asksForLimit =
     policy.maxHookMs !== undefined ||
     policy.maxMemoryBytes !== undefined ||
+    policy.maxBinaryBytes !== undefined ||
     policy.maxGuests !== undefined ||
     policy.maxTotalMemoryBytes !== undefined ||
     policy.maxTotalBinaryBytes !== undefined ||
@@ -215,6 +219,9 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
   }
   if (policy.maxMemoryBytes !== undefined && (!Number.isFinite(policy.maxMemoryBytes) || policy.maxMemoryBytes <= 0)) {
     return { code: "trust.limits", message: "maxMemoryBytes must be a positive finite number." };
+  }
+  if (policy.maxBinaryBytes !== undefined && (!Number.isFinite(policy.maxBinaryBytes) || policy.maxBinaryBytes <= 0)) {
+    return { code: "trust.limits", message: "maxBinaryBytes must be a positive finite number." };
   }
   if (policy.maxGuests !== undefined && (!Number.isInteger(policy.maxGuests) || policy.maxGuests <= 0)) {
     return { code: "trust.limits", message: "maxGuests must be a positive integer." };

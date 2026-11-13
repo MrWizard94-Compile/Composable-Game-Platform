@@ -269,16 +269,29 @@ describe("log bounds", () => {
     assert.deepEqual(buffer.drain(), ["[org.example.a] one", "[log dropped]"]);
   });
 
-  it("counts UTF-8 bytes and does not split a code point", () => {
+  it("counts UTF-8 bytes and keeps the drop marker inside the byte cap", () => {
     assert.equal(clipUtf8("éé", 2), "é");
     assert.equal(clipUtf8("😀", 3), "");
-    const buffer = createLogBuffer({ maxBytes: 12, maxLines: 8, maxLine: 8 });
-    buffer.push("m", "éééé");
-    buffer.push("m", "éééé");
-    const lines = buffer.drain();
-    assert.equal(lines[0], "[m] éééé");
-    assert.equal(utf8Bytes(lines[0] ?? ""), 12);
-    assert.equal(lines[1], "[log dropped]");
+    const tight = createLogBuffer({ maxBytes: 12, maxLines: 8, maxLine: 8 });
+    tight.push("m", "éééé");
+    tight.push("m", "éééé");
+    const kept = tight.drain();
+    assert.deepEqual(kept, ["[m] éééé"]);
+    assert.ok(kept.reduce((sum, line) => sum + utf8Bytes(line), 0) <= 12);
+
+    const replaced = createLogBuffer({ maxBytes: 20, maxLines: 8, maxLine: 8 });
+    replaced.push("m", "éééé");
+    replaced.push("m", "éééé");
+    const marker = replaced.drain();
+    assert.deepEqual(marker, ["[log dropped]"]);
+    assert.ok(marker.reduce((sum, line) => sum + utf8Bytes(line), 0) <= 20);
+
+    const both = createLogBuffer({ maxBytes: 25, maxLines: 8, maxLine: 32 });
+    both.push("m", "éééé");
+    both.push("m", "éééééééé");
+    const pair = both.drain();
+    assert.deepEqual(pair, ["[m] éééé", "[log dropped]"]);
+    assert.equal(pair.reduce((sum, line) => sum + utf8Bytes(line), 0), 25);
   });
 });
 

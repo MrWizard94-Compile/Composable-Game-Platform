@@ -40,15 +40,26 @@ export function createGuestRuntime(reply) {
     const clipped = clipUtf8(line, logBudget.maxLine);
     const size = utf8Bytes(clipped);
     if (dropped || logs.length >= logBudget.maxLines || logBytes + size > logBudget.maxBytes) {
-      if (!dropped) {
-        dropped = true;
-        logs.push("[log dropped]");
-        logBytes += utf8Bytes("[log dropped]");
-      }
+      if (!dropped) noteDrop();
       return;
     }
     logs.push(clipped);
     logBytes += size;
+  }
+
+  function noteDrop() {
+    dropped = true;
+    const marker = "[log dropped]";
+    const markerSize = utf8Bytes(marker);
+    if (markerSize > logBudget.maxBytes) return;
+    while (logs.length > 0 && logBytes + markerSize > logBudget.maxBytes) {
+      const removed = logs.shift();
+      if (removed !== undefined) logBytes -= utf8Bytes(removed);
+    }
+    if (logBytes + markerSize <= logBudget.maxBytes) {
+      logs.push(marker);
+      logBytes += markerSize;
+    }
   }
 
   /**
@@ -75,7 +86,8 @@ export function createGuestRuntime(reply) {
       if (record.op === "load") {
         const bytes = record.wasm instanceof Uint8Array ? record.wasm : new Uint8Array();
         const maxBytes = typeof record.maxBytes === "number" ? record.maxBytes : 0;
-        assertGuestBinary(bytes, maxBytes, record.allowLog === true);
+        const maxBinaryBytes = typeof record.maxBinaryBytes === "number" ? record.maxBinaryBytes : maxBytes;
+        assertGuestBinary(bytes, maxBytes, maxBinaryBytes, record.allowLog === true);
         const mod = new WebAssembly.Module(bytes);
         const imports = WebAssembly.Module.imports(mod);
         /** @type {WebAssembly.Imports} */
@@ -220,11 +232,14 @@ function readName(bytes, at) {
 /**
  * @param {Uint8Array} bytes
  * @param {number} maxBytes
+ * @param {number} maxBinaryBytes
  * @param {boolean} allowLog
  */
-function assertGuestBinary(bytes, maxBytes, allowLog) {
+function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog) {
   if (!(bytes instanceof Uint8Array)) throw new Error("Guest binary is missing.");
-  if (bytes.byteLength > maxBytes) throw new Error("Guest binary exceeds the memory limit.");
+  if (bytes.byteLength > maxBinaryBytes) {
+    throw new Error(`Guest binary is ${bytes.byteLength} bytes. The binary limit is ${maxBinaryBytes}.`);
+  }
   if (bytes.length < 8 || bytes[0] !== 0 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
     throw new Error("Module bytes are not WebAssembly.");
   }
