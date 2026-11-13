@@ -242,4 +242,26 @@ describe("capture and restore", () => {
     assert.equal(result.modules[0]?.status, "rejected");
     assert.ok(result.diagnostics.some((item) => item.path === "save.version"));
   });
+
+  it("keeps a __proto__ field as data and does not change Object.prototype", async () => {
+    const hostile = JSON.parse('{"__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}},"n":1}') as {
+      n: number;
+    };
+    const result = await compose([
+      pkg(moduleManifest("org.example.box", { save: { version: "1.0.0" } }), {
+        exportState: () => hostile,
+        importState() {},
+      }),
+    ]);
+    const saved = await captureSave(result);
+    assert.equal(saved.ok, true, saved.notices.map((item) => item.message).join("\n"));
+    const payload = saved.document.slices[0]?.payload as { n?: number; polluted?: unknown } | undefined;
+    assert.equal(payload?.n, 1);
+    assert.equal(payload?.polluted, undefined);
+    assert.equal(Object.hasOwn(payload ?? {}, "__proto__"), true);
+    assert.equal(Object.getPrototypeOf(payload), Object.prototype);
+    assert.equal(({} as { polluted?: unknown }).polluted, undefined);
+    assert.equal(Object.hasOwn(Object.prototype, "polluted"), false);
+    await result.shutdown();
+  });
 });

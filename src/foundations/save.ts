@@ -93,7 +93,14 @@ function sortKeys(value: unknown): unknown {
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(record).sort()) sorted[key] = sortKeys(record[key]);
+    for (const key of Object.keys(record).sort()) {
+      Object.defineProperty(sorted, key, {
+        value: sortKeys(record[key]),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
     return sorted;
   }
   return value;

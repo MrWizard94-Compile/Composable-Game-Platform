@@ -8,10 +8,11 @@ import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
 import { captureSave, restoreSave } from "./save.ts";
 import { publish } from "./dispatch.ts";
-import { encodeAbiJson } from "./abi.ts";
+import { ABI_ID, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, materializeAbiValue, mintAbiHandle } from "./abi.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
 import {
   counterGuest,
+  echoGuest,
   growGuest,
   hugeTableGuest,
   logGuest,
@@ -529,6 +530,252 @@ describe("abi payloads and cleanup", () => {
     assert.equal(backend.resourceUsage().guests, 0);
     assert.equal(backend.resourceUsage().memoryBytes, 0);
     assert.equal(backend.resourceUsage().binaryBytes, 0);
+  });
+
+  it("rejects a forged handle, a copied handle, and a handle from another composition", async () => {
+    const scope = {};
+    const mint = (moduleId: string, contributionId: string) => mintAbiHandle(scope, moduleId, contributionId);
+    const handle = mint("org.example.victim", "a");
+    assert.equal(isAbiHandle(handle), true);
+    assert.equal(abiHandleOwned(handle, scope), true);
+    assert.equal(abiHandleOwned(handle, {}), false);
+    assert.equal(isAbiHandle({ abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" }), false);
+    assert.equal(isAbiHandle(JSON.parse(JSON.stringify(handle))), false);
+    assert.equal(isAbiHandle({ ...handle }), false);
+    assert.throws(() => {
+      (handle as { moduleId: string }).moduleId = "org.example.thief";
+    }, TypeError);
+    const lookalike = guestContributions(
+      "org.example.thief",
+      {
+        contributions: [
+          {
+            slotId: "platform.systems",
+            id: "lookalike",
+            payload: { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+          },
+        ],
+      },
+      mint,
+    );
+    assert.equal(isAbiHandle(lookalike[0]?.payload), false);
+    assert.equal((lookalike[0]?.payload as { moduleId?: string }).moduleId, "org.example.victim");
+    const inherited = Object.create({ dispatch: true, slotId: "platform.systems", id: "stolen" });
+    assert.throws(() => guestContributions("org.example.thief", { contributions: [inherited] }, mint), /missing a slot or an id/);
+
+    const backend = createWasmBackend();
+    const desk = (moduleId: string) =>
+      pkg(moduleId, storeGuest('{"contributions":[]}'), {
+        exposesSlots: [
+          {
+            slotId: "meter.hear",
+            contract: "meter.hear",
+            contractVersion: "1.0.0",
+            kind: "subscriber",
+            required: false,
+          },
+        ],
+      });
+    const victim = (version = "1.0.0") =>
+      pkg("org.example.victim", counterGuest(), {
+        version,
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "meter.hear", contract: "meter.hear/1" }],
+      });
+    const thief = pkg(
+      "org.example.thief",
+      storeGuest(
+        JSON.stringify({
+          contributions: [
+            {
+              slotId: "platform.systems",
+              id: "lookalike",
+              payload: { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+            },
+          ],
+        }),
+      ),
+      { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] },
+    );
+    const result = await compose([desk("org.example.desk"), victim(), thief], { backend, policy: wasmPolicy() });
+    assert.equal(result.runtimeActive, true, messages(result));
+    const session = sessionOf(result);
+    const real = result.contributions.find((item) => item.moduleId === "org.example.victim" && item.id === "a")?.payload;
+    const forged = result.contributions.find((item) => item.id === "lookalike")?.payload;
+    assert.equal(isAbiHandle(real), true);
+    assert.equal(isAbiHandle(forged), false);
+
+    const attacks = [
+      forged,
+      JSON.parse(JSON.stringify(real)),
+      { ...((real ?? {}) as object) },
+      structuredClone(real),
+      { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+      Object.create(real as object),
+    ];
+    for (const payload of attacks) {
+      const called = await session.callPayload(payload, [{ token: "steal" }]);
+      assert.equal(called.ok, false);
+      if (called.ok || called.code !== "not-callable") assert.fail("forged handle was accepted");
+    }
+    const carrier = {};
+    Object.setPrototypeOf(carrier, real as object);
+    const viaProto = await session.callPayload(carrier, [{}]);
+    assert.equal(viaProto.ok, false);
+    if (viaProto.ok || viaProto.code !== "not-callable") assert.fail("prototype handle was accepted");
+
+    const before = await captureSave(result);
+    assert.equal(before.ok, true, before.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(before.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 0 });
+
+    const heard = await publish(result, "meter.hear", { token: "once" });
+    assert.equal(heard.ok, true, heard.reason ?? heard.deliveries.map((item) => item.message).join("\n"));
+    const after = await captureSave(result);
+    assert.deepEqual(after.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 1 });
+
+    const other = await compose([desk("org.example.desk-b"), victim("1.1.0")], {
+      backend,
+      policy: wasmPolicy(),
+      profileName: "other",
+    });
+    assert.equal(other.runtimeActive, true, messages(other));
+    const crossed = await sessionOf(other).callPayload(real, [{ token: "steal" }]);
+    assert.equal(crossed.ok, false);
+    if (crossed.ok || crossed.code !== "threw") assert.fail("foreign handle was accepted");
+    assert.ok(crossed.error instanceof Error);
+    assert.match(crossed.error.message, /another composition/);
+    const otherSaved = await captureSave(other);
+    assert.equal(otherSaved.ok, true, otherSaved.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(otherSaved.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 0 });
+    const still = await captureSave(result);
+    assert.deepEqual(still.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 1 });
+
+    await result.shutdown();
+    await other.shutdown();
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+    await backend.dispose();
+  });
+
+  it("copies guest JSON without applying prototype fields", async () => {
+    const parsed = JSON.parse(
+      '{"__proto__":{"polluted":true,"dispatch":true},"constructor":{"prototype":{"polluted":true}},"n":1}',
+    );
+    const copied = copyJsonData(parsed) as { n?: number; polluted?: unknown };
+    assert.equal(copied.n, 1);
+    assert.equal(copied.polluted, undefined);
+    assert.equal(Object.getPrototypeOf(copied), Object.prototype);
+    assert.equal(Object.hasOwn(copied, "__proto__"), true);
+    assert.equal(({} as { polluted?: unknown }).polluted, undefined);
+    assert.equal(Object.hasOwn(Object.prototype, "polluted"), false);
+
+    const scope = {};
+    const mint = (moduleId: string, contributionId: string) => mintAbiHandle(scope, moduleId, contributionId);
+    const nested = materializeAbiValue("org.example.thief", "lookalike", JSON.parse('{"__proto__":{"dispatch":true}}'), mint);
+    assert.equal(isAbiHandle(nested), false);
+    assert.equal(Object.getPrototypeOf(nested), Object.prototype);
+    const inner = (nested as Record<string, unknown>)["__proto__"];
+    assert.equal(isAbiHandle(inner), true);
+    if (!isAbiHandle(inner)) return;
+    assert.equal(inner.moduleId, "org.example.thief");
+    assert.equal(inner.contributionId, "lookalike");
+    assert.notEqual(inner.moduleId, "org.example.victim");
+
+    const backend = createWasmBackend();
+    const register =
+      '{"contributions":[{"slotId":"platform.systems","id":"p","payload":{"__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}}}}]}';
+    const result = await compose(
+      [pkg("org.example.poison", scriptedGuest({ register }), link)],
+      { backend, policy: wasmPolicy() },
+    );
+    assert.equal(result.runtimeActive, true, messages(result));
+    const payload = result.contributions.find((item) => item.id === "p")?.payload as
+      | { polluted?: unknown; constructor?: { prototype?: { polluted?: unknown } } }
+      | undefined;
+    assert.ok(payload);
+    assert.equal(isAbiHandle(payload), false);
+    assert.equal(Object.getPrototypeOf(payload), Object.prototype);
+    assert.equal(payload.polluted, undefined);
+    assert.equal(payload.constructor?.prototype?.polluted, true);
+    assert.equal(({} as { polluted?: unknown }).polluted, undefined);
+    assert.equal(Object.hasOwn(Object.prototype, "polluted"), false);
+    await result.shutdown();
+    await backend.dispose();
+  });
+
+  it("sends null for a zero-argument call and normalizes a throwing input", async () => {
+    const leaking = {};
+    Object.defineProperty(leaking, "n", {
+      enumerable: true,
+      get() {
+        throw "leak-marker";
+      },
+    });
+    const hidden = {};
+    Object.defineProperty(hidden, "toJSON", {
+      enumerable: false,
+      value() {
+        throw "leak-marker";
+      },
+    });
+    for (const value of [leaking, hidden]) {
+      const encoded = encodeAbiJson(value);
+      assert.equal(encoded.ok, false);
+      if (encoded.ok) return;
+      assert.equal(encoded.error, "ABI payload is not JSON (could not encode).");
+      assert.equal(encoded.error.includes("leak-marker"), false);
+    }
+    const none = encodeAbiCall("echo", []);
+    assert.equal(none.ok, true);
+    if (none.ok) assert.equal(none.json, JSON.stringify({ contributionId: "echo", arg: null, args: [] }));
+    const explicit = encodeAbiCall("echo", [undefined]);
+    assert.equal(explicit.ok, false);
+    if (!explicit.ok) assert.match(explicit.error, /undefined/);
+    const present = encodeAbiCall("echo", [null]);
+    assert.equal(present.ok, true);
+    if (present.ok) assert.equal(present.json, JSON.stringify({ contributionId: "echo", arg: null, args: [null] }));
+
+    const backend = createWasmBackend();
+    const result = await compose([pkg("org.example.echo", echoGuest(), link)], { backend, policy: wasmPolicy() });
+    assert.equal(result.runtimeActive, true, messages(result));
+    const session = sessionOf(result);
+    const handle = result.contributions.find((item) => item.id === "echo")?.payload;
+    const empty = await session.callPayload(handle, []);
+    assert.equal(empty.ok, true, failureText(empty));
+    if (empty.ok) assert.deepEqual(empty.value, { contributionId: "echo", arg: null, args: [] });
+    const omitted = await session.callPayload(handle, [undefined]);
+    assert.equal(omitted.ok, false);
+    if (omitted.ok || omitted.code !== "threw") assert.fail("undefined call was accepted");
+    assert.ok(omitted.error instanceof Error);
+    assert.match(omitted.error.message, /undefined/);
+    const nulled = await session.callPayload(handle, [null]);
+    assert.equal(nulled.ok, true, failureText(nulled));
+    if (nulled.ok) assert.deepEqual(nulled.value, { contributionId: "echo", arg: null, args: [null] });
+    const thrown = await session.callPayload(handle, [leaking]);
+    assert.equal(thrown.ok, false);
+    if (thrown.ok || thrown.code !== "threw") assert.fail("throwing input was accepted");
+    assert.ok(thrown.error instanceof Error);
+    assert.equal(thrown.error.message, "ABI payload is not JSON (could not encode).");
+    assert.equal(thrown.error.message.includes("leak-marker"), false);
+    const proxied = new Proxy([1], {
+      get() {
+        throw "leak-marker";
+      },
+    });
+    const broken = await session.callPayload(handle, proxied);
+    assert.equal(broken.ok, false);
+    if (broken.ok || broken.code !== "threw") assert.fail("proxy input was accepted");
+    assert.ok(broken.error instanceof Error);
+    assert.equal(broken.error.message, "ABI payload is not JSON (could not encode).");
+    const again = await session.callPayload(handle, []);
+    assert.equal(again.ok, true, failureText(again));
+    if (again.ok) assert.deepEqual(again.value, { contributionId: "echo", arg: null, args: [] });
+    await result.shutdown();
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    await backend.dispose();
   });
 });
 

@@ -736,6 +736,49 @@ export function scriptedGuest(outputs: { register?: string; exportState?: string
   });
 }
 
+/** Register returns one dispatch contribution. Hook 5 returns the input bytes unchanged. */
+export function echoGuest(): Uint8Array {
+  const register = text(
+    JSON.stringify({
+      contributions: [{ slotId: "platform.systems", id: "echo", dispatch: true, payload: { systemId: "echo" } }],
+    }),
+  );
+  const registerAt = 400;
+  if (registerAt + register.length > 1024) throw new Error("Echo register text does not fit before the heap.");
+  const body = [
+    ...op.localGet(0),
+    ...op.i32Const(5),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.localGet(1),
+    ...op.globalSet(1),
+    ...op.localGet(2),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(registerAt),
+    ...op.globalSet(1),
+    ...op.i32Const(register.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+    data: [{ offset: registerAt, bytes: register }],
+  });
+}
+
 /** Register succeeds. Initialize returns a failure status so the host rolls the composition back. */
 export function initFaultGuest(): Uint8Array {
   const register = text(

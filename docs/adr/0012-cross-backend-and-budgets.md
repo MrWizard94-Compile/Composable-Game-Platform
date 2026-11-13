@@ -16,7 +16,7 @@ When `maxTotalHookMs` is set, that composition admits one hook at a time. A hook
 
 `shutdown` is one promise. A second call waits for that promise and then reports `{ already: true, order: [], diagnostics: [] }`. Each module's shutdown is caught. One failure does not skip the modules after it. `session.release()` runs in a `finally`, so a thrown hook still terminates the workers.
 
-A guest may nest `{ "dispatch": true }` as the only key of an object inside its register payload. That object becomes an ABI handle for the contribution. A top-level `dispatch: true` still replaces the whole payload. Slot dispatch calls either form through the session. It does not call a guest export directly.
+A guest may nest `{ "dispatch": true }` as the only key of an object inside its register payload. That object becomes an ABI handle for the contribution. A top-level `dispatch: true` still replaces the whole payload. The handle is minted for the composition that registered it. A guest cannot mint one by returning the JSON fields, and a handle from another composition is refused before that composition's guest runs. Slot dispatch calls either form through the session. It does not call a guest export directly.
 
 ## Consequences
 

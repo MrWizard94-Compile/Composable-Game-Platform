@@ -1,4 +1,4 @@
-import { ABI_HOOK, encodeAbiJson, guestContributions, isAbiHandle } from "./abi.ts";
+import { ABI_HOOK, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, mintAbiHandle } from "./abi.ts";
 import type {
   ExecutionBackend,
   ExecutionPolicy,
@@ -441,6 +441,7 @@ export function createIsolateBackend(options: {
       const idleWaiters: Array<() => void> = [];
       const sessionLogs = createLogBuffer(logBudget);
       const admitComposition = captured.maxTotalHookMs !== undefined ? queue() : <T>(job: () => Promise<T>) => job();
+      const scope = {};
       let guestCount = 0;
       let memoryUsed = 0;
       let binaryUsed = 0;
@@ -497,11 +498,14 @@ export function createIsolateBackend(options: {
       function callHandle(payload: unknown, args: readonly unknown[]): Promise<PayloadResult> {
         if (released) return Promise.resolve({ ok: false, code: "threw", error: new Error("This composition has been released.") });
         if (!isAbiHandle(payload)) return Promise.resolve({ ok: false, code: "not-callable" });
+        if (!abiHandleOwned(payload, scope)) {
+          return Promise.resolve({ ok: false, code: "threw", error: new Error("ABI handle belongs to another composition.") });
+        }
         const guest = guests.get(payload.moduleId);
         if (!guest || guest.dead) {
           return Promise.resolve({ ok: false, code: "threw", error: new Error(`Module "${payload.moduleId}" is not an active isolate.`) });
         }
-        const encoded = encodeAbiJson({ contributionId: payload.contributionId, arg: args[0], args });
+        const encoded = encodeAbiCall(payload.contributionId, args);
         if (!encoded.ok) return Promise.resolve({ ok: false, code: "threw", error: new Error(encoded.error) });
         return callGuest(guest, payload.moduleId, {
           op: "hook",
@@ -548,7 +552,12 @@ export function createIsolateBackend(options: {
         const hook = ABI_HOOK[call.hook as HookName];
         let input = "{}";
         if (hook === ABI_HOOK.importState) {
-          const encoded = encodeAbiJson(call.args[1]);
+          let encoded: ReturnType<typeof encodeAbiJson>;
+          try {
+            encoded = encodeAbiJson(call.args[1]);
+          } catch {
+            return { ok: false, error: new Error("ABI payload is not JSON (could not encode).") };
+          }
           if (!encoded.ok) return { ok: false, error: new Error(encoded.error) };
           input = encoded.json;
         }
@@ -560,7 +569,9 @@ export function createIsolateBackend(options: {
         }
         if (hook === ABI_HOOK.register) {
           try {
-            const rows = guestContributions(call.moduleId, answered.value);
+            const rows = guestContributions(call.moduleId, answered.value, (moduleId, contributionId) =>
+              mintAbiHandle(scope, moduleId, contributionId),
+            );
             const contribute =
               call.args[0] && typeof call.args[0] === "object" && "contribute" in call.args[0]
                 ? (call.args[0] as { contribute?: (slotId: string, contribution: { id: string; order?: number; payload: unknown }) => void })
@@ -777,7 +788,7 @@ function parseGuest(load: boolean, text: string, sink: LogBuffer, moduleId: stri
   if (!parsed.ok) return { ok: false, error: parsed.error || "Guest hook failed." };
   if (!parsed.json) return { ok: true, value: undefined };
   try {
-    return { ok: true, value: JSON.parse(parsed.json) as unknown };
+    return { ok: true, value: copyJsonData(JSON.parse(parsed.json) as unknown) };
   } catch {
     return { ok: false, error: "Guest result was not JSON." };
   }
