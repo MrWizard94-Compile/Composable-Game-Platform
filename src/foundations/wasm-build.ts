@@ -80,7 +80,8 @@ export type WasmSpec = {
   types: FnType[];
   imports?: Imp[];
   funcs: Fn[];
-  memory: { min: number; max?: number };
+  memory: { min: number; max?: number; shared?: boolean };
+  tables?: { min: number; max?: number }[];
   globals?: Glob[];
   exports: { name: string; kind: "func" | "mem"; index: number }[];
   data?: { offset: number; bytes: Uint8Array }[];
@@ -97,6 +98,7 @@ function typeBytes(types: FnType[]): number[] {
 export function compileWasm(spec: WasmSpec): Uint8Array {
   const imports = spec.imports ?? [];
   const globals = spec.globals ?? [];
+  const tables = spec.tables ?? [];
   const data = spec.data ?? [];
   const type = section(1, typeBytes(spec.types));
   const imported = section(
@@ -107,9 +109,17 @@ export function compileWasm(spec: WasmSpec): Uint8Array {
     ],
   );
   const func = section(3, [...uleb(spec.funcs.length), ...spec.funcs.flatMap((item) => uleb(item.type))]);
+  const table = section(4, [
+    ...uleb(tables.length),
+    ...tables.flatMap((item) => [
+      0x70,
+      ...(item.max === undefined ? [0x00, ...uleb(item.min)] : [0x01, ...uleb(item.min), ...uleb(item.max)]),
+    ]),
+  ]);
+  const memoryFlags = (spec.memory.max === undefined ? 0 : 1) | (spec.memory.shared ? 2 : 0);
   const memory = section(5, [
     1,
-    spec.memory.max === undefined ? 0x00 : 0x01,
+    memoryFlags,
     ...uleb(spec.memory.min),
     ...(spec.memory.max === undefined ? [] : uleb(spec.memory.max)),
   ]);
@@ -136,7 +146,18 @@ export function compileWasm(spec: WasmSpec): Uint8Array {
     ...uleb(data.length),
     ...data.flatMap((item) => [0x00, ...op.i32Const(item.offset), ...op.end, ...uleb(item.bytes.length), ...item.bytes]),
   ]);
-  const parts = [type, imports.length ? imported : [], func, memory, globals.length ? global : [], exported, start, code, data.length ? datum : []];
+  const parts = [
+    type,
+    imports.length ? imported : [],
+    func,
+    tables.length ? table : [],
+    memory,
+    globals.length ? global : [],
+    exported,
+    start,
+    code,
+    data.length ? datum : [],
+  ];
   return Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...parts.flat()]);
 }
 
@@ -378,16 +399,15 @@ export function loopingGuest(): Uint8Array {
   });
 }
 
-/** Start runs the loop. Discovery must not instantiate this. */
+/** Start runs the loop. The binary is valid; instantiation never returns. Discovery must not instantiate it. */
 export function startLoopGuest(): Uint8Array {
-  const loop: Fn = { type: 2, body: [...op.loop, ...op.br(0), ...op.end, ...op.i32Const(0)] };
   return compileWasm({
-    types: [STANDARD_TYPES[2]],
-    funcs: [loop],
+    types: [{ params: 0, results: 0 }],
+    funcs: [{ type: 0, body: [...op.loop, ...op.br(0), ...op.end] }],
     memory: { min: 1, max: 1 },
     exports: [
       { name: "memory", kind: "mem", index: 0 },
-      { name: "cg_hook", kind: "func", index: 0 },
+      { name: "cg_start", kind: "func", index: 0 },
     ],
     start: 0,
   });
@@ -498,6 +518,41 @@ export function wideGuest(): Uint8Array {
     types: STANDARD_TYPES,
     funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body: [...op.i32Const(0)] }],
     memory: { min: 2, max: 2 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+  });
+}
+
+/** A table with no maximum. Refused before instantiation. */
+export function openTableGuest(): Uint8Array {
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body: [...op.i32Const(0)] }],
+    memory: { min: 1, max: 1 },
+    tables: [{ min: 1 }],
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+  });
+}
+
+/** A table larger than the host allows. Refused before instantiation. */
+export function hugeTableGuest(): Uint8Array {
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body: [...op.i32Const(0)] }],
+    memory: { min: 1, max: 1 },
+    tables: [{ min: 1_000_000, max: 1_000_000 }],
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+  });
+}
+
+/** Shared linear memory. The host does not attach it. */
+export function sharedGuest(): Uint8Array {
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body: [...op.i32Const(0)] }],
+    memory: { min: 1, max: 1, shared: true },
     globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
     exports: standardExports(0),
   });

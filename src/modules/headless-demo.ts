@@ -10,8 +10,8 @@ import { advanceFlora, askQuery, dispatchPulse, foldPipe, readLighting } from ".
 const root = dirname(fileURLToPath(import.meta.url));
 const discovered = await loadInProcessImplementations(await discoverModules(root));
 const proof = discovered.filter((item) => PROOF_IDS.includes(moduleIdOf(item.manifest)));
-const result = compose(proof, { profileName: "headless-proof", policy: IN_PROCESS_POLICY });
-const growth = advanceFlora(result, {}, "spring");
+const result = await compose(proof, { profileName: "headless-proof", policy: IN_PROCESS_POLICY });
+const growth = await advanceFlora(result, {}, "spring");
 const lights = readLighting(result);
 
 console.log(`runtime ${result.runtimeActive ? "active" : "inactive"}  ok ${result.ok}`);
@@ -34,10 +34,10 @@ for (const item of result.diagnostics) {
 }
 
 const signals = discovered.filter((item) => (DISPATCH_IDS as readonly string[]).includes(moduleIdOf(item.manifest)));
-const dispatched = compose(signals, { profileName: "headless-dispatch", policy: IN_PROCESS_POLICY });
-const pulse = dispatchPulse(dispatched);
-const folded = foldPipe(dispatched, 4);
-const saved = captureSave(dispatched);
+const dispatched = await compose(signals, { profileName: "headless-dispatch", policy: IN_PROCESS_POLICY });
+const pulse = await dispatchPulse(dispatched);
+const folded = await foldPipe(dispatched, 4);
+const saved = await captureSave(dispatched);
 const pulses = saved.document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload;
 console.log(
   `dispatch ${dispatched.ok ? "ok" : "not ok"} heard ${pulse.heard.join(",")} pipe ${folded.input}->${String(folded.output)} pulses ${JSON.stringify(pulses)}`,
@@ -46,7 +46,7 @@ console.log(
 if (!result.ok || !dispatched.ok || !pulse.report.ok || !folded.ok || !saved.ok) process.exitCode = 1;
 
 const queries = discovered.filter((item) => (SERVICE_IDS as readonly string[]).includes(moduleIdOf(item.manifest)));
-const service = compose(queries, { profileName: "headless-service", policy: IN_PROCESS_POLICY });
-const asked = askQuery(service, "alpha");
+const service = await compose(queries, { profileName: "headless-service", policy: IN_PROCESS_POLICY });
+const asked = await askQuery(service, "alpha");
 console.log(`service ${service.ok && asked.report.ok ? "ok" : "not ok"} ${JSON.stringify(asked.report.output)}`);
 if (!service.ok || !asked.report.ok) process.exitCode = 1;

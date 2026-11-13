@@ -37,8 +37,8 @@ describe("packaged modules", () => {
   it("nests species and lights under two systems without a host special case", async () => {
     const discovered = await loadInProcessImplementations(await discoverModules(modulesDir));
     const proof = discovered.filter((item) => PROOF_IDS.includes(moduleIdOf(item.manifest)));
-    const forward = compose(proof, { profileName: "proof" });
-    const reverse = compose([...proof].reverse(), { profileName: "proof" });
+    const forward = await compose(proof, { profileName: "proof" });
+    const reverse = await compose([...proof].reverse(), { profileName: "proof" });
     assert.equal(forward.ok, true);
     assert.equal(forward.fingerprint, reverse.fingerprint);
     assert.notDeepEqual(idsOf(proof), idsOf([...proof].reverse()));
@@ -110,7 +110,7 @@ describe("packaged modules", () => {
         },
       },
     };
-    const result = compose([mangrove, flora]);
+    const result = await compose([mangrove, flora]);
     assert.equal(result.ok, true);
     assert.equal(
       result.contributions.find((item) => item.id === "mangrove")?.moduleId,
@@ -118,8 +118,8 @@ describe("packaged modules", () => {
     );
   });
 
-  it("adds a second species pack in module-id order", () => {
-    const result = compose(packagesFor([...PROOF_IDS, "org.cgp.desert-plants"]));
+  it("adds a second species pack in module-id order", async () => {
+    const result = await compose(packagesFor([...PROOF_IDS, "org.cgp.desert-plants"]));
     assert.equal(result.ok, true);
     assert.deepEqual(
       result.contributions.filter((item) => item.slotId === "flora.plant-species").map((item) => item.id),
@@ -127,8 +127,8 @@ describe("packaged modules", () => {
     );
   });
 
-  it("refuses two growth policies instead of blending them", () => {
-    const result = compose(packagesFor([...PROOF_IDS, "org.cgp.accelerated-growth"]));
+  it("refuses two growth policies instead of blending them", async () => {
+    const result = await compose(packagesFor([...PROOF_IDS, "org.cgp.accelerated-growth"]));
     assert.equal(result.runtimeActive, false);
     assert.equal(result.contributions.length, 0);
     assert.deepEqual(result.slots.find((slot) => slot.slotId === "flora.growth-model")?.contestedBy, [
@@ -137,16 +137,16 @@ describe("packaged modules", () => {
     ]);
   });
 
-  it("isolates a bad manifest and still runs the proof", () => {
-    const result = compose(packagesFor([...PROOF_IDS, "org.cgp.bad-manifest"]));
+  it("isolates a bad manifest and still runs the proof", async () => {
+    const result = await compose(packagesFor([...PROOF_IDS, "org.cgp.bad-manifest"]));
     assert.equal(result.runtimeActive, true);
     assert.equal(result.ok, false);
     assert.equal(result.modules.find((item) => item.moduleId === "org.cgp.bad-manifest")?.status, "rejected");
     assert.equal(result.modules.find((item) => item.moduleId === "org.cgp.flora-core")?.status, "active");
   });
 
-  it("blocks the graph on a contract mismatch and never registers the intruder", () => {
-    const result = compose(
+  it("blocks the graph on a contract mismatch and never registers the intruder", async () => {
+    const result = await compose(
       packagesFor(["org.cgp.flora-core", "org.cgp.forest-plants", "org.cgp.contract-mismatch"]),
     );
     assert.equal(result.runtimeActive, false);
@@ -155,14 +155,14 @@ describe("packaged modules", () => {
     assert.equal(result.modules.find((item) => item.moduleId === "org.cgp.flora-core")?.status, "blocked");
   });
 
-  it("refuses the alpha/beta cycle", () => {
-    const result = compose(packagesFor(["org.cgp.cycle-alpha", "org.cgp.cycle-beta"]));
+  it("refuses the alpha/beta cycle", async () => {
+    const result = await compose(packagesFor(["org.cgp.cycle-alpha", "org.cgp.cycle-beta"]));
     assert.equal(result.runtimeActive, false);
     assert.match(result.diagnostics.map((item) => item.message).join(" "), /Cycle Alpha|org.cgp.cycle-alpha/);
   });
 
-  it("rolls the proof back when a package throws during initialize", () => {
-    const result = compose(packagesFor([...PROOF_IDS, "org.cgp.init-fault"]));
+  it("rolls the proof back when a package throws during initialize", async () => {
+    const result = await compose(packagesFor([...PROOF_IDS, "org.cgp.init-fault"]));
     assert.equal(result.runtimeActive, false);
     assert.equal(result.contributions.length, 0);
     assert.match(result.diagnostics.map((item) => item.message).join(" "), /init-fault refused/);
@@ -171,18 +171,18 @@ describe("packaged modules", () => {
     assert.ok(result.trace.includes("org.cgp.flora-core:shutdown"));
   });
 
-  it("steps seasonal growth deterministically and reads both light packs", () => {
-    const result = compose(CATALOG.filter((item) => item.defaultOn).map(toPackage));
-    const first = advanceFlora(result, {}, "spring");
+  it("steps seasonal growth deterministically and reads both light packs", async () => {
+    const result = await compose(CATALOG.filter((item) => item.defaultOn).map(toPackage));
+    const first = await advanceFlora(result, {}, "spring");
     assert.equal(first.ok, true);
     if (!first.ok) return;
     const oak = first.rows.find((row) => row.id === "oak");
     assert.equal(oak?.stage, 0.4);
     assert.equal(first.strategy, "Seasonal growth");
-    const second = advanceFlora(result, { oak: oak?.stage ?? 0 }, "spring");
+    const second = await advanceFlora(result, { oak: oak?.stage ?? 0 }, "spring");
     if (!second.ok) assert.fail(second.reason);
     assert.equal(second.rows.find((row) => row.id === "oak")?.stage, 0.8);
-    const winter = advanceFlora(result, {}, "winter");
+    const winter = await advanceFlora(result, {}, "winter");
     if (!winter.ok) assert.fail(winter.reason);
     assert.equal(winter.rows.find((row) => row.id === "oak")?.stage, 0.04);
     const lights = readLighting(result);
@@ -195,16 +195,16 @@ describe("packaged modules", () => {
     );
   });
 
-  it("fans a pulse out and folds a pipe without depending on package order", () => {
+  it("fans a pulse out and folds a pipe without depending on package order", async () => {
     const ids = [...PROOF_IDS, ...DISPATCH_IDS];
-    const forward = compose(packagesFor(ids));
-    const reverse = compose([...packagesFor(ids)].reverse());
+    const forward = await compose(packagesFor(ids));
+    const reverse = await compose([...packagesFor(ids)].reverse());
     assert.equal(forward.ok, true);
     assert.equal(forward.fingerprint, reverse.fingerprint);
-    const pulse = dispatchPulse(forward);
+    const pulse = await dispatchPulse(forward);
     assert.equal(pulse.report.ok, true);
     assert.deepEqual(pulse.heard, ["stamp", "late"]);
-    const folded = foldPipe(reverse, 4);
+    const folded = await foldPipe(reverse, 4);
     assert.equal(folded.ok, true);
     assert.equal(folded.output, 11);
     assert.deepEqual(
@@ -213,58 +213,58 @@ describe("packaged modules", () => {
     );
   });
 
-  it("keeps later listeners after a throw and stops the pipe at a fault", () => {
-    const result = compose(
+  it("keeps later listeners after a throw and stops the pipe at a fault", async () => {
+    const result = await compose(
       packagesFor([...DISPATCH_IDS, "org.cgp.signal-fault", "org.cgp.pipe-fault"]),
     );
     assert.equal(result.ok, true);
-    const pulse = dispatchPulse(result);
+    const pulse = await dispatchPulse(result);
     assert.equal(pulse.report.ok, false);
     assert.deepEqual(pulse.heard, ["stamp", "late"]);
     assert.equal(pulse.report.deliveries.find((item) => item.contributionId === "fault")?.code, "dispatch.threw");
-    const folded = foldPipe(result, 4);
+    const folded = await foldPipe(result, 4);
     assert.equal(folded.ok, false);
     assert.equal(folded.output, 8);
     assert.equal(folded.stages.some((stage) => stage.contributionId === "offset"), false);
   });
 
-  it("saves the pulse count and restores an older minor of the same major", () => {
-    const result = compose(packagesFor([...DISPATCH_IDS]), { profileName: "preview" });
-    dispatchPulse(result);
-    dispatchPulse(result);
-    const captured = captureSave(result);
+  it("saves the pulse count and restores an older minor of the same major", async () => {
+    const result = await compose(packagesFor([...DISPATCH_IDS]), { profileName: "preview" });
+    await dispatchPulse(result);
+    await dispatchPulse(result);
+    const captured = await captureSave(result);
     assert.equal(captured.ok, true);
     assert.deepEqual(
       captured.document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload,
       { heard: 2 },
     );
-    const restored = restoreSave(result, {
+    const restored = await restoreSave(result, {
       ...captured.document,
       slices: [{ moduleId: "org.cgp.pulse-count", version: "1.1.0", payload: { heard: 5 } }],
     });
     assert.equal(restored.ok, true);
-    dispatchPulse(result);
+    await dispatchPulse(result);
     assert.deepEqual(
-      captureSave(result).document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload,
+      (await captureSave(result)).document.slices.find((slice) => slice.moduleId === "org.cgp.pulse-count")?.payload,
       { heard: 6 },
     );
   });
 
-  it("calls the one query provider and refuses a second", () => {
-    const result = compose(packagesFor([...SERVICE_IDS]));
+  it("calls the one query provider and refuses a second", async () => {
+    const result = await compose(packagesFor([...SERVICE_IDS]));
     assert.equal(result.ok, true);
-    const asked = askQuery(result, "alpha");
+    const asked = await askQuery(result, "alpha");
     assert.equal(asked.report.ok, true);
     assert.deepEqual(asked.report.output, { question: "alpha", letters: 5 });
-    const clash = compose(packagesFor([...SERVICE_IDS, "org.cgp.alias-index"]));
+    const clash = await compose(packagesFor([...SERVICE_IDS, "org.cgp.alias-index"]));
     assert.equal(clash.runtimeActive, false);
     assert.ok(clash.diagnostics.some((item) => item.code === "slot.ambiguous"));
-    const refused = askQuery(clash, "alpha");
+    const refused = await askQuery(clash, "alpha");
     assert.equal(refused.report.ok, false);
     assert.equal(refused.report.reason, "Runtime is not active.");
   });
 
-  it("stores entity records and advances a step only when the caller asks", () => {
+  it("stores entity records and advances a step only when the caller asks", async () => {
     const ids = [
       "org.cgp.world-core",
       "org.cgp.world-store",
@@ -272,38 +272,38 @@ describe("packaged modules", () => {
       "org.cgp.step-clock",
       "org.cgp.step-witness",
     ];
-    const result = compose(packagesFor(ids), { profileName: "records" });
+    const result = await compose(packagesFor(ids), { profileName: "records" });
     assert.equal(result.runtimeActive, true, result.diagnostics.map((item) => item.message).join("\n"));
-    const first = spawnEntity(result, { label: "marker" });
-    const second = spawnEntity(result, { label: "other" });
+    const first = await spawnEntity(result, { label: "marker" });
+    const second = await spawnEntity(result, { label: "other" });
     assert.equal(first.ok, true);
     assert.deepEqual(first.output, { id: "e1" });
     assert.deepEqual(second.output, { id: "e2" });
-    assert.equal(removeEntity(result, "e1").ok, true);
+    assert.equal((await removeEntity(result, "e1")).ok, true);
     assert.deepEqual(
-      listEntities(result).map((item) => item.id),
+      (await listEntities(result)).map((item) => item.id),
       ["e2"],
     );
-    assert.equal(advanceStep(result).count, 1);
-    const again = advanceStep(result);
+    assert.equal((await advanceStep(result)).count, 1);
+    const again = await advanceStep(result);
     assert.equal(again.count, 2);
     assert.equal(again.deliveries, 1);
 
-    const saved = captureSave(result);
+    const saved = await captureSave(result);
     assert.equal(saved.ok, true);
-    const fresh = compose(packagesFor(ids), { profileName: "records" });
-    const restored = restoreSave(fresh, saved.document);
+    const fresh = await compose(packagesFor(ids), { profileName: "records" });
+    const restored = await restoreSave(fresh, saved.document);
     assert.equal(restored.ok, true);
     assert.deepEqual(
-      listEntities(fresh).map((item) => item.id),
+      (await listEntities(fresh)).map((item) => item.id),
       ["e2"],
     );
-    const third = spawnEntity(fresh, { label: "next" });
+    const third = await spawnEntity(fresh, { label: "next" });
     assert.deepEqual(third.output, { id: "e3" });
-    assert.equal(advanceStep(fresh).count, 3);
+    assert.equal((await advanceStep(fresh)).count, 3);
   });
 
-  it("resolves shipped profiles to the same graph and refuses a version the package does not have", () => {
+  it("resolves shipped profiles to the same graph and refuses a version the package does not have", async () => {
     const available = CATALOG.map(toPackage);
     for (const item of PROFILES) {
       const checked = validateProfile(item.profile);
@@ -318,7 +318,7 @@ describe("packaged modules", () => {
       if (item.id === "two-providers") {
         assert.equal(resolved.ok, true, item.id);
         if (!resolved.ok) continue;
-        const result = compose(resolved.packages);
+        const result = await compose(resolved.packages);
         assert.equal(result.runtimeActive, false);
         assert.ok(result.diagnostics.some((item) => item.code === "dependency.ambiguous"));
         continue;
@@ -326,8 +326,8 @@ describe("packaged modules", () => {
       assert.equal(resolved.ok, true, item.id);
       if (!resolved.ok) continue;
       const ids = checked.profile.modules.map((pin) => pin.moduleId);
-      const viaProfile = compose(resolved.packages, { profileName: checked.profile.profileId });
-      const viaIds = compose(packagesFor(ids), { profileName: checked.profile.profileId });
+      const viaProfile = await compose(resolved.packages, { profileName: checked.profile.profileId });
+      const viaIds = await compose(packagesFor(ids), { profileName: checked.profile.profileId });
       assert.equal(viaProfile.fingerprint, viaIds.fingerprint);
     }
   });

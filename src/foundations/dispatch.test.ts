@@ -48,7 +48,7 @@ const owner = pkg(
 );
 
 describe("publish", () => {
-  it("fans out in contribution order and keeps going after a throw", () => {
+  it("fans out in contribution order and keeps going after a throw", async () => {
     const heard: string[] = [];
     const early = pkg(
       moduleManifest("org.example.early", {
@@ -102,8 +102,8 @@ describe("publish", () => {
         },
       },
     );
-    const result = compose([owner, late, boom, early]);
-    const report = publish(result, "example.listeners", { n: 7 });
+    const result = await compose([owner, late, boom, early]);
+    const report = await publish(result, "example.listeners", { n: 7 });
     assert.equal(report.ok, false);
     assert.deepEqual(heard, ["early:7", "late"]);
     assert.deepEqual(
@@ -118,7 +118,7 @@ describe("publish", () => {
     assert.equal(result.runtimeActive, true);
   });
 
-  it("refuses a registry slot and an inactive runtime without calling handlers", () => {
+  it("refuses a registry slot and an inactive runtime without calling handlers", async () => {
     let called = 0;
     const listener = pkg(
       moduleManifest("org.example.listener", {
@@ -137,26 +137,26 @@ describe("publish", () => {
         },
       },
     );
-    const live = compose([owner, listener]);
-    const wrong = publish(live, "example.box", {});
+    const live = await compose([owner, listener]);
+    const wrong = await publish(live, "example.box", {});
     assert.equal(wrong.ok, false);
     assert.match(wrong.reason ?? "", /registry/);
     assert.equal(called, 0);
 
-    const dead = compose([
+    const dead = await compose([
       pkg(
         moduleManifest("org.example.needy", {
           requires: [{ capability: "example.missing", version: "^1.0.0" }],
         }),
       ),
     ]);
-    const refused = publish(dead, "example.listeners", {});
+    const refused = await publish(dead, "example.listeners", {});
     assert.equal(refused.ok, false);
     assert.equal(refused.reason, "Runtime is not active.");
     assert.equal(called, 0);
   });
 
-  it("does not call handlers after shutdown", () => {
+  it("does not call handlers after shutdown", async () => {
     let called = 0;
     const listener = pkg(
       moduleManifest("org.example.listener", {
@@ -173,9 +173,9 @@ describe("publish", () => {
         },
       },
     );
-    const live = compose([owner, listener]);
-    live.shutdown();
-    const report = publish(live, "example.listeners", {});
+    const live = await compose([owner, listener]);
+    await live.shutdown();
+    const report = await publish(live, "example.listeners", {});
     assert.equal(report.ok, false);
     assert.equal(report.reason, "Runtime has shut down.");
     assert.equal(called, 0);
@@ -183,7 +183,7 @@ describe("publish", () => {
 });
 
 describe("runPipeline", () => {
-  it("folds in contribution order and ignores package order", () => {
+  it("folds in contribution order and ignores package order", async () => {
     const scale = pkg(
       moduleManifest("org.example.scale", {
         connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
@@ -218,8 +218,8 @@ describe("runPipeline", () => {
         },
       },
     );
-    const forward = runPipeline(compose([offset, owner, scale]), "example.pipe", 4);
-    const reverse = runPipeline(compose([scale, owner, offset].reverse()), "example.pipe", 4);
+    const forward = await runPipeline(await compose([offset, owner, scale]), "example.pipe", 4);
+    const reverse = await runPipeline(await compose([scale, owner, offset].reverse()), "example.pipe", 4);
     assert.equal(forward.ok, true);
     assert.equal(forward.output, 11);
     assert.equal(reverse.output, 11);
@@ -232,7 +232,7 @@ describe("runPipeline", () => {
     );
   });
 
-  it("stops at a throw, a missing function, or an undefined return", () => {
+  it("stops at a throw, a missing function, or an undefined return", async () => {
     const keep = (id: string, order: number, payload: unknown) =>
       pkg(
         moduleManifest(`org.example.${id}`, {
@@ -245,8 +245,8 @@ describe("runPipeline", () => {
         },
       );
 
-    const thrown = runPipeline(
-      compose([
+    const thrown = await runPipeline(
+      await compose([
         owner,
         keep("first", 1, (value: unknown) => (typeof value === "number" ? value + 1 : value)),
         keep("boom", 2, () => {
@@ -262,8 +262,8 @@ describe("runPipeline", () => {
     assert.equal(thrown.stages.at(-1)?.code, "dispatch.threw");
     assert.equal(thrown.stages.some((stage) => stage.contributionId === "later"), false);
 
-    const blank = runPipeline(
-      compose([
+    const blank = await runPipeline(
+      await compose([
         owner,
         keep("first", 1, (value: unknown) => value),
         keep("blank", 2, () => undefined),
@@ -274,14 +274,14 @@ describe("runPipeline", () => {
     assert.equal(blank.output, "seed");
     assert.equal(blank.stages.at(-1)?.code, "dispatch.undefined");
 
-    const inert = compose([owner, keep("inert", 1, { note: true })]);
+    const inert = await compose([owner, keep("inert", 1, { note: true })]);
     assert.equal(inert.runtimeActive, false);
     assert.ok(inert.diagnostics.some((item) => item.code === "slot.contract"));
   });
 
-  it("refuses a subscriber slot", () => {
-    const result = compose([owner]);
-    const report = runPipeline(result, "example.listeners", 1);
+  it("refuses a subscriber slot", async () => {
+    const result = await compose([owner]);
+    const report = await runPipeline(result, "example.listeners", 1);
     assert.equal(report.ok, false);
     assert.match(report.reason ?? "", /subscriber/);
     assert.equal(report.output, 1);
@@ -316,8 +316,8 @@ describe("callService", () => {
     );
   }
 
-  it("returns the one provider's value, including undefined", () => {
-    const live = compose([
+  it("returns the one provider's value, including undefined", async () => {
+    const live = await compose([
       desk,
       provider("org.example.names", {
         handle(input: unknown) {
@@ -325,19 +325,19 @@ describe("callService", () => {
         },
       }),
     ]);
-    const report = callService(live, "example.ask", "alpha");
+    const report = await callService(live, "example.ask", "alpha");
     assert.equal(report.ok, true);
     assert.deepEqual(report.output, { echo: "alpha" });
     assert.equal(report.moduleId, "org.example.names");
 
-    const blank = callService(compose([desk, provider("org.example.blank", () => undefined)]), "example.ask", 1);
+    const blank = await callService(await compose([desk, provider("org.example.blank", () => undefined)]), "example.ask", 1);
     assert.equal(blank.ok, true);
     assert.equal(blank.output, undefined);
   });
 
-  it("records a throw or a missing function and does not invent a value", () => {
-    const thrown = callService(
-      compose([
+  it("records a throw or a missing function and does not invent a value", async () => {
+    const thrown = await callService(
+      await compose([
         desk,
         provider("org.example.boom", () => {
           throw new Error("service refused");
@@ -350,23 +350,23 @@ describe("callService", () => {
     assert.equal(thrown.code, "dispatch.threw");
     assert.equal(thrown.output, undefined);
 
-    const inert = compose([desk, provider("org.example.inert", { note: true })]);
+    const inert = await compose([desk, provider("org.example.inert", { note: true })]);
     assert.equal(inert.runtimeActive, false);
     assert.ok(inert.diagnostics.some((item) => item.code === "slot.contract"));
-    assert.equal(callService(inert, "example.ask", 1).reason, "Runtime is not active.");
+    assert.equal((await callService(inert, "example.ask", 1)).reason, "Runtime is not active.");
   });
 
-  it("refuses an empty slot, the wrong kind, and a shut-down runtime", () => {
-    const empty = callService(compose([desk]), "example.ask", "alpha");
+  it("refuses an empty slot, the wrong kind, and a shut-down runtime", async () => {
+    const empty = await callService(await compose([desk]), "example.ask", "alpha");
     assert.equal(empty.ok, false);
     assert.match(empty.reason ?? "", /no provider/);
 
-    const wrong = callService(compose([owner]), "example.listeners", "alpha");
+    const wrong = await callService(await compose([owner]), "example.listeners", "alpha");
     assert.match(wrong.reason ?? "", /subscriber/);
 
-    const live = compose([desk, provider("org.example.names", () => "kept")]);
-    live.shutdown();
-    const after = callService(live, "example.ask", "alpha");
+    const live = await compose([desk, provider("org.example.names", () => "kept")]);
+    await live.shutdown();
+    const after = await callService(live, "example.ask", "alpha");
     assert.equal(after.reason, "Runtime has shut down.");
     assert.equal(after.output, undefined);
   });

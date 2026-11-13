@@ -32,7 +32,7 @@ function codes(result: { diagnostics: Array<{ code: string }> }): string[] {
 }
 
 describe("foundations stay free of gameplay", () => {
-  it("does not name a genre system in the host sources", () => {
+  it("does not name a genre system in the host sources", async () => {
     const banned = ["flora", "fauna", "plant", "oak", "pine", "fern", "lighting", "combat", "crafting", "weapon"];
     for (const file of readdirSync(here)) {
       if (!file.endsWith(".ts") || file.endsWith(".test.ts")) continue;
@@ -43,7 +43,7 @@ describe("foundations stay free of gameplay", () => {
     }
   });
 
-  it("exposes one generic system registry and nothing domain-specific", () => {
+  it("exposes one generic system registry and nothing domain-specific", async () => {
     assert.deepEqual(
       PLATFORM_SLOTS.map((slot) => slot.slotId),
       ["platform.systems"],
@@ -53,7 +53,7 @@ describe("foundations stay free of gameplay", () => {
 });
 
 describe("manifest validation", () => {
-  it("rejects an inexact version and an unknown field", () => {
+  it("rejects an inexact version and an unknown field", async () => {
     const result = validateManifest({
       moduleId: "org.example.broken",
       name: "Broken",
@@ -67,7 +67,7 @@ describe("manifest validation", () => {
     assert.ok(result.errors.some((error) => error.message.includes("extra")));
   });
 
-  it("rejects a self-owned slot connection", () => {
+  it("rejects a self-owned slot connection", async () => {
     const result = validateManifest(
       moduleManifest("org.example.loop", {
         exposesSlots: [
@@ -86,15 +86,15 @@ describe("manifest validation", () => {
 });
 
 describe("composition", () => {
-  it("activates an empty profile", () => {
-    const result = compose([]);
+  it("activates an empty profile", async () => {
+    const result = await compose([]);
     assert.equal(result.runtimeActive, true);
     assert.equal(result.ok, true);
     assert.equal(result.order.length, 0);
     assert.equal(result.slots[0]?.slotId, "platform.systems");
   });
 
-  it("isolates a bad package without dropping a valid neighbor", () => {
+  it("isolates a bad package without dropping a valid neighbor", async () => {
     const good = pkg(
       moduleManifest("org.example.good", {
         connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
@@ -106,7 +106,7 @@ describe("composition", () => {
       },
     );
     const bad = pkg({ moduleId: "org.example.bad", name: "Bad", version: "1.0", moduleApi: ">=1.0.0 <2.0.0" });
-    const result = compose([bad, good]);
+    const result = await compose([bad, good]);
     assert.equal(result.runtimeActive, true);
     assert.equal(result.ok, false);
     assert.equal(result.modules.find((item) => item.moduleId === "org.example.good")?.status, "active");
@@ -114,7 +114,7 @@ describe("composition", () => {
     assert.equal(result.contributions.some((item) => item.id === "good"), true);
   });
 
-  it("isolates a module that requires one capability twice", () => {
+  it("isolates a module that requires one capability twice", async () => {
     const good = pkg(moduleManifest("org.example.good"));
     const doubled = pkg(
       moduleManifest("org.example.doubled", {
@@ -124,15 +124,15 @@ describe("composition", () => {
         ],
       }),
     );
-    const result = compose([doubled, good]);
+    const result = await compose([doubled, good]);
     assert.equal(result.runtimeActive, true);
     assert.equal(result.modules.find((item) => item.moduleId === "org.example.good")?.status, "active");
     assert.equal(result.modules.find((item) => item.moduleId === "org.example.doubled")?.status, "rejected");
     assert.ok(result.diagnostics.some((item) => item.message.includes("required more than once")));
   });
 
-  it("isolates a module built for a future host API", () => {
-    const result = compose([
+  it("isolates a module built for a future host API", async () => {
+    const result = await compose([
       pkg(moduleManifest("org.example.future", { moduleApi: ">=2.0.0 <3.0.0" })),
     ]);
     assert.equal(result.runtimeActive, true);
@@ -140,9 +140,9 @@ describe("composition", () => {
     assert.equal(result.modules[0]?.status, "rejected");
   });
 
-  it("refuses duplicate module ids", () => {
+  it("refuses duplicate module ids", async () => {
     const manifest = moduleManifest("org.example.twin");
-    const result = compose([pkg(manifest), pkg(manifest)]);
+    const result = await compose([pkg(manifest), pkg(manifest)]);
     assert.ok(codes(result).includes("module.duplicate"));
     assert.equal(
       result.modules.every((item) => item.status === "rejected"),
@@ -150,8 +150,8 @@ describe("composition", () => {
     );
   });
 
-  it("does not treat declared permissions as a sandbox", () => {
-    const result = compose([
+  it("does not treat declared permissions as a sandbox", async () => {
+    const result = await compose([
       pkg(moduleManifest("org.example.trusted", { permissions: ["world.read"] })),
     ]);
     assert.equal(result.runtimeActive, true);
@@ -159,7 +159,7 @@ describe("composition", () => {
     assert.deepEqual(result.modules[0]?.permissions, ["world.read"]);
   });
 
-  it("conflicts a singleton and an ambiguous service instead of choosing", () => {
+  it("conflicts a singleton and an ambiguous service instead of choosing", async () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
         exposesSlots: [
@@ -194,7 +194,7 @@ describe("composition", () => {
         ],
       }),
     );
-    const result = compose([right, owner, left]);
+    const result = await compose([right, owner, left]);
     assert.equal(result.runtimeActive, false);
     assert.ok(codes(result).includes("slot.conflict"));
     assert.ok(codes(result).includes("slot.ambiguous"));
@@ -204,7 +204,7 @@ describe("composition", () => {
     assert.deepEqual(only?.contributors, []);
   });
 
-  it("refuses two capability providers and accepts a named pin", () => {
+  it("refuses two capability providers and accepts a named pin", async () => {
     const left = pkg(
       moduleManifest("org.example.left", { provides: [{ capability: "example.marker", version: "1.0.0" }] }),
     );
@@ -214,13 +214,13 @@ describe("composition", () => {
     const open = pkg(
       moduleManifest("org.example.use", { requires: [{ capability: "example.marker", version: "^1.0.0" }] }),
     );
-    const ambiguous = compose([right, open, left]);
+    const ambiguous = await compose([right, open, left]);
     assert.equal(ambiguous.runtimeActive, false);
     assert.ok(codes(ambiguous).includes("dependency.ambiguous"));
     assert.equal(ambiguous.contributions.length, 0);
     assert.deepEqual(ambiguous.dependencies, []);
 
-    const optional = compose([
+    const optional = await compose([
       left,
       right,
       pkg(
@@ -232,7 +232,7 @@ describe("composition", () => {
     assert.equal(optional.runtimeActive, false);
     assert.ok(codes(optional).includes("dependency.ambiguous"));
 
-    const pinned = compose([
+    const pinned = await compose([
       right,
       left,
       pkg(
@@ -258,12 +258,12 @@ describe("composition", () => {
         provides: [{ capability: "example.marker", version: "2.0.0" }],
       }),
     );
-    const onlyLeft = compose([newer, open, left]);
+    const onlyLeft = await compose([newer, open, left]);
     assert.equal(onlyLeft.runtimeActive, true);
     assert.equal(codes(onlyLeft).includes("dependency.ambiguous"), false);
   });
 
-  it("orders pipeline contributions by order, then module id", () => {
+  it("orders pipeline contributions by order, then module id", async () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
         exposesSlots: [
@@ -306,8 +306,8 @@ describe("composition", () => {
         },
       },
     );
-    const forward = compose([late, tiedB, owner, early]);
-    const reverse = compose([early, owner, tiedB, late].reverse());
+    const forward = await compose([late, tiedB, owner, early]);
+    const reverse = await compose([early, owner, tiedB, late].reverse());
     assert.equal(forward.runtimeActive, true);
     assert.deepEqual(
       forward.contributions.map((item) => item.id),
@@ -318,9 +318,9 @@ describe("composition", () => {
     assert.match(forward.fingerprint, /example\.pipe:early@org\.example\.early#2/);
   });
 
-  it("changes the fingerprint when a version or a contribution order changes", () => {
-    const base = compose([pkg(moduleManifest("org.example.one"))]);
-    const bumped = compose([pkg(moduleManifest("org.example.one", { version: "1.0.1" }))]);
+  it("changes the fingerprint when a version or a contribution order changes", async () => {
+    const base = await compose([pkg(moduleManifest("org.example.one"))]);
+    const bumped = await compose([pkg(moduleManifest("org.example.one", { version: "1.0.1" }))]);
     assert.notEqual(base.fingerprint, bumped.fingerprint);
     assert.match(base.fingerprint, /org\.example\.one@1\.0\.0/);
     assert.match(bumped.fingerprint, /org\.example\.one@1\.0\.1/);
@@ -348,10 +348,10 @@ describe("composition", () => {
           },
         },
       );
-    assert.notEqual(compose([owner, stage(1)]).fingerprint, compose([owner, stage(2)]).fingerprint);
+    assert.notEqual((await compose([owner, stage(1)])).fingerprint, (await compose([owner, stage(2)])).fingerprint);
   });
 
-  it("refuses a service payload that is not callable and still shuts the parent down", () => {
+  it("refuses a service payload that is not callable and still shuts the parent down", async () => {
     const events: string[] = [];
     const parent = pkg(
       moduleManifest("org.example.parent", {
@@ -390,7 +390,7 @@ describe("composition", () => {
         },
       },
     );
-    const result = compose([
+    const result = await compose([
       pkg(
         moduleManifest("org.example.parent", {
           provides: [{ capability: "example.core", version: "1.0.0" }],
@@ -414,20 +414,20 @@ describe("composition", () => {
     assert.deepEqual(events, ["register:parent", "register:child", "shutdown:child", "shutdown:parent"]);
   });
 
-  it("runs trusted in-process code and refuses any other execution trust", () => {
+  it("runs trusted in-process code and refuses any other execution trust", async () => {
     let called = false;
     const pack = pkg(moduleManifest("org.example.plain"), {
       register() {
         called = true;
       },
     });
-    const refused = compose([pack], { trust: "sandbox" });
+    const refused = await compose([pack], { trust: "sandbox" });
     assert.equal(called, false);
     assert.equal(refused.trust, "unsupported");
     assert.equal(refused.runtimeActive, false);
     assert.ok(refused.diagnostics.some((item) => item.code === "trust.unsupported"));
 
-    const live = compose([pack]);
+    const live = await compose([pack]);
     assert.equal(called, true);
     assert.equal(live.trust, "trusted-in-process");
     assert.equal(live.runtimeActive, true);
@@ -435,38 +435,47 @@ describe("composition", () => {
     assert.equal(live.limitsEnforced, false);
   });
 
-  it("does not run module code unless the policy allows the backend grants", () => {
+  it("does not run module code unless the policy allows the backend grants", async () => {
     let called = false;
     const pack = pkg(moduleManifest("org.example.plain"), {
       register() {
         called = true;
       },
     });
-    const closed = hostCompose([pack]);
+    const closed = await hostCompose([pack]);
     assert.equal(called, false);
     assert.equal(closed.runtimeActive, false);
     assert.ok(closed.diagnostics.some((item) => item.code === "trust.grants"));
 
-    const limited = hostCompose([pack], {
+    const limited = await hostCompose([pack], {
       policy: { allowGrants: ["filesystem", "network", "os"], maxMemoryBytes: 1024 },
     });
     assert.equal(called, false);
     assert.ok(limited.diagnostics.some((item) => item.code === "trust.limits"));
   });
 
-  it("runs hooks only through a replacement backend", () => {
+  it("runs hooks only through a replacement backend", async () => {
     const seen: string[] = [];
     const backend: ExecutionBackend = {
       id: "counting",
       grants: [],
       enforcesLimits: true,
-      invoke(call) {
-        seen.push(`${call.hook}:${call.moduleId}`);
-        return inProcessBackend.invoke(call);
-      },
-      callPayload(payload, arg) {
-        seen.push("payload");
-        return inProcessBackend.callPayload(payload, arg);
+      recognizesPayload: inProcessBackend.recognizesPayload,
+      hasHook: inProcessBackend.hasHook.bind(inProcessBackend),
+      open() {
+        const inner = inProcessBackend.open();
+        return {
+          id: "counting-session",
+          async invoke(call) {
+            seen.push(`${call.hook}:${call.moduleId}`);
+            return inner.invoke(call);
+          },
+          async callPayload(payload, args) {
+            seen.push("payload");
+            return inner.callPayload(payload, args);
+          },
+          release: () => inner.release(),
+        };
       },
     };
     const pack = pkg(
@@ -482,20 +491,20 @@ describe("composition", () => {
         },
       },
     );
-    const result = hostCompose([pack], { backend, policy: { allowGrants: [] } });
+    const result = await hostCompose([pack], { backend, policy: { allowGrants: [] } });
     assert.equal(result.runtimeActive, true);
     assert.equal(result.trust, "custom");
     assert.equal(result.backendId, "counting");
     assert.equal(result.limitsEnforced, true);
     assert.deepEqual(seen, ["register:org.example.plain", "initialize:org.example.plain", "inside-initialize"]);
-    const report = result.shutdown();
+    const report = await result.shutdown();
     assert.equal(report.already, false);
     assert.deepEqual(seen.at(-1), "shutdown:org.example.plain");
   });
 
-  it("gives a module no host channel except its context", () => {
+  it("gives a module no host channel except its context", async () => {
     let keys: string[] = [];
-    compose([
+    await compose([
       pkg(moduleManifest("org.example.plain"), {
         register(ctx) {
           keys = Object.keys(ctx);
@@ -505,7 +514,7 @@ describe("composition", () => {
     assert.deepEqual(keys.sort(), ["contribute", "keep", "moduleId"]);
   });
 
-  it("keeps every subscriber", () => {
+  it("keeps every subscriber", async () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
         exposesSlots: [
@@ -529,7 +538,7 @@ describe("composition", () => {
           },
         },
       );
-    const result = compose([make("org.example.zeta"), owner, make("org.example.able")]);
+    const result = await compose([make("org.example.zeta"), owner, make("org.example.able")]);
     assert.equal(result.runtimeActive, true);
     assert.deepEqual(
       result.slots.find((slot) => slot.slotId === "example.events")?.contributors,
@@ -537,8 +546,8 @@ describe("composition", () => {
     );
   });
 
-  it("refuses a required slot with no provider", () => {
-    const result = compose([
+  it("refuses a required slot with no provider", async () => {
+    const result = await compose([
       pkg(
         moduleManifest("org.example.owner", {
           exposesSlots: [
@@ -557,8 +566,8 @@ describe("composition", () => {
     assert.ok(codes(result).includes("slot.missing"));
   });
 
-  it("refuses an unsatisfied dependency and accepts an optional one", () => {
-    const missing = compose([
+  it("refuses an unsatisfied dependency and accepts an optional one", async () => {
+    const missing = await compose([
       pkg(
         moduleManifest("org.example.needy", {
           requires: [{ capability: "example.missing", version: "^1.0.0" }],
@@ -568,7 +577,7 @@ describe("composition", () => {
     assert.equal(missing.runtimeActive, false);
     assert.ok(codes(missing).includes("dependency.unsatisfied"));
 
-    const optional = compose([
+    const optional = await compose([
       pkg(
         moduleManifest("org.example.soft", {
           requires: [{ capability: "example.missing", version: "^1.0.0", optional: true }],
@@ -580,7 +589,7 @@ describe("composition", () => {
     assert.ok(optional.diagnostics.some((item) => item.code === "dependency.optional-missing"));
   });
 
-  it("rejects a contract major mismatch and an unknown slot", () => {
+  it("rejects a contract major mismatch and an unknown slot", async () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
         provides: [{ capability: "example.core", version: "1.0.0" }],
@@ -594,7 +603,7 @@ describe("composition", () => {
         ],
       }),
     );
-    const mismatch = compose([
+    const mismatch = await compose([
       owner,
       pkg(
         moduleManifest("org.example.child", {
@@ -606,7 +615,7 @@ describe("composition", () => {
     assert.equal(mismatch.runtimeActive, false);
     assert.ok(codes(mismatch).includes("slot.contract-mismatch"));
 
-    const unknown = compose([
+    const unknown = await compose([
       pkg(
         moduleManifest("org.example.lost", {
           connectsTo: [{ slot: "example.missing", contract: "example.missing/1" }],
@@ -616,9 +625,9 @@ describe("composition", () => {
     assert.ok(codes(unknown).includes("slot.unknown"));
   });
 
-  it("reports a dependency cycle and does not initialize either side", () => {
+  it("reports a dependency cycle and does not initialize either side", async () => {
     const events: string[] = [];
-    const result = compose([
+    const result = await compose([
       pkg(
         moduleManifest("org.example.alpha", {
           provides: [{ capability: "example.alpha", version: "1.0.0" }],
@@ -640,7 +649,7 @@ describe("composition", () => {
     assert.match(result.diagnostics.find((item) => item.code === "dependency.cycle")?.message ?? "", /alpha/);
   });
 
-  it("rejects nesting past the depth limit and accepts a shallow chain", () => {
+  it("rejects nesting past the depth limit and accepts a shallow chain", async () => {
     const chain = (depth: number): ModulePackage[] => {
       const packages: ModulePackage[] = [];
       for (let level = 1; level <= depth; level += 1) {
@@ -679,16 +688,16 @@ describe("composition", () => {
       return packages;
     };
 
-    const tooDeep = compose(chain(9));
+    const tooDeep = await compose(chain(9));
     assert.equal(tooDeep.runtimeActive, false);
     assert.ok(codes(tooDeep).includes("slot.depth"));
 
-    const shallow = compose(chain(2));
+    const shallow = await compose(chain(2));
     assert.equal(shallow.runtimeActive, true);
     assert.equal(shallow.contributions.some((item) => item.id === "node-2"), true);
   });
 
-  it("lets a separately defined child connect to a parent slot", () => {
+  it("lets a separately defined child connect to a parent slot", async () => {
     const seen: unknown[] = [];
     const parent = pkg(
       moduleManifest("org.example.parent", {
@@ -724,7 +733,7 @@ describe("composition", () => {
         },
       },
     );
-    const result = compose([child, parent]);
+    const result = await compose([child, parent]);
     assert.equal(result.ok, true);
     assert.deepEqual(seen, [["mangrove"], null]);
     assert.equal(
@@ -733,7 +742,7 @@ describe("composition", () => {
     );
   });
 
-  it("rolls back when initialize throws and shuts down only modules that entered initialize", () => {
+  it("rolls back when initialize throws and shuts down only modules that entered initialize", async () => {
     const events: string[] = [];
     const make = (id: string, boom = false): ModulePackage =>
       pkg(
@@ -754,7 +763,7 @@ describe("composition", () => {
           },
         },
       );
-    const result = compose([
+    const result = await compose([
       make("org.example.later"),
       make("org.example.boom", true),
       make("org.example.alpha"),
@@ -773,7 +782,7 @@ describe("composition", () => {
     ]);
   });
 
-  it("shuts down a module whose register threw, and not one that never started", () => {
+  it("shuts down a module whose register threw, and not one that never started", async () => {
     const events: string[] = [];
     const make = (id: string, boom = false): ModulePackage =>
       pkg(
@@ -791,7 +800,7 @@ describe("composition", () => {
           },
         },
       );
-    const result = compose([make("org.example.later"), make("org.example.boom", true), make("org.example.alpha")]);
+    const result = await compose([make("org.example.later"), make("org.example.boom", true), make("org.example.alpha")]);
     assert.equal(result.runtimeActive, false);
     assert.equal(result.contributions.length, 0);
     assert.deepEqual(events, [
@@ -802,7 +811,7 @@ describe("composition", () => {
     ]);
   });
 
-  it("shuts a live composition down in reverse order, once", () => {
+  it("shuts a live composition down in reverse order, once", async () => {
     const events: string[] = [];
     const make = (id: string) =>
       pkg(moduleManifest(id), {
@@ -813,10 +822,10 @@ describe("composition", () => {
           events.push(`shutdown:${id}`);
         },
       });
-    const result = compose([make("org.example.beta"), make("org.example.alpha")]);
+    const result = await compose([make("org.example.beta"), make("org.example.alpha")]);
     assert.equal(result.quiesced, false);
-    const first = result.shutdown();
-    const second = result.shutdown();
+    const first = await result.shutdown();
+    const second = await result.shutdown();
     assert.deepEqual(first.order, ["org.example.beta", "org.example.alpha"]);
     assert.equal(first.already, false);
     assert.equal(second.already, true);
@@ -829,8 +838,8 @@ describe("composition", () => {
     ]);
   });
 
-  it("rejects a contribution to a slot the module did not declare", () => {
-    const result = compose([
+  it("rejects a contribution to a slot the module did not declare", async () => {
+    const result = await compose([
       pkg(
         moduleManifest("org.example.sneaky", {
           connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }],
@@ -846,7 +855,7 @@ describe("composition", () => {
     assert.ok(codes(result).includes("slot.undeclared"));
   });
 
-  it("rejects two contributions that share an id in one registry", () => {
+  it("rejects two contributions that share an id in one registry", async () => {
     const owner = pkg(
       moduleManifest("org.example.owner", {
         exposesSlots: [
@@ -870,7 +879,7 @@ describe("composition", () => {
           },
         },
       );
-    const result = compose([owner, make("org.example.left"), make("org.example.right")]);
+    const result = await compose([owner, make("org.example.left"), make("org.example.right")]);
     assert.equal(result.runtimeActive, false);
     assert.ok(codes(result).includes("slot.duplicate-contribution"));
     assert.equal(result.contributions.length, 0);

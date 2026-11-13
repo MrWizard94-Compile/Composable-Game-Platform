@@ -5,10 +5,12 @@ import { validateManifest } from "./manifest.ts";
 import { contractRefMatches, parseContractRef, satisfies } from "./semver.ts";
 import { isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
 import type { SlotKind } from "./slots.ts";
-import type { ExecutionBackend, ExecutionPolicy, HostGrant } from "./backend.ts";
+import type { ExecutionBackend, ExecutionPolicy, ExecutionSession, HostGrant } from "./backend.ts";
+export type { ExecutionSession };
 import {
   CLOSED_POLICY,
   IN_PROCESS_POLICY,
+  deniedSession,
   denyingBackend,
   inProcessBackend,
   policyConflict,
@@ -181,7 +183,7 @@ export type CompositionResult = {
   /** Populated only while the runtime is active. Discarded on rollback. */
   contributions: ContributionRecord[];
   trace: string[];
-  shutdown: () => ShutdownReport;
+  shutdown: () => Promise<ShutdownReport>;
 };
 
 type Admitted = {
@@ -320,11 +322,11 @@ function contributionSort(a: ContributionRecord, b: ContributionRecord): number 
   return cmp(a.id, b.id);
 }
 
-function noopShutdown(): ShutdownReport {
+async function noopShutdown(): Promise<ShutdownReport> {
   return { already: true, order: [], diagnostics: [] };
 }
 
-export function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}): CompositionResult {
+export async function compose(packages: readonly ModulePackage[], options: ComposeOptions = {}): Promise<CompositionResult> {
   const profileName = options.profileName ?? "unnamed";
   const maxDepth = options.maxDepth ?? MAX_SLOT_DEPTH;
   const diagnostics: Diagnostic[] = [];
@@ -408,6 +410,14 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   const grants = backend.grants;
   const limitsEnforced = backend.enforcesLimits;
   backend.configure?.(policy);
+  const session = backend.open();
+  let retainSession = false;
+  try {
+  const abandon = async (result: CompositionResult): Promise<CompositionResult> => {
+    sessionOfMap.set(result, session);
+    await session.release();
+    return result;
+  };
 
   phases.push(
     phase("discover", "completed", `Discovered ${packages.length} package${packages.length === 1 ? "" : "s"}.`),
@@ -805,12 +815,12 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     for (const id of indicted(item)) guilty.add(id);
   }
 
-  const finishInactive = (reason: string): CompositionResult => {
+  const finishInactive = async (reason: string): Promise<CompositionResult> => {
     phases.push(phase("prepare", "skipped", reason));
     phases.push(phase("register", "skipped", reason));
     phases.push(phase("initialize", "skipped", reason));
     phases.push(phase("run", "skipped", reason));
-    return assemble({
+    return abandon(assemble({
       profileName,
       trust,
       backendId,
@@ -828,18 +838,20 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       trace,
       shutdown: noopShutdown,
       guilty,
-    });
+    }));
   };
 
   if (resolveFailed) {
-    return finishInactive("Skipped because resolution failed.");
+    return await finishInactive("Skipped because resolution failed.");
   }
 
   phases.push(
     phase(
       "prepare",
       "completed",
-      `Prepared ${admitted.length} in-memory module context${admitted.length === 1 ? "" : "s"}. No sandbox and no resource limits are applied.`,
+      limitsEnforced
+        ? `Prepared ${admitted.length} module context${admitted.length === 1 ? "" : "s"}. ${backendId} enforces the time and memory limits.`
+        : `Prepared ${admitted.length} module context${admitted.length === 1 ? "" : "s"}. This backend does not enforce a sandbox or resource limits.`,
     ),
   );
 
@@ -862,17 +874,17 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       kept: () => keptByModule.get(moduleId),
     });
 
-  const callHook = (
+  const callHook = async (
     moduleId: string,
     hook: "register" | "initialize" | "shutdown",
     implementation: ModuleImplementation | undefined,
     args: readonly unknown[],
-  ): string | undefined => {
+  ): Promise<string | undefined> => {
     const permissions = admitted.find((item) => item.manifest.moduleId === moduleId)?.manifest.permissions ?? [];
-    const outcome = backend.invoke({
+    const outcome = await session.invoke({
       moduleId,
       hook,
-      implementation: implementation as Parameters<ExecutionBackend["invoke"]>[0]["implementation"],
+      implementation: implementation as Parameters<ExecutionSession["invoke"]>[0]["implementation"],
       args,
       permissions,
     });
@@ -881,11 +893,11 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     return String(outcome.error);
   };
 
-  const shutdownEntered = (ids: readonly string[], fromPhase: "register" | "initialize") => {
+  const shutdownEntered = async (ids: readonly string[], fromPhase: "register" | "initialize") => {
     for (const moduleId of [...ids].reverse()) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
-      const failure = callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
+      const failure = await callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
       if (failure) {
         diagnostics.push(
           errorDiagnostic(
@@ -904,7 +916,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     enteredRegister.push(moduleId);
     const before = records.length;
     const localErrors = diagnostics.length;
-    const failure = callHook(moduleId, "register", entry.implementation, [
+    const failure = await callHook(moduleId, "register", entry.implementation, [
       Object.freeze({
         moduleId,
         contribute: (slotId: string, contribution: ContributionInput) => {
@@ -995,7 +1007,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   }
 
   if (registerFailed) {
-    shutdownEntered(enteredRegister, "register");
+    await shutdownEntered(enteredRegister, "register");
     records.splice(0, records.length);
     phases.push(phase("register", "failed", "Registration failed. Registered modules were shut down and contributions discarded."));
     phases.push(phase("initialize", "skipped", "Skipped because registration failed."));
@@ -1005,7 +1017,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         for (const id of indicted(item)) guilty.add(id);
       }
     }
-    return assemble({
+    return abandon(assemble({
       profileName,
       trust,
       backendId,
@@ -1023,7 +1035,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       trace,
       shutdown: noopShutdown,
       guilty,
-    });
+    }));
   }
 
   records.sort(contributionSort);
@@ -1037,7 +1049,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
     if (!entry) continue;
     try {
-      const failure = callHook(moduleId, "initialize", entry.implementation, [life(moduleId)]);
+      const failure = await callHook(moduleId, "initialize", entry.implementation, [life(moduleId)]);
       if (failure) throw new Error(failure);
       initialized.push(moduleId);
       trace.push(`${moduleId}:initialize`);
@@ -1051,7 +1063,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         }),
       );
       guilty.add(moduleId);
-      shutdownEntered([...initialized, moduleId], "initialize");
+      await shutdownEntered([...initialized, moduleId], "initialize");
       break;
     }
   }
@@ -1059,7 +1071,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   if (initFailed) {
     phases.push(phase("initialize", "failed", "Initialization failed. Modules that had entered initialize were shut down. No contributions remain registered."));
     phases.push(phase("run", "skipped", "Skipped because initialization failed."));
-    return assemble({
+    return abandon(assemble({
       profileName,
       trust,
       backendId,
@@ -1077,7 +1089,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
       trace,
       shutdown: noopShutdown,
       guilty,
-    });
+    }));
   }
 
   phases.push(
@@ -1096,7 +1108,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   );
 
   let built: CompositionResult;
-  const shutdown = (): ShutdownReport => {
+  const shutdown = async (): Promise<ShutdownReport> => {
     if (built.quiesced) return { already: true, order: [], diagnostics: [] };
     built.quiesced = true;
     const shutdownDiagnostics: Diagnostic[] = [];
@@ -1104,7 +1116,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
     for (const moduleId of shutdownOrder) {
       const entry = admitted.find((item) => item.manifest.moduleId === moduleId);
       trace.push(`${moduleId}:shutdown`);
-      const failure = callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
+      const failure = await callHook(moduleId, "shutdown", entry?.implementation, [life(moduleId)]);
       if (failure) {
         shutdownDiagnostics.push(
           errorDiagnostic("lifecycle.exception", `Shutdown of "${moduleId}" threw: ${failure}`, {
@@ -1114,7 +1126,7 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
         );
       }
     }
-    backend.dispose?.();
+    await session.release();
     return { already: false, order: shutdownOrder, diagnostics: shutdownDiagnostics };
   };
 
@@ -1141,7 +1153,12 @@ export function compose(packages: readonly ModulePackage[], options: ComposeOpti
   for (const entry of admitted) implByModule.set(entry.manifest.moduleId, entry.implementation);
   memoryOf.set(built, keptByModule);
   implOf.set(built, implByModule);
+  sessionOfMap.set(built, session);
+  retainSession = true;
   return built;
+  } finally {
+    if (!retainSession) await session.release();
+  }
 }
 
 function acceptContribution(
@@ -1284,7 +1301,7 @@ function assemble(input: {
   dependencies: ResolvedDependency[];
   contributions: ContributionRecord[];
   trace: string[];
-  shutdown: () => ShutdownReport;
+  shutdown: () => Promise<ShutdownReport>;
   guilty: Set<string>;
 }): CompositionResult {
   const modules: ResolvedModule[] = input.working.map((item) => {
@@ -1348,6 +1365,11 @@ function assemble(input: {
 const memoryOf = new WeakMap<CompositionResult, ReadonlyMap<string, unknown>>();
 const implOf = new WeakMap<CompositionResult, ReadonlyMap<string, ModuleImplementation | undefined>>();
 const backendOfMap = new WeakMap<CompositionResult, ExecutionBackend>();
+const sessionOfMap = new WeakMap<CompositionResult, ExecutionSession>();
+
+export function sessionOf(result: CompositionResult): ExecutionSession {
+  return sessionOfMap.get(result) ?? deniedSession;
+}
 
 export function backendOf(result: CompositionResult): ExecutionBackend {
   return backendOfMap.get(result) ?? denyingBackend;

@@ -1,2 +1,5 @@
 node_modules/
-.DS_Store
+.project_id
+.github_repo
+.env
+.env.*

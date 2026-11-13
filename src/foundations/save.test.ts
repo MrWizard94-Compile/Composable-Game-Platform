@@ -68,37 +68,37 @@ const owner = pkg(
 );
 
 describe("capture and restore", () => {
-  it("round-trips JSON and leaves a different major untouched", () => {
-    const result = compose([owner, counter("org.example.count")], { profileName: "preview" });
+  it("round-trips JSON and leaves a different major untouched", async () => {
+    const result = await compose([owner, counter("org.example.count")], { profileName: "preview" });
     const implementation = result.contributions[0]?.payload;
     assert.equal(typeof implementation, "function");
     if (typeof implementation === "function") implementation({});
-    const captured = captureSave(result);
+    const captured = await captureSave(result);
     assert.equal(captured.ok, true);
     assert.deepEqual(captured.document.slices, [
       { moduleId: "org.example.count", version: "1.0.0", payload: { n: 1 } },
     ]);
 
-    const restored = restoreSave(result, {
+    const restored = await restoreSave(result, {
       ...captured.document,
       slices: [{ moduleId: "org.example.count", version: "1.2.0", payload: { n: 9 } }],
     });
     assert.equal(restored.ok, true);
     assert.deepEqual(restored.applied, ["org.example.count"]);
-    assert.deepEqual(captureSave(result).document.slices[0]?.payload, { n: 9 });
+    assert.deepEqual((await captureSave(result)).document.slices[0]?.payload, { n: 9 });
 
-    const refused = restoreSave(result, {
+    const refused = await restoreSave(result, {
       ...captured.document,
       slices: [{ moduleId: "org.example.count", version: "2.0.0", payload: { n: 0 } }],
     });
     assert.equal(refused.ok, false);
     assert.ok(refused.notices.some((item) => item.code === "save.incompatible"));
-    assert.deepEqual(captureSave(result).document.slices[0]?.payload, { n: 9 });
+    assert.deepEqual((await captureSave(result)).document.slices[0]?.payload, { n: 9 });
   });
 
-  it("refuses a foreign Foundations major and an unknown document field", () => {
-    const result = compose([owner, counter("org.example.count")]);
-    const api = restoreSave(result, {
+  it("refuses a foreign Foundations major and an unknown document field", async () => {
+    const result = await compose([owner, counter("org.example.count")]);
+    const api = await restoreSave(result, {
       foundationsApi: "2.0.0",
       profileName: result.profileName,
       fingerprint: result.fingerprint,
@@ -107,7 +107,7 @@ describe("capture and restore", () => {
     assert.equal(api.ok, false);
     assert.equal(api.notices[0]?.code, "save.api");
 
-    const extra = restoreSave(result, {
+    const extra = await restoreSave(result, {
       foundationsApi: "1.0.0",
       profileName: result.profileName,
       fingerprint: result.fingerprint,
@@ -118,9 +118,9 @@ describe("capture and restore", () => {
     assert.equal(extra.notices[0]?.code, "save.document");
   });
 
-  it("warns on an orphan slice and on a module with nothing saved", () => {
-    const result = compose([owner, counter("org.example.count")], { profileName: "preview" });
-    const report = restoreSave(result, {
+  it("warns on an orphan slice and on a module with nothing saved", async () => {
+    const result = await compose([owner, counter("org.example.count")], { profileName: "preview" });
+    const report = await restoreSave(result, {
       foundationsApi: "1.0.0",
       profileName: "other",
       fingerprint: "nope",
@@ -134,9 +134,9 @@ describe("capture and restore", () => {
     assert.ok(report.notices.some((item) => item.code === "save.fingerprint"));
   });
 
-  it("does not pick between two slices for one module", () => {
-    const result = compose([owner, counter("org.example.count")], { profileName: "preview" });
-    const report = restoreSave(result, {
+  it("does not pick between two slices for one module", async () => {
+    const result = await compose([owner, counter("org.example.count")], { profileName: "preview" });
+    const report = await restoreSave(result, {
       foundationsApi: "1.0.0",
       profileName: result.profileName,
       fingerprint: result.fingerprint,
@@ -149,10 +149,10 @@ describe("capture and restore", () => {
     assert.deepEqual(report.applied, []);
     assert.ok(report.notices.some((item) => item.code === "save.duplicate"));
     assert.equal(report.notices.some((item) => item.code === "save.fingerprint"), false);
-    assert.deepEqual(captureSave(result).document.slices[0]?.payload, { n: 0 });
+    assert.deepEqual((await captureSave(result)).document.slices[0]?.payload, { n: 0 });
   });
 
-  it("sorts object keys and keeps array order", () => {
+  it("sorts object keys and keeps array order", async () => {
     const bag = (body: Record<string, unknown>) =>
       pkg(moduleManifest("org.example.bag", { save: { version: "1.0.0" } }), {
         exportState() {
@@ -163,21 +163,21 @@ describe("capture and restore", () => {
         },
       });
     let seen: unknown;
-    const forward = compose([bag({ z: 1, a: { d: [2, 1], b: true } })]);
-    const payload = captureSave(forward).document.slices[0]?.payload as {
+    const forward = await compose([bag({ z: 1, a: { d: [2, 1], b: true } })]);
+    const payload = (await captureSave(forward)).document.slices[0]?.payload as {
       a: { b: boolean; d: number[] };
     };
     assert.deepEqual(Object.keys(payload), ["a", "z"]);
     assert.deepEqual(Object.keys(payload.a), ["b", "d"]);
     assert.deepEqual(payload.a.d, [2, 1]);
 
-    const reverse = compose([bag({ a: { b: true, d: [2, 1] }, z: 1 })]);
+    const reverse = await compose([bag({ a: { b: true, d: [2, 1] }, z: 1 })]);
     assert.equal(
-      JSON.stringify(captureSave(reverse).document.slices[0]?.payload),
+      JSON.stringify((await captureSave(reverse)).document.slices[0]?.payload),
       JSON.stringify(payload),
     );
 
-    const restored = restoreSave(forward, {
+    const restored = await restoreSave(forward, {
       foundationsApi: "1.0.0",
       profileName: forward.profileName,
       fingerprint: forward.fingerprint,
@@ -187,8 +187,8 @@ describe("capture and restore", () => {
     assert.deepEqual(Object.keys(seen as object), ["a", "z"]);
   });
 
-  it("rejects a second keep, a non-JSON export, and a quiesced runtime", () => {
-    const doubled = compose([
+  it("rejects a second keep, a non-JSON export, and a quiesced runtime", async () => {
+    const doubled = await compose([
       pkg(
         moduleManifest("org.example.twice", { save: { version: "1.0.0" } }),
         {
@@ -206,7 +206,7 @@ describe("capture and restore", () => {
     assert.equal(doubled.runtimeActive, false);
     assert.ok(doubled.diagnostics.some((item) => item.code === "save.duplicate-keep"));
 
-    const messy = compose([
+    const messy = await compose([
       pkg(
         moduleManifest("org.example.messy", { save: { version: "1.0.0" } }),
         {
@@ -222,22 +222,22 @@ describe("capture and restore", () => {
         },
       ),
     ]);
-    const captured = captureSave(messy);
+    const captured = await captureSave(messy);
     assert.equal(captured.ok, false);
     assert.equal(captured.notices[0]?.code, "save.not-json");
 
-    const live = compose([owner, counter("org.example.count")]);
-    live.shutdown();
+    const live = await compose([owner, counter("org.example.count")]);
+    await live.shutdown();
     assert.equal(live.quiesced, true);
-    const after = captureSave(live);
+    const after = await captureSave(live);
     assert.equal(after.ok, false);
     assert.equal(after.notices[0]?.message, "Runtime has shut down.");
-    const restored = restoreSave(live, after.document);
+    const restored = await restoreSave(live, after.document);
     assert.equal(restored.notices[0]?.message, "Runtime has shut down.");
   });
 
-  it("rejects a save declaration that is not an exact version", () => {
-    const result = compose([pkg(moduleManifest("org.example.bad-save", { save: { version: "^1.0.0" } }))]);
+  it("rejects a save declaration that is not an exact version", async () => {
+    const result = await compose([pkg(moduleManifest("org.example.bad-save", { save: { version: "^1.0.0" } }))]);
     assert.equal(result.ok, false);
     assert.equal(result.modules[0]?.status, "rejected");
     assert.ok(result.diagnostics.some((item) => item.path === "save.version"));

@@ -18,6 +18,8 @@ export type ExecutionPolicy = {
   allowGrants: readonly HostGrant[];
   maxHookMs?: number;
   maxMemoryBytes?: number;
+  /** Imports an isolating backend may link. The in-process backend cannot enforce these. */
+  allowCapabilities?: readonly string[];
 };
 
 /** No implicit filesystem, network, or operating-system grant. No unenforced limit. */
@@ -48,19 +50,119 @@ export type PayloadResult =
   | { ok: false; code: "not-callable" }
   | { ok: false; code: "threw"; error: unknown };
 
+export type ExecutionSession = {
+  id: string;
+  invoke(call: HookCall): Promise<HookResult>;
+  callPayload(payload: unknown, args: readonly unknown[]): Promise<PayloadResult>;
+  release(): Promise<void>;
+};
+
 export type ExecutionBackend = {
   id: string;
   grants: readonly HostGrant[];
   enforcesLimits: boolean;
-  /** Tighten limits to the composition policy. Backends that cannot enforce a requested limit are refused earlier. */
+  /** Tighten limits to the composition policy before `open`. */
   configure?(policy: ExecutionPolicy): void;
   /** True when this backend, not a raw function, accepts the payload. */
   recognizesPayload(payload: unknown): boolean;
   /** True when this backend can run the hook. The host does not call the function itself. */
   hasHook(implementation: unknown, hook: HookName): boolean;
-  invoke(call: HookCall): HookResult;
-  callPayload(payload: unknown, arg: unknown): PayloadResult;
-  dispose?(): void;
+  /** One composition. Its guests die with `release`, not with another composition. */
+  open(): ExecutionSession;
+};
+
+let sessionSerial = 0;
+
+function ownsWasm(implementation: unknown): boolean {
+  return (
+    !!implementation &&
+    typeof implementation === "object" &&
+    (implementation as { wasm?: unknown }).wasm instanceof Uint8Array
+  );
+}
+
+function inProcessInvoke(call: HookCall): HookResult {
+  if (ownsWasm(call.implementation)) {
+    return { ok: false, error: new Error("This backend does not run WebAssembly. No module function was called.") };
+  }
+  const fn = call.implementation?.[call.hook];
+  if (typeof fn !== "function") return { ok: true, value: undefined };
+  try {
+    return { ok: true, value: fn(...call.args) };
+  } catch (error) {
+    return { ok: false, error: thrown(error) };
+  }
+}
+
+function inProcessPayload(payload: unknown, args: readonly unknown[]): PayloadResult {
+  if (!isCallablePayload(payload)) return { ok: false, code: "not-callable" };
+  try {
+    const value =
+      typeof payload === "function"
+        ? payload(...args)
+        : (payload as { handle: (...input: unknown[]) => unknown }).handle(...args);
+    return { ok: true, value };
+  } catch (error) {
+    return { ok: false, code: "threw", error: thrown(error) };
+  }
+}
+
+export const inProcessBackend: ExecutionBackend = {
+  id: "in-process",
+  grants: ["filesystem", "network", "os"],
+  enforcesLimits: false,
+  recognizesPayload: isCallablePayload,
+  hasHook(implementation, hook) {
+    if (ownsWasm(implementation)) return false;
+    if (!implementation || typeof implementation !== "object") return false;
+    const fn = (implementation as Partial<Record<HookName, unknown>>)[hook];
+    return typeof fn === "function";
+  },
+  open() {
+    const id = `in-process-${++sessionSerial}`;
+    let released = false;
+    return {
+      id,
+      async invoke(call) {
+        if (released) return { ok: false, error: new Error("This composition has been released.") };
+        return inProcessInvoke(call);
+      },
+      async callPayload(payload, args) {
+        if (released) return { ok: false, code: "threw", error: new Error("This composition has been released.") };
+        return inProcessPayload(payload, args);
+      },
+      async release() {
+        released = true;
+      },
+    };
+  },
+};
+
+/** Used when a result has no session. It never calls the payload. */
+export const denyingBackend: ExecutionBackend = {
+  id: "denied",
+  grants: [],
+  enforcesLimits: true,
+  recognizesPayload() {
+    return false;
+  },
+  hasHook() {
+    return false;
+  },
+  open() {
+    return deniedSession;
+  },
+};
+
+export const deniedSession: ExecutionSession = {
+  id: "denied",
+  async invoke() {
+    return { ok: false, error: new Error("This composition has no execution backend.") };
+  },
+  async callPayload() {
+    return { ok: false, code: "threw", error: new Error("This composition has no execution backend.") };
+  },
+  async release() {},
 };
 
 export type PolicyConflict = {
@@ -89,61 +191,21 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
   if (policy.maxMemoryBytes !== undefined && (!Number.isFinite(policy.maxMemoryBytes) || policy.maxMemoryBytes <= 0)) {
     return { code: "trust.limits", message: "maxMemoryBytes must be a positive finite number." };
   }
+  if (policy.allowCapabilities !== undefined) {
+    const names = policy.allowCapabilities;
+    if (!Array.isArray(names) || names.some((item) => typeof item !== "string" || item.length === 0)) {
+      return { code: "trust.limits", message: "allowCapabilities must be a list of capability names." };
+    }
+    if (!backend.enforcesLimits) {
+      return {
+        code: "trust.limits",
+        message: `Backend "${backend.id}" cannot enforce capability grants. No module code ran.`,
+      };
+    }
+  }
   return undefined;
 }
 
 function thrown(error: unknown): unknown {
   return error;
 }
-
-export const inProcessBackend: ExecutionBackend = {
-  id: "in-process",
-  grants: ["filesystem", "network", "os"],
-  enforcesLimits: false,
-  recognizesPayload: isCallablePayload,
-  hasHook(implementation, hook) {
-    if (!implementation || typeof implementation !== "object") return false;
-    const fn = (implementation as Partial<Record<HookName, unknown>>)[hook];
-    return typeof fn === "function";
-  },
-  invoke(call) {
-    const fn = call.implementation?.[call.hook];
-    if (typeof fn !== "function") return { ok: true, value: undefined };
-    try {
-      return { ok: true, value: fn(...call.args) };
-    } catch (error) {
-      return { ok: false, error: thrown(error) };
-    }
-  },
-  callPayload(payload, arg) {
-    if (!isCallablePayload(payload)) return { ok: false, code: "not-callable" };
-    try {
-      const value =
-        typeof payload === "function"
-          ? payload(arg)
-          : (payload as { handle: (input: unknown) => unknown }).handle(arg);
-      return { ok: true, value };
-    } catch (error) {
-      return { ok: false, code: "threw", error: thrown(error) };
-    }
-  },
-};
-
-/** Used when a result has no backend. It never calls the payload. */
-export const denyingBackend: ExecutionBackend = {
-  id: "denied",
-  grants: [],
-  enforcesLimits: true,
-  recognizesPayload() {
-    return false;
-  },
-  hasHook() {
-    return false;
-  },
-  invoke() {
-    return { ok: false, error: new Error("This composition has no execution backend.") };
-  },
-  callPayload() {
-    return { ok: false, code: "threw", error: new Error("This composition has no execution backend.") };
-  },
-};

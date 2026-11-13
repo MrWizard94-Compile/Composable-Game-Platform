@@ -8,11 +8,13 @@ export {
   compose,
   contributionsFor,
   moduleStatus,
+  sessionOf,
 } from "./host.ts";
 export type {
   ComposeOptions,
   CompositionResult,
   ContributionRecord,
+  ExecutionSession,
   ExecutionTrust,
   LifecycleContext,
   ModuleImplementation,

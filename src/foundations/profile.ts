@@ -196,6 +196,6 @@ export function unresolvedProfile(profileName: string, errors: readonly Diagnost
     fingerprint: "unresolved",
     contributions: [],
     trace: [],
-    shutdown: () => ({ already: true, order: [], diagnostics: [] }),
+    shutdown: async () => ({ already: true, order: [], diagnostics: [] }),
   };
 }

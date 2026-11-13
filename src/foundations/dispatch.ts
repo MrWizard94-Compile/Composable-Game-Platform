@@ -1,5 +1,5 @@
 import type { CompositionResult, ContributionRecord } from "./host.ts";
-import { backendOf, contributionsFor } from "./host.ts";
+import { contributionsFor, sessionOf } from "./host.ts";
 
 /**
  * Caller-initiated execution for three slot kinds.
@@ -66,8 +66,8 @@ export type ServiceReport = {
 
 const NOT_CALLABLE = Symbol("not-callable");
 
-function callHandler(result: CompositionResult, payload: unknown, arg: unknown): unknown | typeof NOT_CALLABLE {
-  const outcome = backendOf(result).callPayload(payload, arg);
+async function callHandler(result: CompositionResult, payload: unknown, arg: unknown): Promise<unknown | typeof NOT_CALLABLE> {
+  const outcome = await sessionOf(result).callPayload(payload, [arg]);
   if (!outcome.ok && outcome.code === "not-callable") return NOT_CALLABLE;
   if (!outcome.ok) throw outcome.error;
   return outcome.value;
@@ -96,13 +96,13 @@ function refuse(slotId: string, result: CompositionResult, kind: "subscriber" | 
   return undefined;
 }
 
-export function publish(result: CompositionResult, slotId: string, event: unknown): PublishReport {
+export async function publish(result: CompositionResult, slotId: string, event: unknown): Promise<PublishReport> {
   const reason = refuse(slotId, result, "subscriber");
   if (reason) return { ok: false, slotId, deliveries: [], reason };
 
   const deliveries: PublishDelivery[] = [];
   for (const contribution of contributionsFor(result, slotId)) {
-    deliveries.push(deliver(result, contribution, event));
+    deliveries.push(await deliver(result, contribution, event));
   }
   return {
     ok: deliveries.every((item) => item.ok),
@@ -111,9 +111,9 @@ export function publish(result: CompositionResult, slotId: string, event: unknow
   };
 }
 
-function deliver(result: CompositionResult, contribution: ContributionRecord, event: unknown): PublishDelivery {
+async function deliver(result: CompositionResult, contribution: ContributionRecord, event: unknown): Promise<PublishDelivery> {
   try {
-    const returned = callHandler(result, contribution.payload, event);
+    const returned = await callHandler(result, contribution.payload, event);
     if (returned === NOT_CALLABLE) {
       return {
         contributionId: contribution.id,
@@ -135,7 +135,7 @@ function deliver(result: CompositionResult, contribution: ContributionRecord, ev
   }
 }
 
-export function runPipeline(result: CompositionResult, slotId: string, input: unknown): PipelineReport {
+export async function runPipeline(result: CompositionResult, slotId: string, input: unknown): Promise<PipelineReport> {
   const reason = refuse(slotId, result, "pipeline");
   if (reason) return { ok: false, slotId, output: input, stages: [], reason };
 
@@ -144,7 +144,7 @@ export function runPipeline(result: CompositionResult, slotId: string, input: un
   for (const contribution of contributionsFor(result, slotId)) {
     let returned: unknown | typeof NOT_CALLABLE;
     try {
-      returned = callHandler(result, contribution.payload, value);
+      returned = await callHandler(result, contribution.payload, value);
     } catch (error) {
       stages.push({
         contributionId: contribution.id,
@@ -186,7 +186,7 @@ export function runPipeline(result: CompositionResult, slotId: string, input: un
   return { ok: true, slotId, output: value, stages };
 }
 
-export function callService(result: CompositionResult, slotId: string, input: unknown): ServiceReport {
+export async function callService(result: CompositionResult, slotId: string, input: unknown): Promise<ServiceReport> {
   const reason = refuse(slotId, result, "service");
   if (reason) return { ok: false, slotId, reason };
 
@@ -205,7 +205,7 @@ export function callService(result: CompositionResult, slotId: string, input: un
   const contribution = providers[0];
   if (!contribution) return { ok: false, slotId, reason: `Service slot "${slotId}" has no provider.` };
   try {
-    const returned = callHandler(result, contribution.payload, input);
+    const returned = await callHandler(result, contribution.payload, input);
     if (returned === NOT_CALLABLE) {
       return {
         ok: false,

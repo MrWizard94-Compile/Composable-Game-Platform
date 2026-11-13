@@ -1,5 +1,6 @@
+import type { HookCall } from "./backend.ts";
 import type { CompositionResult, LifecycleContext } from "./host.ts";
-import { FOUNDATIONS_API, backendOf, moduleImplementation, moduleMemory } from "./host.ts";
+import { FOUNDATIONS_API, backendOf, sessionOf, moduleImplementation, moduleMemory } from "./host.ts";
 import { parseSemVer } from "./semver.ts";
 
 /**
@@ -104,7 +105,7 @@ function sameMajor(left: string, right: string): boolean {
   return a !== null && b !== null && a.major === b.major;
 }
 
-export function captureSave(result: CompositionResult): CaptureReport {
+export async function captureSave(result: CompositionResult): Promise<CaptureReport> {
   const reason = blocked(result);
   const document = emptyDocument(result);
   if (reason) return { ok: false, document, notices: [notice("error", "save.inactive", reason)] };
@@ -127,10 +128,10 @@ export function captureSave(result: CompositionResult): CaptureReport {
       continue;
     }
     let payload: unknown;
-    const exported = backendOf(result).invoke({
+    const exported = await sessionOf(result).invoke({
       moduleId,
       hook: "exportState",
-      implementation: implementation as Parameters<ReturnType<typeof backendOf>["invoke"]>[0]["implementation"],
+      implementation: implementation as HookCall["implementation"],
       args: [life(result, moduleId)],
     });
     if (!exported.ok) {
@@ -151,7 +152,7 @@ export function captureSave(result: CompositionResult): CaptureReport {
   return { ok: notices.every((item) => item.severity !== "error"), document, notices };
 }
 
-export function restoreSave(result: CompositionResult, document: unknown): RestoreReport {
+export async function restoreSave(result: CompositionResult, document: unknown): Promise<RestoreReport> {
   const reason = blocked(result);
   if (reason) return { ok: false, applied: [], notices: [notice("error", "save.inactive", reason)] };
   if (!document || typeof document !== "object" || Array.isArray(document)) {
@@ -279,10 +280,10 @@ export function restoreSave(result: CompositionResult, document: unknown): Resto
       );
       continue;
     }
-    const imported = backendOf(result).invoke({
+    const imported = await sessionOf(result).invoke({
       moduleId,
       hook: "importState",
-      implementation: implementation as Parameters<ReturnType<typeof backendOf>["invoke"]>[0]["implementation"],
+      implementation: implementation as HookCall["implementation"],
       args: [life(result, moduleId), slice.payload],
     });
     if (!imported.ok) {

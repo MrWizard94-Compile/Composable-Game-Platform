@@ -1,4 +1,4 @@
-import { contributionsFor, type CompositionResult } from "../foundations/host.ts";
+import { contributionsFor, sessionOf, type CompositionResult } from "../foundations/host.ts";
 import { publish, runPipeline, callService, type PipelineReport, type PublishReport, type ServiceReport } from "../foundations/dispatch.ts";
 
 export const SEASONS = ["spring", "summer", "autumn", "winter"] as const;
@@ -49,11 +49,11 @@ export type FloraStep =
  * Demo runner. It lives outside the Foundations and understands Flora payloads.
  * The host only hands back the contributions it was given.
  */
-export function advanceFlora(
+export async function advanceFlora(
   result: CompositionResult,
   stages: Readonly<Record<string, number>>,
   season: Season,
-): FloraStep {
+): Promise<FloraStep> {
   if (!result.runtimeActive) {
     return { ok: false, reason: "Runtime is not active. Fix the composition before stepping growth." };
   }
@@ -84,7 +84,12 @@ export function advanceFlora(
       });
       continue;
     }
-    const next = advance(contribution.payload, season, current);
+    const called = await sessionOf(result).callPayload(advance, [contribution.payload, season, current]);
+    if (!called.ok) {
+      const message = called.code === "threw" && called.error instanceof Error ? called.error.message : "Growth model failed.";
+      return { ok: false, reason: message };
+    }
+    const next = called.value;
     if (typeof next !== "number" || Number.isNaN(next)) {
       return { ok: false, reason: `Growth model returned a non-numeric stage for ${contribution.payload.id}.` };
     }
@@ -149,24 +154,24 @@ export type PulseView = {
 };
 
 /** Demo runner. The host fans the event out; this only builds the pulse object. */
-export function dispatchPulse(result: CompositionResult): PulseView {
+export async function dispatchPulse(result: CompositionResult): Promise<PulseView> {
   const heard: string[] = [];
-  const report = publish(result, "signals.listeners", { heard });
+  const report = await publish(result, "signals.listeners", { heard });
   return { heard: [...heard], report };
 }
 
 export type PipeView = PipelineReport & { input: number };
 
 /** Demo runner. The host folds the number; this only chooses the slot. */
-export function foldPipe(result: CompositionResult, input: number): PipeView {
-  return { input, ...runPipeline(result, "signals.pipe", input) };
+export async function foldPipe(result: CompositionResult, input: number): Promise<PipeView> {
+  return { input, ...(await runPipeline(result, "signals.pipe", input)) };
 }
 
 export type QueryView = { question: string; report: ServiceReport };
 
 /** Demo runner. The host calls the one service provider; this only chooses the slot. */
-export function askQuery(result: CompositionResult, question: string): QueryView {
-  return { question, report: callService(result, "queries.ask", question) };
+export async function askQuery(result: CompositionResult, question: string): Promise<QueryView> {
+  return { question, report: await callService(result, "queries.ask", question) };
 }
 
 export type StepView = {
@@ -177,8 +182,8 @@ export type StepView = {
 };
 
 /** Demo runner. One call advances the clock and publishes that step. Nothing loops. */
-export function advanceStep(result: CompositionResult): StepView {
-  const advanced = callService(result, "step.advance", null);
+export async function advanceStep(result: CompositionResult): Promise<StepView> {
+  const advanced = await callService(result, "step.advance", null);
   if (!advanced.ok) {
     return { ok: false, count: null, reason: advanced.message ?? advanced.reason, deliveries: 0 };
   }
@@ -186,7 +191,7 @@ export function advanceStep(result: CompositionResult): StepView {
     advanced.output && typeof advanced.output === "object" && "count" in advanced.output
       ? (advanced.output as { count?: unknown }).count
       : undefined;
-  const fan = publish(result, "step.hear", advanced.output);
+  const fan = await publish(result, "step.hear", advanced.output);
   return {
     ok: fan.ok && typeof count === "number",
     count: typeof count === "number" ? count : null,
@@ -198,16 +203,16 @@ export function advanceStep(result: CompositionResult): StepView {
 export type EntityView = { id: string; record: unknown };
 
 /** Demo runner. The world module stores the record. This only calls the service. */
-export function spawnEntity(result: CompositionResult, record: unknown): ServiceReport {
+export async function spawnEntity(result: CompositionResult, record: unknown): Promise<ServiceReport> {
   return callService(result, "world.spawn", record);
 }
 
-export function removeEntity(result: CompositionResult, id: string): ServiceReport {
+export async function removeEntity(result: CompositionResult, id: string): Promise<ServiceReport> {
   return callService(result, "world.remove", id);
 }
 
-export function listEntities(result: CompositionResult): EntityView[] {
-  const report = callService(result, "world.list", null);
+export async function listEntities(result: CompositionResult): Promise<EntityView[]> {
+  const report = await callService(result, "world.list", null);
   if (!report.ok || !report.output || typeof report.output !== "object" || !("entities" in report.output)) return [];
   const entities = (report.output as { entities?: unknown }).entities;
   if (!Array.isArray(entities)) return [];

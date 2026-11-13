@@ -35,7 +35,7 @@ describe("starter module", () => {
     const loaded = (await import(pathToFileURL(join(folder, "module.ts")).href)) as {
       implementation?: ModuleImplementation;
     };
-    const result = compose([{ manifest, implementation: loaded.implementation }]);
+    const result = await compose([{ manifest, implementation: loaded.implementation }]);
     assert.equal(result.ok, true);
     assert.equal(result.runtimeActive, true);
     const rows = contributionsFor(result, "platform.systems");
@@ -44,7 +44,7 @@ describe("starter module", () => {
     assert.equal(rows[0]?.moduleId, "org.example.starter");
   });
 
-  it("diagnoses an unknown field and a contract the platform slot does not offer", () => {
+  it("diagnoses an unknown field and a contract the platform slot does not offer", async () => {
     const manifest = JSON.parse(readFileSync(join(folder, "manifest.json"), "utf8")) as Record<string, unknown>;
     const extra = validateManifest({ ...manifest, extra: true });
     assert.equal(extra.ok, false);
@@ -55,12 +55,12 @@ describe("starter module", () => {
       ...manifest,
       connectsTo: [{ slot: "platform.systems", contract: "platform.system/2" }],
     };
-    const result = compose([{ manifest: wrong }]);
+    const result = await compose([{ manifest: wrong }]);
     assert.equal(result.runtimeActive, false);
     assert.ok(result.diagnostics.some((item) => item.code === "slot.contract-mismatch"));
   });
 
-  it("exports the slot payload contract from the public barrel", () => {
+  it("exports the slot payload contract from the public barrel", async () => {
     assert.equal(slotRequiresCallable("service"), true);
     assert.equal(slotRequiresCallable("pipeline"), true);
     assert.equal(slotRequiresCallable("subscriber"), true);

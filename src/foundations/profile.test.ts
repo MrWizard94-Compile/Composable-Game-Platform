@@ -47,7 +47,7 @@ describe("profiles", () => {
     assert.equal(fuzzy.ok, false);
   });
 
-  it("returns the pinned packages in profile order and refuses a miss or a different version", () => {
+  it("returns the pinned packages in profile order and refuses a miss or a different version", async () => {
     const checked = validateProfile(
       profile([
         { moduleId: "org.example.beta", version: "1.0.0" },
@@ -81,7 +81,7 @@ describe("profiles", () => {
 
     const refused = unresolvedProfile("org.example.desk", drifted.ok ? [] : drifted.errors);
     assert.equal(refused.runtimeActive, false);
-    assert.equal(compose([]).runtimeActive, true);
-    assert.notEqual(refused.fingerprint, compose([]).fingerprint);
+    assert.equal((await compose([])).runtimeActive, true);
+    assert.notEqual(refused.fingerprint, (await compose([])).fingerprint);
   });
 });
