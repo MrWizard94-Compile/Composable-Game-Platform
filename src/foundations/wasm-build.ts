@@ -675,6 +675,67 @@ export function guestFromContributions(contributions: readonly GuestContribution
   return storeGuest(JSON.stringify({ contributions }));
 }
 
+/**
+ * Fixed UTF-8 results for register (hook 0), exportState (hook 3), and call (hook 5).
+ * A hook with no text returns an empty result. The text must sit before the heap at 1024.
+ */
+export function scriptedGuest(outputs: { register?: string; exportState?: string; call?: string } = {}): Uint8Array {
+  const register = text(outputs.register ?? "");
+  const exported = text(outputs.exportState ?? "");
+  const call = text(outputs.call ?? "");
+  const registerAt = 400;
+  const exportAt = registerAt + register.length;
+  const callAt = exportAt + exported.length;
+  if (callAt + call.length > 1024) throw new Error("Scripted guest text does not fit before the heap.");
+  const body = [
+    ...op.localGet(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(registerAt),
+    ...op.globalSet(1),
+    ...op.i32Const(register.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Const(3),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.i32Const(exportAt),
+    ...op.globalSet(1),
+    ...op.i32Const(exported.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Const(5),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.i32Const(callAt),
+    ...op.globalSet(1),
+    ...op.i32Const(call.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  const data: { offset: number; bytes: Uint8Array }[] = [];
+  if (register.length > 0) data.push({ offset: registerAt, bytes: register });
+  if (exported.length > 0) data.push({ offset: exportAt, bytes: exported });
+  if (call.length > 0) data.push({ offset: callAt, bytes: call });
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+    data,
+  });
+}
+
 /** Register succeeds. Initialize returns a failure status so the host rolls the composition back. */
 export function initFaultGuest(): Uint8Array {
   const register = text(

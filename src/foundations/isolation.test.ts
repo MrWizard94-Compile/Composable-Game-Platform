@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { discoverModules, loadInProcessImplementations } from "./discover-node.ts";
-import { compose, type ModulePackage } from "./host.ts";
+import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
 import { captureSave, restoreSave } from "./save.ts";
 import { publish } from "./dispatch.ts";
+import { encodeAbiJson } from "./abi.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
 import {
   counterGuest,
@@ -20,6 +21,7 @@ import {
   sharedGuest,
   startLoopGuest,
   storeGuest,
+  scriptedGuest,
   unboundedGuest,
   wasiGuest,
   wideGuest,
@@ -348,3 +350,205 @@ describe("isolated wasm execution", () => {
     backend.dispose();
   });
 });
+
+describe("abi payloads and cleanup", () => {
+  const link = { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] };
+
+  it("names the values that cannot cross the ABI", () => {
+    const reason = (value: unknown) => {
+      const encoded = encodeAbiJson(value);
+      return encoded.ok ? "" : encoded.error;
+    };
+    assert.equal(encodeAbiJson({ ok: true, n: 1 }).ok, true);
+    assert.equal(encodeAbiJson(null).ok, true);
+    const cycle: { self?: unknown } = {};
+    cycle.self = cycle;
+    assert.match(reason(cycle), /circular/);
+    assert.match(reason(1n), /bigint/);
+    assert.match(reason(undefined), /undefined/);
+    assert.match(reason(() => 1), /function/);
+    assert.match(reason(Symbol("x")), /symbol/);
+    assert.match(reason(Number.POSITIVE_INFINITY), /non-finite/);
+    assert.match(reason(new Date(0)), /non-plain object/);
+    const shared = { n: 1 };
+    assert.equal(encodeAbiJson({ arg: shared, args: [shared] }).ok, true);
+  });
+
+  it("refuses a non-JSON call or import and still releases the guest", async () => {
+    const backend = createWasmBackend();
+    const bytes = storeGuest(
+      JSON.stringify({
+        contributions: [{ slotId: "platform.systems", id: "echo", dispatch: true, payload: { systemId: "echo" } }],
+      }),
+    );
+    const result = await compose([pkg("org.example.echo", bytes, { ...link, save: { version: "1.0.0" } })], {
+      backend,
+      policy: wasmPolicy(),
+    });
+    assert.equal(result.runtimeActive, true, messages(result));
+    const session = sessionOf(result);
+    const handle = result.contributions.find((item) => item.id === "echo")?.payload;
+    const cycle: { self?: unknown } = {};
+    cycle.self = cycle;
+
+    const circular = await session.callPayload(handle, [cycle]);
+    assert.equal(circular.ok, false);
+    if (circular.ok || circular.code !== "threw") assert.fail("circular call was accepted");
+    assert.match(String(circular.error), /ABI payload is not JSON \(circular\)/);
+
+    const big = await session.callPayload(handle, [1n]);
+    assert.equal(big.ok, false);
+    if (big.ok || big.code !== "threw") assert.fail("bigint call was accepted");
+    assert.match(String(big.error), /ABI payload is not JSON \(bigint\)/);
+
+    const fn = await session.callPayload(handle, [() => 1]);
+    assert.equal(fn.ok, false);
+    if (fn.ok || fn.code !== "threw") assert.fail("function call was accepted");
+    assert.match(String(fn.error), /ABI payload is not JSON \(function\)/);
+
+    const imported = await session.invoke({
+      moduleId: "org.example.echo",
+      hook: "importState",
+      implementation: { wasm: bytes },
+      args: [{}, cycle],
+    });
+    assert.equal(imported.ok, false);
+    if (imported.ok) return;
+    assert.match(imported.error instanceof Error ? imported.error.message : String(imported.error), /circular/);
+
+    const omitted = await session.invoke({
+      moduleId: "org.example.echo",
+      hook: "importState",
+      implementation: { wasm: bytes },
+      args: [{}],
+    });
+    assert.equal(omitted.ok, false);
+    if (omitted.ok) return;
+    assert.match(omitted.error instanceof Error ? omitted.error.message : String(omitted.error), /undefined/);
+
+    const again = await session.callPayload(handle, [{ n: 1 }]);
+    assert.equal(again.ok, true, failureText(again));
+    if (again.ok) assert.deepEqual(again.value, { count: 0 });
+    const saved = await captureSave(result);
+    assert.equal(saved.ok, true, saved.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(saved.document.slices[0]?.payload, { count: 0 });
+
+    const racing = session.callPayload(handle, [cycle]);
+    await within(Promise.all([racing, result.shutdown(), backend.dispose()]));
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+  });
+
+  it("stops a guest whose register or export is not JSON and returns the reservation", async () => {
+    const linkSave = { ...link, save: { version: "1.0.0" } };
+    const cases: Array<[string, Uint8Array, RegExp]> = [
+      ["torn", scriptedGuest({ register: "{" }), /Guest result was not JSON/],
+      ["shape", scriptedGuest({ register: '{"contributions":{}}' }), /contributions must be an array/],
+      ["row", scriptedGuest({ register: '{"contributions":[null]}' }), /missing a slot or an id/],
+      [
+        "order",
+        scriptedGuest({
+          register:
+            '{"contributions":[{"slotId":"platform.systems","id":"echo","order":1.5,"payload":{"systemId":"echo"}}]}',
+        }),
+        /non-integer order/,
+      ],
+    ];
+    for (const [name, wasm, pattern] of cases) {
+      const backend = createWasmBackend();
+      const result = await compose([pkg(`org.example.${name}`, wasm, link)], { backend, policy: wasmPolicy() });
+      assert.equal(result.runtimeActive, false, name);
+      assert.match(messages(result), pattern, name);
+      assert.equal(backend.openSessions(), 0, name);
+      assert.equal(backend.resourceUsage().guests, 0, name);
+      assert.equal(backend.resourceUsage().memoryBytes, 0, name);
+      await backend.dispose();
+    }
+
+    const backend = createWasmBackend();
+    const bytes = scriptedGuest({
+      register: JSON.stringify({
+        contributions: [{ slotId: "platform.systems", id: "echo", dispatch: true, payload: { systemId: "echo" } }],
+      }),
+      exportState: "{",
+      call: "not-json",
+    });
+    const result = await compose([pkg("org.example.bad-export", bytes, linkSave)], { backend, policy: wasmPolicy() });
+    assert.equal(result.runtimeActive, true, messages(result));
+    const session = sessionOf(result);
+    const handle = result.contributions.find((item) => item.id === "echo")?.payload;
+    const called = await session.callPayload(handle, [{ ok: true }]);
+    assert.equal(called.ok, false);
+    if (called.ok || called.code !== "threw") assert.fail("non-JSON call was accepted");
+    assert.match(String(called.error), /Guest result was not JSON/);
+    const calledAgain = await session.callPayload(handle, [{ ok: true }]);
+    assert.equal(calledAgain.ok, false);
+    if (calledAgain.ok || calledAgain.code !== "threw") assert.fail("second call was accepted");
+    assert.match(String(calledAgain.error), /Guest result was not JSON/);
+    assert.doesNotMatch(String(calledAgain.error), /was stopped/);
+    const saved = await captureSave(result);
+    assert.equal(saved.ok, false);
+    assert.match(saved.notices.map((item) => item.message).join("\n"), /Guest result was not JSON/);
+    await result.shutdown();
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+    await backend.dispose();
+  });
+
+  it("returns the reservation after a time limit and after dispose during a running guest", async () => {
+    const timed = createWasmBackend();
+    const stuck = await compose([pkg("org.example.loop", loopingGuest())], {
+      backend: timed,
+      policy: wasmPolicy({ maxHookMs: 250 }),
+    });
+    assert.equal(stuck.runtimeActive, false);
+    assert.match(messages(stuck), /Time limit exceeded/);
+    assert.equal(timed.openSessions(), 0);
+    assert.equal(timed.resourceUsage().guests, 0);
+    assert.equal(timed.resourceUsage().memoryBytes, 0);
+    assert.equal(timed.resourceUsage().binaryBytes, 0);
+    await timed.dispose();
+
+    const backend = createWasmBackend();
+    const session = backend.open();
+    const pending = session.invoke({
+      moduleId: "org.example.loop",
+      hook: "register",
+      implementation: { wasm: loopingGuest() },
+      args: [],
+    });
+    const outcome = await within(Promise.all([pending, backend.dispose()]).then(([value]) => value));
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.match(outcome.error instanceof Error ? outcome.error.message : String(outcome.error), /released|Time limit exceeded/);
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().binaryBytes, 0);
+  });
+});
+
+function failureText(result: { ok: boolean; error?: unknown; code?: string }): string {
+  if (result.ok) return "";
+  return result.error instanceof Error ? result.error.message : String(result.error ?? result.code ?? "");
+}
+
+function within<T>(work: Promise<T>, ms = 2000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("cleanup hung")), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}

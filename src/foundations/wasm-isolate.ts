@@ -1,4 +1,4 @@
-import { ABI_HOOK, guestContributions, isAbiHandle } from "./abi.ts";
+import { ABI_HOOK, encodeAbiJson, guestContributions, isAbiHandle } from "./abi.ts";
 import type {
   ExecutionBackend,
   ExecutionPolicy,
@@ -33,8 +33,14 @@ export type HostBudget = {
 };
 
 export type LogBudget = {
-  /** UTF-8 bytes of stored lines, including the module prefix. */
+  /** UTF-8 bytes of stored lines, including the module prefix and the drop marker. */
   maxBytes: number;
+  /**
+   * Stored lines, including the single `[log dropped]` marker.
+   * A further line is not stored. Older lines are removed until the marker fits
+   * in both this count and `maxBytes`. `0` stores nothing, not even the marker.
+   * A marker that cannot fit is not stored, and lines that already fit stay.
+   */
   maxLines: number;
   /** UTF-8 bytes of one log message, before the module prefix. */
   maxLine: number;
@@ -264,12 +270,12 @@ export function createLogBuffer(budget: LogBudget): LogBuffer {
     dropped = true;
     const marker = "[log dropped]";
     const markerSize = utf8Bytes(marker);
-    if (markerSize > budget.maxBytes) return;
-    while (lines.length > 0 && bytes + markerSize > budget.maxBytes) {
+    if (markerSize > budget.maxBytes || budget.maxLines < 1) return;
+    while (lines.length > 0 && (bytes + markerSize > budget.maxBytes || lines.length >= budget.maxLines)) {
       const removed = lines.shift();
       if (removed !== undefined) bytes -= utf8Bytes(removed);
     }
-    if (bytes + markerSize <= budget.maxBytes) {
+    if (bytes + markerSize <= budget.maxBytes && lines.length < budget.maxLines) {
       lines.push(marker);
       bytes += markerSize;
     }
@@ -453,7 +459,9 @@ export function createIsolateBackend(options: {
 
       function track<T>(start: () => Promise<T>): Promise<T> {
         pendingWork += 1;
-        return start().finally(() => {
+        return new Promise<T>((resolve) => {
+          resolve(start());
+        }).finally(() => {
           pendingWork -= 1;
           if (pendingWork === 0) {
             for (const wake of idleWaiters.splice(0)) wake();
@@ -493,10 +501,12 @@ export function createIsolateBackend(options: {
         if (!guest || guest.dead) {
           return Promise.resolve({ ok: false, code: "threw", error: new Error(`Module "${payload.moduleId}" is not an active isolate.`) });
         }
+        const encoded = encodeAbiJson({ contributionId: payload.contributionId, arg: args[0], args });
+        if (!encoded.ok) return Promise.resolve({ ok: false, code: "threw", error: new Error(encoded.error) });
         return callGuest(guest, payload.moduleId, {
           op: "hook",
           hook: ABI_HOOK.call,
-          json: JSON.stringify({ contributionId: payload.contributionId, arg: args[0], args }),
+          json: encoded.json,
         }).then((answered) => {
           if (released) return { ok: false, code: "threw", error: new Error("This composition has been released.") };
           if (!answered.ok) return { ok: false, code: "threw", error: new Error(answered.error) };
@@ -536,7 +546,12 @@ export function createIsolateBackend(options: {
       async function runHook(guest: Guest, call: HookCall): Promise<HookResult> {
         if (guest.dead) return { ok: false, error: new Error(`Module "${call.moduleId}" was stopped and was not restarted.`) };
         const hook = ABI_HOOK[call.hook as HookName];
-        const input = hook === ABI_HOOK.importState ? JSON.stringify(call.args[1] ?? null) : "{}";
+        let input = "{}";
+        if (hook === ABI_HOOK.importState) {
+          const encoded = encodeAbiJson(call.args[1]);
+          if (!encoded.ok) return { ok: false, error: new Error(encoded.error) };
+          input = encoded.json;
+        }
         const answered = await callGuest(guest, call.moduleId, { op: "hook", hook, json: input });
         if (released) return { ok: false, error: new Error("This composition has been released.") };
         if (!answered.ok) {
@@ -688,15 +703,22 @@ export function createIsolateBackend(options: {
           const onError = (error: Error) => finish({ ok: false, error: error.message });
           worker.addMessageListener(onMessage);
           worker.addErrorListener(onError);
-          worker.postMessage({
-            ...message,
-            id,
-            maxBytes: captured.maxMemoryBytes,
-            maxBinaryBytes: captured.maxBinaryBytes,
-            maxLogBytes: logBudget.maxBytes,
-            maxLogLines: logBudget.maxLines,
-            maxLogLine: logBudget.maxLine,
-          });
+          try {
+            worker.postMessage({
+              ...message,
+              id,
+              maxBytes: captured.maxMemoryBytes,
+              maxBinaryBytes: captured.maxBinaryBytes,
+              maxLogBytes: logBudget.maxBytes,
+              maxLogLines: logBudget.maxLines,
+              maxLogLine: logBudget.maxLine,
+            });
+          } catch (error) {
+            finish({
+              ok: false,
+              error: error instanceof Error && error.message ? error.message : "Guest message was not delivered.",
+            });
+          }
         });
         return answer.finally(() => {
           const elapsed = Math.max(0, Date.now() - started);

@@ -258,15 +258,76 @@ describe("browser isolate policy", () => {
     assert.ok(backend.takeLogs(secondId).some((line) => line.includes("alpha")));
     assert.equal(backend.resourceUsage().guests, 0);
   });
+
+  it("returns the reservation when a worker errors or a message cannot be posted", async () => {
+    let terminated = 0;
+    const backend = createBrowserWasmBackend({
+      spawn: () => failingProcess(() => {
+        terminated += 1;
+      }),
+    });
+    const failed = await compose([pkg("org.example.boom", storeGuest("{}"))], { backend, policy: wasmPolicy() });
+    assert.equal(failed.runtimeActive, false);
+    assert.match(messages(failed), /worker exploded/);
+    assert.equal(terminated, 1);
+    assert.equal(backend.openSessions(), 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    await backend.dispose();
+
+    const throwing = createBrowserWasmBackend({ spawn: () => throwingProcess() });
+    const refused = await compose([pkg("org.example.throw", storeGuest("{}"))], { backend: throwing, policy: wasmPolicy() });
+    assert.equal(refused.runtimeActive, false);
+    assert.match(messages(refused), /postMessage failed/);
+    assert.equal(throwing.openSessions(), 0);
+    assert.equal(throwing.resourceUsage().guests, 0);
+    assert.equal(throwing.resourceUsage().memoryBytes, 0);
+    await throwing.dispose();
+
+    let stopped = 0;
+    const racing = createBrowserWasmBackend({
+      spawn: () => failingProcess(() => {
+        stopped += 1;
+      }),
+    });
+    const session = racing.open();
+    const pending = session.invoke({
+      moduleId: "org.example.race",
+      hook: "register",
+      implementation: { wasm: storeGuest("{}") },
+      args: [],
+    });
+    const outcome = await Promise.race([
+      Promise.all([pending, racing.dispose()]).then(([value]) => value),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("cleanup hung")), 2000)),
+    ]);
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.match(outcome.error instanceof Error ? outcome.error.message : String(outcome.error), /worker exploded|released|postMessage|stopped/);
+    assert.equal(racing.openSessions(), 0);
+    assert.equal(racing.resourceUsage().guests, 0);
+    assert.equal(racing.resourceUsage().memoryBytes, 0);
+    assert.ok(stopped >= 1);
+  });
 });
 
 describe("log bounds", () => {
-  it("records one drop marker and then discards", () => {
+  it("counts the drop marker toward maxLines and does not pass that count", () => {
     const buffer = createLogBuffer({ maxBytes: 100, maxLines: 1, maxLine: 20 });
     buffer.push("org.example.a", "one");
     buffer.push("org.example.a", "two");
     buffer.push("org.example.a", "three");
-    assert.deepEqual(buffer.drain(), ["[org.example.a] one", "[log dropped]"]);
+    assert.deepEqual(buffer.drain(), ["[log dropped]"]);
+
+    const kept = createLogBuffer({ maxBytes: 100, maxLines: 2, maxLine: 20 });
+    kept.push("org.example.a", "one");
+    kept.push("org.example.a", "two");
+    kept.push("org.example.a", "three");
+    assert.deepEqual(kept.drain(), ["[org.example.a] two", "[log dropped]"]);
+
+    const none = createLogBuffer({ maxBytes: 100, maxLines: 0, maxLine: 20 });
+    none.push("org.example.a", "one");
+    assert.deepEqual(none.drain(), []);
   });
 
   it("counts UTF-8 bytes and keeps the drop marker inside the byte cap", () => {
@@ -398,6 +459,54 @@ function stallingProcess(registerId: string, held: Array<() => void>, enter: () 
     addErrorListener() {},
     removeErrorListener() {},
     terminate() {
+      return Promise.resolve();
+    },
+  };
+}
+
+function throwingProcess(): GuestProcess {
+  return {
+    postMessage() {
+      throw new Error("postMessage failed");
+    },
+    addMessageListener() {},
+    removeMessageListener() {},
+    addErrorListener() {},
+    removeErrorListener() {},
+    terminate() {
+      return Promise.resolve();
+    },
+  };
+}
+
+function failingProcess(onTerminate: () => void): GuestProcess {
+  const messages = new Set<(message: WorkerMessage) => void>();
+  const errors = new Set<(error: Error) => void>();
+  return {
+    postMessage(message) {
+      const id = typeof message.id === "number" ? message.id : -1;
+      queueMicrotask(() => {
+        if (message.op === "load") {
+          for (const listener of messages) listener({ id, ok: true, text: "loaded" });
+          return;
+        }
+        for (const listener of errors) listener(new Error("worker exploded"));
+      });
+    },
+    addMessageListener(listener) {
+      messages.add(listener);
+    },
+    removeMessageListener(listener) {
+      messages.delete(listener);
+    },
+    addErrorListener(listener) {
+      errors.add(listener);
+    },
+    removeErrorListener(listener) {
+      errors.delete(listener);
+    },
+    terminate() {
+      onTerminate();
       return Promise.resolve();
     },
   };

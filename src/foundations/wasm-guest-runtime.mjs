@@ -51,12 +51,12 @@ export function createGuestRuntime(reply) {
     dropped = true;
     const marker = "[log dropped]";
     const markerSize = utf8Bytes(marker);
-    if (markerSize > logBudget.maxBytes) return;
-    while (logs.length > 0 && logBytes + markerSize > logBudget.maxBytes) {
+    if (markerSize > logBudget.maxBytes || logBudget.maxLines < 1) return;
+    while (logs.length > 0 && (logBytes + markerSize > logBudget.maxBytes || logs.length >= logBudget.maxLines)) {
       const removed = logs.shift();
       if (removed !== undefined) logBytes -= utf8Bytes(removed);
     }
-    if (logBytes + markerSize <= logBudget.maxBytes) {
+    if (logBytes + markerSize <= logBudget.maxBytes && logs.length < logBudget.maxLines) {
       logs.push(marker);
       logBytes += markerSize;
     }
@@ -66,9 +66,12 @@ export function createGuestRuntime(reply) {
    * @param {Record<string, unknown>} message
    */
   function rememberLogBudget(message) {
-    if (typeof message.maxLogBytes === "number" && message.maxLogBytes > 0) logBudget.maxBytes = message.maxLogBytes;
-    if (typeof message.maxLogLines === "number" && message.maxLogLines > 0) logBudget.maxLines = message.maxLogLines;
-    if (typeof message.maxLogLine === "number" && message.maxLogLine > 0) logBudget.maxLine = message.maxLogLine;
+    const maxBytes = finiteCap(message.maxLogBytes);
+    if (maxBytes !== undefined) logBudget.maxBytes = maxBytes;
+    const maxLines = finiteCap(message.maxLogLines);
+    if (maxLines !== undefined) logBudget.maxLines = maxLines;
+    const maxLine = finiteCap(message.maxLogLine);
+    if (maxLine !== undefined) logBudget.maxLine = maxLine;
   }
 
   /**
@@ -179,6 +182,16 @@ export function createGuestRuntime(reply) {
 /** @param {string} text */
 function utf8Bytes(text) {
   return textEncode.encode(text).byteLength;
+}
+
+/**
+ * A non-negative finite cap, or undefined when the host did not set one.
+ * `0` is a real cap. Negative and non-finite values are ignored.
+ * @param {unknown} value
+ */
+function finiteCap(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
 }
 
 /**

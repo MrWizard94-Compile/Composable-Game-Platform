@@ -71,6 +71,55 @@ export function materializeAbiValue(moduleId: string, contributionId: string, va
 
 export type GuestContributionInput = { id: string; order?: number; payload: unknown };
 
+/**
+ * Why `value` cannot cross the ABI as JSON.
+ * JSON data is null, a boolean, a finite number, a string, an array, or a plain object.
+ * `undefined`, functions, symbols, bigints, non-finite numbers, class instances, and cycles are not.
+ */
+export function nonJsonReason(value: unknown, seen: WeakSet<object> = new WeakSet()): string | undefined {
+  if (value === null) return undefined;
+  if (value === undefined) return "undefined";
+  const kind = typeof value;
+  if (kind === "string" || kind === "boolean") return undefined;
+  if (kind === "number") return Number.isFinite(value) ? undefined : "non-finite number";
+  if (kind === "bigint") return "bigint";
+  if (kind === "function") return "function";
+  if (kind === "symbol") return "symbol";
+  if (kind !== "object") return kind;
+  if (seen.has(value)) return "circular";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const reason = nonJsonReason(item, seen);
+      if (reason) return reason;
+    }
+    seen.delete(value);
+    return undefined;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return "non-plain object";
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const reason = nonJsonReason((value as Record<string, unknown>)[key], seen);
+    if (reason) return reason;
+  }
+  seen.delete(value);
+  return undefined;
+}
+
+/** UTF-8 JSON for a guest input, or the reason the value cannot be sent. */
+export function encodeAbiJson(value: unknown): { ok: true; json: string } | { ok: false; error: string } {
+  const reason = nonJsonReason(value);
+  if (reason) return { ok: false, error: `ABI payload is not JSON (${reason}).` };
+  try {
+    const json = JSON.stringify(value);
+    if (typeof json !== "string") return { ok: false, error: "ABI payload is not JSON." };
+    return { ok: true, json };
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? error.message : "could not encode";
+    return { ok: false, error: `ABI payload is not JSON (${detail}).` };
+  }
+}
+
 /** Turns a register result into host contributions. A top-level `dispatch: true` replaces the payload. */
 export function guestContributions(
   moduleId: string,

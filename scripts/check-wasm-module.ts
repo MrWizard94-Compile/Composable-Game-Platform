@@ -58,18 +58,22 @@ export async function checkWasmPackage(dir: string): Promise<WasmPackageCheck> {
     }
   }
   const backend = createWasmBackend();
-  const result = await compose([{ manifest: validated.manifest, implementation: { wasm: bytes } }], {
-    backend,
-    policy: { allowGrants: [], maxHookMs: 1000, maxMemoryBytes: 65536 },
-  });
-  if (!result.runtimeActive) {
+  try {
+    const result = await compose([{ manifest: validated.manifest, implementation: { wasm: bytes } }], {
+      backend,
+      policy: { allowGrants: [], maxHookMs: 1000, maxMemoryBytes: 65536 },
+    });
+    if (!result.runtimeActive) {
+      return { ok: false, errors: result.diagnostics.map((item) => item.message) };
+    }
+    const contributions = result.contributions.map((item) => ({ slotId: item.slotId, id: item.id, moduleId: item.moduleId }));
+    await result.shutdown();
+    return { ok: true, moduleId: validated.manifest.moduleId, contributions };
+  } catch (error) {
+    return { ok: false, errors: [error instanceof Error ? error.message : "Package check failed."] };
+  } finally {
     await backend.dispose();
-    return { ok: false, errors: result.diagnostics.map((item) => item.message) };
   }
-  const contributions = result.contributions.map((item) => ({ slotId: item.slotId, id: item.id, moduleId: item.moduleId }));
-  await result.shutdown();
-  await backend.dispose();
-  return { ok: true, moduleId: validated.manifest.moduleId, contributions };
 }
 
 const invoked = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
