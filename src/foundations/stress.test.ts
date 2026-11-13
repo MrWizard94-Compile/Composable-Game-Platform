@@ -4,9 +4,11 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
+import { ABI_ID, isAbiHandle } from "./abi.ts";
 import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { publish } from "./dispatch.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
+import { captureSave } from "./save.ts";
 import { counterGuest, shutdownLoopGuest, storeGuest, templateGuest, callLoopGuest, initFaultGuest, missingAbiGuest } from "./wasm-build.ts";
 import { createWasmBackend } from "./wasm-backend.ts";
 import { duneGrowthGuest } from "../modules/org.cgp.dune-growth/guest.ts";
@@ -104,6 +106,164 @@ describe("cross-backend execution", () => {
     assert.deepEqual(heard, ["js"]);
     await result.shutdown();
     assert.equal(backend.openSessions(), 0);
+  });
+
+  it("refuses a forged handle and a foreign handle through the cross router", async () => {
+    const wasm = createWasmBackend();
+    const heard: unknown[] = [];
+    const heardOther: unknown[] = [];
+    const desk = (moduleId: string, forgedId?: string) => ({
+      manifest: manifest(moduleId, {
+        exposesSlots: [
+          {
+            slotId: "meter.hear",
+            contract: "meter.hear",
+            contractVersion: "1.0.0",
+            kind: "subscriber" as const,
+            required: false,
+          },
+        ],
+        ...(forgedId
+          ? { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] }
+          : {}),
+      }),
+      implementation: {
+        register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: unknown }) => void }) {
+          if (!forgedId) return;
+          ctx.contribute("platform.systems", {
+            id: forgedId,
+            payload: { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+          });
+        },
+      },
+    });
+    const hear = (moduleId: string, sink: unknown[]) => ({
+      manifest: manifest(moduleId, {
+        connectsTo: [{ slot: "meter.hear", contract: "meter.hear/1" }],
+      }),
+      implementation: {
+        register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: unknown }) => void }) {
+          ctx.contribute("meter.hear", {
+            id: "js",
+            payload(event: unknown) {
+              sink.push(event);
+            },
+          });
+        },
+      },
+    });
+    const victim = (version: string) =>
+      pkg("org.example.victim", counterGuest(), {
+        version,
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "meter.hear", contract: "meter.hear/1" }],
+      });
+    const thief = pkg(
+      "org.example.thief",
+      storeGuest(
+        JSON.stringify({
+          contributions: [
+            {
+              slotId: "platform.systems",
+              id: "lookalike",
+              payload: { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+            },
+          ],
+        }),
+      ),
+      { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] },
+    );
+    const result = await compose(
+      [desk("org.example.desk", "js-copy"), hear("org.example.hear", heard), victim("1.0.0"), thief],
+      { backend: createCrossBackend(wasm), policy: CROSS_POLICY },
+    );
+    assert.equal(result.runtimeActive, true, messages(result));
+    assert.equal(result.backendId, "cross");
+    const session = sessionOf(result);
+    assert.match(session.id, /^cross-/);
+    const real = result.contributions.find((item) => item.moduleId === "org.example.victim" && item.id === "a")?.payload;
+    const forged = result.contributions.find((item) => item.id === "lookalike")?.payload;
+    const jsCopy = result.contributions.find((item) => item.id === "js-copy")?.payload;
+    const jsPayload = result.contributions.find((item) => item.id === "js")?.payload;
+    assert.equal(isAbiHandle(real), true);
+    assert.equal(isAbiHandle(forged), false);
+    assert.equal(isAbiHandle(jsCopy), false);
+    assert.equal(typeof jsPayload, "function");
+
+    const attacks = [
+      forged,
+      jsCopy,
+      JSON.parse(JSON.stringify(real)),
+      { ...((real ?? {}) as object) },
+      structuredClone(real),
+      { abi: ABI_ID, moduleId: "org.example.victim", contributionId: "a" },
+      Object.create(real as object),
+    ];
+    for (const payload of attacks) {
+      const called = await session.callPayload(payload, [{ token: "steal" }]);
+      assert.equal(called.ok, false);
+      if (called.ok || called.code !== "not-callable") assert.fail("forged handle was accepted");
+    }
+    const carrier = {};
+    Object.setPrototypeOf(carrier, real as object);
+    const viaProto = await session.callPayload(carrier, [{}]);
+    assert.equal(viaProto.ok, false);
+    if (viaProto.ok || viaProto.code !== "not-callable") assert.fail("prototype handle was accepted");
+
+    const before = await captureSave(result);
+    assert.equal(before.ok, true, before.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(before.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 0 });
+    assert.deepEqual(heard, []);
+
+    const local = await session.callPayload(jsPayload, [{ token: "local" }]);
+    assert.equal(local.ok, true, local.ok ? "" : String(local.code));
+    assert.deepEqual(heard, [{ token: "local" }]);
+    const called = await session.callPayload(real, [{ token: "once" }]);
+    if (!called.ok) assert.fail(called.code === "threw" ? String(called.error) : called.code);
+    assert.deepEqual(called.value, { n: 1 });
+    const fan = await publish(result, "meter.hear", { token: "fan" });
+    assert.equal(fan.ok, true, fan.reason ?? fan.deliveries.map((item) => item.message).join("\n"));
+    assert.equal(fan.deliveries.length, 2);
+    assert.deepEqual(heard, [{ token: "local" }, { token: "fan" }]);
+    const after = await captureSave(result);
+    assert.deepEqual(after.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 2 });
+
+    const other = await compose(
+      [desk("org.example.desk-b"), hear("org.example.hear-b", heardOther), victim("1.1.0")],
+      { backend: createCrossBackend(wasm), policy: CROSS_POLICY, profileName: "other" },
+    );
+    assert.equal(other.runtimeActive, true, messages(other));
+    assert.match(sessionOf(other).id, /^cross-/);
+    const crossed = await sessionOf(other).callPayload(real, [{ token: "steal" }]);
+    assert.equal(crossed.ok, false);
+    if (crossed.ok || crossed.code !== "threw") assert.fail("foreign handle was accepted");
+    assert.ok(crossed.error instanceof Error);
+    assert.match(crossed.error.message, /another composition/);
+    const otherSaved = await captureSave(other);
+    assert.equal(otherSaved.ok, true, otherSaved.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(otherSaved.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 0 });
+    assert.deepEqual(heardOther, []);
+    const still = await captureSave(result);
+    assert.deepEqual(still.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 2 });
+
+    const otherHandle = other.contributions.find((item) => item.moduleId === "org.example.victim")?.payload;
+    const otherCall = await sessionOf(other).callPayload(otherHandle, [{ token: "own" }]);
+    if (!otherCall.ok) assert.fail(otherCall.code === "threw" ? String(otherCall.error) : otherCall.code);
+    assert.deepEqual(otherCall.value, { n: 1 });
+    const otherJs = other.contributions.find((item) => item.id === "js")?.payload;
+    const otherLocal = await sessionOf(other).callPayload(otherJs, [{ token: "own" }]);
+    assert.equal(otherLocal.ok, true);
+    assert.deepEqual(heardOther, [{ token: "own" }]);
+    const untouched = await captureSave(result);
+    assert.deepEqual(untouched.document.slices.find((item) => item.moduleId === "org.example.victim")?.payload, { n: 2 });
+
+    await result.shutdown();
+    await other.shutdown();
+    assert.equal(wasm.openSessions(), 0);
+    assert.equal(wasm.resourceUsage().guests, 0);
+    assert.equal(wasm.resourceUsage().memoryBytes, 0);
+    assert.equal(wasm.resourceUsage().binaryBytes, 0);
+    await wasm.dispose();
   });
 
   it("steps the wasm growth guest and keeps the seasonal result distinct", async () => {

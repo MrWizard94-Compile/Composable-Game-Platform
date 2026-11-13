@@ -4,7 +4,7 @@
 
 ## Decision
 
-A composition has one session. `createCrossBackend(isolate, trusted)` opens one session on each backend. WebAssembly bytes are invoked on the isolate. JavaScript hooks are invoked on the trusted backend, which defaults to in-process. A payload the isolate recognizes (an ABI handle) is called there. Anything else goes to the trusted session. `release` releases both.
+A composition has one session. `createCrossBackend(isolate, trusted)` opens one session on each backend. WebAssembly bytes are invoked on the isolate. JavaScript hooks are invoked on the trusted backend, which defaults to in-process. A payload the isolate recognizes (a handle that composition minted) is called on that composition's isolate session. A JSON lookalike is not recognized, so the trusted half sees it and does not call it. A handle minted for another composition is refused by the isolate session before either guest runs. `release` releases both.
 
 `enforcesLimits` on the cross backend is true, because the isolate enforces time, memory, import, and aggregate budgets. The grants are the trusted backend's grants. JavaScript contributions in that composition are still not limited. A policy that sets a limit still refuses a backend whose `enforcesLimits` is false, so the in-process backend alone cannot wear `CROSS_POLICY`.
 
