@@ -1,4 +1,5 @@
 import type { CompositionResult } from "../foundations/host.ts";
+import { runExclusive } from "../foundations/host.ts";
 import { callService, publish, runPipeline, type PipelineStage, type ServiceReport } from "../foundations/dispatch.ts";
 
 /**
@@ -11,11 +12,12 @@ import { callService, publish, runPipeline, type PipelineStage, type ServiceRepo
  * a later system fails, so a system must not keep its own state during the
  * call. Record a committed step from `sim.completed` instead.
  *
- * Seed and advance for one composition run one at a time, in call order.
+ * Seed, advance, and restore for one composition run one at a time, in call order.
  * The runner opens the ledger step and aborts that mark if it does not commit.
  * It publishes one completion only after the ledger accepts the step.
  * A subscriber that throws is reported on the step and does not roll that commit back.
- * A completion subscriber must not call back into this runner.
+ * If publish itself refuses, the step stays committed and `completion` says why.
+ * A completion subscriber must not call back into this runner or into restore.
  */
 
 export const SIM_MIN = 0;
@@ -40,6 +42,8 @@ export type SimStage = { moduleId: string; id: string; ok: boolean };
 
 export type SimFailure = { moduleId: string; id: string; message: string };
 
+export type SimCompletion = { ok: true } | { ok: false; reason: string };
+
 export type SimState = { tick: number; entities: SimEntity[] };
 
 export type SimStep =
@@ -51,6 +55,7 @@ export type SimStep =
       commands: SimCommand[];
       deliveries: number;
       failures: SimFailure[];
+      completion: SimCompletion;
       stages: SimStage[];
     }
   | { ok: false; reason: string; stages: SimStage[] };
@@ -80,19 +85,8 @@ function refused(reason: string, stages: SimStage[] = []): SimStep {
   return { ok: false, reason, stages };
 }
 
-const lanes = new WeakMap<CompositionResult, Promise<void>>();
-
 function enqueue<T>(result: CompositionResult, body: () => Promise<T>): Promise<T> {
-  const previous = lanes.get(result) ?? Promise.resolve();
-  const run = previous.then(body, body);
-  lanes.set(
-    result,
-    run.then(
-      () => undefined,
-      () => undefined,
-    ),
-  );
-  return run;
+  return runExclusive(result, body);
 }
 
 function stagesOf(stages: readonly PipelineStage[]): SimStage[] {
@@ -240,6 +234,7 @@ async function advanceBody(result: CompositionResult, request: SimStepRequest): 
         id: item.contributionId,
         message: item.message ?? "A completion subscriber failed.",
       }));
+    const completion: SimCompletion = fan.reason ? { ok: false, reason: fan.reason } : { ok: true };
     return {
       ok: true,
       tick: request.tick,
@@ -248,6 +243,7 @@ async function advanceBody(result: CompositionResult, request: SimStepRequest): 
       commands,
       deliveries: fan.deliveries.length,
       failures,
+      completion,
       stages,
     };
   } finally {

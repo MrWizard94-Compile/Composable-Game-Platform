@@ -216,6 +216,8 @@ export type BrowserSimReport = {
   blockedLedger: unknown;
   blockedWitness: unknown;
   blocked: boolean;
+  orderedLedger: unknown;
+  orderedHeard: unknown;
   sessions: number;
   guests: number;
   memoryBytes: number;

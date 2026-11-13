@@ -1,6 +1,6 @@
 import type { HookCall } from "./backend.ts";
 import type { CompositionResult, LifecycleContext } from "./host.ts";
-import { FOUNDATIONS_API, backendOf, sessionOf, moduleImplementation, moduleMemory } from "./host.ts";
+import { FOUNDATIONS_API, backendOf, moduleImplementation, moduleMemory, runExclusive, sessionOf } from "./host.ts";
 import { parseSemVer } from "./semver.ts";
 
 /**
@@ -159,7 +159,11 @@ export async function captureSave(result: CompositionResult): Promise<CaptureRep
   return { ok: notices.every((item) => item.severity !== "error"), document, notices };
 }
 
-export async function restoreSave(result: CompositionResult, document: unknown): Promise<RestoreReport> {
+export function restoreSave(result: CompositionResult, document: unknown): Promise<RestoreReport> {
+  return runExclusive(result, () => restoreBody(result, document));
+}
+
+async function restoreBody(result: CompositionResult, document: unknown): Promise<RestoreReport> {
   const reason = blocked(result);
   if (reason) return { ok: false, applied: [], notices: [notice("error", "save.inactive", reason)] };
   if (!document || typeof document !== "object" || Array.isArray(document)) {
@@ -333,7 +337,7 @@ export async function restoreSave(result: CompositionResult, document: unknown):
         const message = imported.error instanceof Error ? imported.error.message : "importState threw a non-error value.";
         notices.push(notice("error", "save.threw", message, item.moduleId));
         const rolled: string[] = [];
-        for (const moduleId of applied) {
+        for (const moduleId of [...applied, item.moduleId]) {
           const previous = prior.get(moduleId);
           const owner = planned.find((entry) => entry.moduleId === moduleId);
           const back = await sessionOf(result).invoke({

@@ -18,7 +18,7 @@ Restore rules:
 - A slice for a module that is not active is a warning and is not read.
 - Two slices for the same module are an error. Neither is applied. The host does not pick one.
 - A different profile name or fingerprint is a warning. Slices are still matched by module id and save major.
-- One module's `importState` failure stops the restore. Slices already written in that call are put back to the state captured before it, and later slices are not applied. The report's `applied` list is empty. A thrown import must leave that module's own kept state unchanged. A wrong major, a duplicate slice, or a missing hook still skips only that slice.
+- One module's `importState` failure stops the restore. The host puts back the snapshot it took before the call, including the module that threw, and later slices are not applied. The report's `applied` list is empty. If that put-back throws, the notice is `save.rollback` and that module may keep the change. A wrong major, a duplicate slice, or a missing hook still skips only that slice. `importState` may return a promise. The host waits for it. It must not call `restoreSave`.
 
 `shutdown()` marks the result quiesced. Capture, restore, `publish`, and `runPipeline` then refuse. The contribution list is still readable.
 

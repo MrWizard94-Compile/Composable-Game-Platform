@@ -265,7 +265,7 @@ describe("capture and restore", () => {
     await result.shutdown();
   });
 
-  it("puts back slices already written when a later import throws", async () => {
+  it("puts back a module that writes and then throws", async () => {
     const late = pkg(
       moduleManifest("org.example.late", {
         save: { version: "1.0.0" },
@@ -283,8 +283,13 @@ describe("capture and restore", () => {
           const state = ctx.kept() as { n?: unknown } | undefined;
           return { n: typeof state?.n === "number" ? state.n : 0 };
         },
-        importState() {
-          throw new Error("late refused");
+        importState(ctx, saved) {
+          const state = ctx.kept() as { n: number } | undefined;
+          if (!state) return;
+          const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+          if (typeof n !== "number") throw new Error("late refused");
+          state.n = n;
+          if (n !== 0) throw new Error("late refused");
         },
       },
     );
@@ -313,5 +318,129 @@ describe("capture and restore", () => {
     assert.deepEqual(payload("org.example.early"), { n: 0 });
     assert.deepEqual(payload("org.example.late"), { n: 0 });
     assert.deepEqual(payload("org.example.tail"), { n: 0 });
+  });
+
+  it("reports a rollback that throws and does not claim that slice was put back", async () => {
+    let calls = 0;
+    const late = pkg(
+      moduleManifest("org.example.late", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 0 });
+          ctx.contribute("example.listeners", { id: "late", payload() {} });
+        },
+        exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          return { n: typeof state?.n === "number" ? state.n : 0 };
+        },
+        importState(ctx) {
+          calls += 1;
+          const state = ctx.kept() as { n: number } | undefined;
+          if (!state) return;
+          if (calls === 1) {
+            state.n = 5;
+            throw new Error("late refused");
+          }
+          throw new Error("rollback refused");
+        },
+      },
+    );
+    const result = await compose([owner, counter("org.example.early"), late, counter("org.example.tail")]);
+    const report = await restoreSave(result, {
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.early", version: "1.0.0", payload: { n: 4 } },
+        { moduleId: "org.example.late", version: "1.0.0", payload: { n: 1 } },
+        { moduleId: "org.example.tail", version: "1.0.0", payload: { n: 9 } },
+      ],
+    });
+    assert.equal(report.ok, false);
+    assert.deepEqual(report.applied, []);
+    assert.equal(calls, 2);
+    const rollback = report.notices.find((item) => item.code === "save.rollback" && item.moduleId === "org.example.late");
+    assert.equal(rollback?.message, "rollback refused");
+    assert.equal(
+      report.notices.some((item) => item.code === "save.rolled-back" && item.message.includes("org.example.early")),
+      true,
+    );
+    const again = await captureSave(result);
+    const payload = (id: string) => again.document.slices.find((item) => item.moduleId === id)?.payload;
+    assert.deepEqual(payload("org.example.early"), { n: 0 });
+    assert.deepEqual(payload("org.example.late"), { n: 5 });
+    assert.deepEqual(payload("org.example.tail"), { n: 0 });
+  });
+
+  it("runs two restores one at a time", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let mark = () => {};
+    const entered = new Promise<void>((resolve) => {
+      mark = resolve;
+    });
+    let opened = false;
+    const early = pkg(
+      moduleManifest("org.example.early", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 0 });
+          ctx.contribute("example.listeners", { id: "early", payload() {} });
+        },
+        exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          return { n: typeof state?.n === "number" ? state.n : 0 };
+        },
+        importState(ctx, saved) {
+          const state = ctx.kept() as { n: number } | undefined;
+          const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+          if (!opened) {
+            opened = true;
+            mark();
+            return gate.then(() => {
+              if (state && typeof n === "number") state.n = n;
+            });
+          }
+          if (state && typeof n === "number") state.n = n;
+        },
+      },
+    );
+    const result = await compose([owner, early, counter("org.example.tail")]);
+    const document = (n: number) => ({
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.early", version: "1.0.0", payload: { n } },
+        { moduleId: "org.example.tail", version: "1.0.0", payload: { n } },
+      ],
+    });
+    const first = restoreSave(result, document(3));
+    await entered;
+    let secondDone = false;
+    const second = restoreSave(result, document(9)).then((report) => {
+      secondDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(secondDone, false);
+    const mid = await captureSave(result);
+    assert.deepEqual(mid.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 0 });
+    assert.deepEqual(mid.document.slices.find((item) => item.moduleId === "org.example.tail")?.payload, { n: 0 });
+    release();
+    const [earlier, later] = await Promise.all([first, second]);
+    assert.equal(earlier.ok, true, earlier.notices.map((item) => item.message).join("\n"));
+    assert.equal(later.ok, true, later.notices.map((item) => item.message).join("\n"));
+    const done = await captureSave(result);
+    assert.deepEqual(done.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 9 });
+    assert.deepEqual(done.document.slices.find((item) => item.moduleId === "org.example.tail")?.payload, { n: 9 });
   });
 });

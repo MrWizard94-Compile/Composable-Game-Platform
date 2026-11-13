@@ -482,18 +482,6 @@ describe("deterministic simulation", () => {
       if (!mid.ok) assert.fail(mid.reason);
       assert.equal(mid.state.tick, 0);
       assert.equal(mid.state.entities.length, 2);
-      const snap = await captureSave(stalled);
-      const hostile = structuredClone(snap.document);
-      const witness = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
-      assert.ok(witness);
-      witness.payload = { heard: [99] };
-      const denied = await restoreSave(stalled, hostile);
-      assert.equal(denied.ok, false);
-      assert.deepEqual(denied.applied, []);
-      assert.match(denied.notices.map((item) => item.message).join("\n"), /conflicts with an open step/);
-      const during = await captureSave(stalled);
-      assert.deepEqual(slice(during.document, "org.cgp.sim-ledger"), slice(snap.document, "org.cgp.sim-ledger"));
-      assert.deepEqual(slice(during.document, "org.cgp.sim-witness"), { heard: [] });
       const secondOpen = await callService(stalled, "sim.commit", { phase: "open", tick: 1 });
       assert.equal(secondOpen.ok, false);
       assert.match(secondOpen.message ?? "", /already open/);
@@ -629,6 +617,7 @@ describe("deterministic simulation", () => {
       assert.equal(step.ok, true, step.ok ? "" : step.reason);
       if (!step.ok) return;
       assert.deepEqual(step.failures, [{ moduleId: "org.example.sim-break", id: "break", message: "subscriber broke" }]);
+      assert.deepEqual(step.completion, { ok: true });
       assert.deepEqual(noted, [1]);
       const saved = await captureSave(result);
       assert.deepEqual(slice(saved.document, "org.cgp.sim-ledger"), { tick: 1, entities: at(1) });
@@ -695,6 +684,186 @@ describe("deterministic simulation", () => {
     }
   });
 
+  it("refuses a restore while a directly opened step is open", async () => {
+    const wasm = createWasmBackend();
+    try {
+      const result = await open(packagesFor([...SIM_IDS]), wasm, "sim-direct-restore");
+      await plant(result, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const snap = await captureSave(result);
+      const hostile = structuredClone(snap.document);
+      const witness = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
+      assert.ok(witness);
+      witness.payload = { heard: [99] };
+      const opened = await callService(result, "sim.commit", { phase: "open", tick: 1 });
+      assert.equal(opened.ok, true, opened.message ?? opened.reason ?? "");
+      const denied = await restoreSave(result, hostile);
+      assert.equal(denied.ok, false);
+      assert.deepEqual(denied.applied, []);
+      assert.match(denied.notices.map((item) => item.message).join("\n"), /conflicts with an open step/);
+      const during = await captureSave(result);
+      assert.deepEqual(slice(during.document, "org.cgp.sim-ledger"), slice(snap.document, "org.cgp.sim-ledger"));
+      assert.deepEqual(slice(during.document, "org.cgp.sim-witness"), { heard: [] });
+      const aborted = await callService(result, "sim.commit", { phase: "abort" });
+      assert.equal(aborted.ok, true, aborted.message ?? aborted.reason ?? "");
+      const after = await readSimulation(result);
+      if (!after.ok) assert.fail(after.reason);
+      assert.equal(after.state.tick, 0);
+
+      await result.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+      assert.equal(wasm.resourceUsage().memoryBytes, 0);
+      assert.equal(wasm.resourceUsage().binaryBytes, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
+  it("does not overlap a restore and a runner step", async () => {
+    const wasm = createWasmBackend();
+    try {
+      let releaseGate = () => {};
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let markGate = () => {};
+      const enteredGate = new Promise<void>((resolve) => {
+        markGate = resolve;
+      });
+      const first = await open([...packagesFor([...SIM_IDS]), gatingSave(markGate, gate)], wasm, "sim-restore-first");
+      await plant(first, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const snap = await captureSave(first);
+      let stepDone = false;
+      const restoring = restoreSave(first, snap.document);
+      await enteredGate;
+      const pending = advanceSimulation(first, { tick: 1, delta: 1, inputs: DRIVES }).then((step) => {
+        stepDone = true;
+        return step;
+      });
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      assert.equal(stepDone, false);
+      const mid = await readSimulation(first);
+      if (!mid.ok) assert.fail(mid.reason);
+      assert.equal(mid.state.tick, 0);
+      releaseGate();
+      const restored = await restoring;
+      assert.equal(restored.ok, true, restored.notices.map((item) => item.message).join("\n"));
+      const step = await pending;
+      assert.equal(step.ok, true, step.ok ? "" : step.reason);
+      const done = await captureSave(first);
+      assert.deepEqual(slice(done.document, "org.cgp.sim-ledger"), { tick: 1, entities: at(1) });
+      assert.deepEqual(slice(done.document, "org.cgp.sim-witness"), { heard: [1] });
+
+      let releaseStall = () => {};
+      const stallGate = new Promise<void>((resolve) => {
+        releaseStall = resolve;
+      });
+      let markStall = () => {};
+      const enteredStall = new Promise<void>((resolve) => {
+        markStall = resolve;
+      });
+      const second = await open([...packagesFor([...SIM_IDS]), stalling(markStall, stallGate)], wasm, "sim-step-first");
+      await plant(second, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const before = await captureSave(second);
+      const hostile = structuredClone(before.document);
+      const witness = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
+      assert.ok(witness);
+      witness.payload = { heard: [99] };
+      const running = advanceSimulation(second, { tick: 1, delta: 1, inputs: DRIVES });
+      await enteredStall;
+      let restoreDone = false;
+      const waiting = restoreSave(second, hostile).then((report) => {
+        restoreDone = true;
+        return report;
+      });
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      assert.equal(restoreDone, false);
+      const during = await captureSave(second);
+      assert.deepEqual(slice(during.document, "org.cgp.sim-witness"), { heard: [] });
+      assert.deepEqual(slice(during.document, "org.cgp.sim-ledger"), slice(before.document, "org.cgp.sim-ledger"));
+      releaseStall();
+      const finished = await running;
+      assert.equal(finished.ok, true, finished.ok ? "" : finished.reason);
+      const applied = await waiting;
+      assert.equal(applied.ok, true, applied.notices.map((item) => item.message).join("\n"));
+      const last = await captureSave(second);
+      assert.deepEqual(slice(last.document, "org.cgp.sim-ledger"), slice(before.document, "org.cgp.sim-ledger"));
+      assert.deepEqual(slice(last.document, "org.cgp.sim-witness"), { heard: [99] });
+
+      await first.shutdown();
+      await second.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+      assert.equal(wasm.resourceUsage().memoryBytes, 0);
+      assert.equal(wasm.resourceUsage().binaryBytes, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
+  it("reports a publish refusal without rolling the committed tick back", async () => {
+    const wasm = createWasmBackend();
+    try {
+      const state = { tick: 0, entities: [] as SimEntity[] };
+      let live: { quiesced: boolean } | undefined;
+      const quiet = {
+        manifest: manifest("org.example.sim-quiet", {
+          requires: [{ capability: "sim.core", version: "^1.0.0" }],
+          connectsTo: [
+            { slot: "sim.commit", contract: "sim.commit/1" },
+            { slot: "sim.read", contract: "sim.read/1" },
+          ],
+        }),
+        implementation: {
+          register(ctx: {
+            keep: (value: unknown) => void;
+            contribute: (slotId: string, contribution: { id: string; payload: (input: unknown) => unknown }) => void;
+          }) {
+            ctx.keep(state);
+            ctx.contribute("sim.read", {
+              id: "read",
+              payload() {
+                return { tick: state.tick, entities: state.entities };
+              },
+            });
+            ctx.contribute("sim.commit", {
+              id: "commit",
+              payload(input: unknown) {
+                const row = input && typeof input === "object" ? (input as { phase?: unknown; tick?: unknown; entities?: SimEntity[] }) : {};
+                if (row.phase === "open" || row.phase === "abort") return { ok: true };
+                if (typeof row.tick === "number") state.tick = row.tick;
+                if (Array.isArray(row.entities)) state.entities = row.entities;
+                if (live) live.quiesced = true;
+                return { ok: true };
+              },
+            });
+          },
+        },
+      };
+      const result = await open([...packagesFor(["org.cgp.sim-core"]), quiet], wasm, "sim-quiet");
+      live = result;
+      const step = await advanceSimulation(result, { tick: 1, delta: 1, inputs: [] });
+      assert.equal(step.ok, true, step.ok ? "" : step.reason);
+      if (!step.ok) return;
+      assert.deepEqual(step.failures, []);
+      assert.deepEqual(step.completion, { ok: false, reason: "Runtime has shut down." });
+      assert.equal(state.tick, 1);
+      const again = await advanceSimulation(result, { tick: 1, delta: 1, inputs: [] });
+      assert.equal(again.ok, false);
+      if (again.ok) return;
+      assert.match(again.reason, /shut down/);
+      assert.equal(state.tick, 1);
+
+      await result.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+      assert.equal(wasm.resourceUsage().memoryBytes, 0);
+      assert.equal(wasm.resourceUsage().binaryBytes, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
   it("matches the mixed proof in Chromium, including after save and restore", { timeout: 90_000 }, async () => {
     const report = await runBrowserSimulationCheck();
     const heard = Array.from({ length: 80 }, (_, index) => index + 1);
@@ -715,12 +884,37 @@ describe("deterministic simulation", () => {
       ],
     });
     assert.deepEqual(report.blockedWitness, { heard: [] });
+    assert.deepEqual(report.orderedLedger, { tick: 1, entities: at(1) });
+    assert.deepEqual(report.orderedHeard, { heard: [1] });
     assert.equal(report.sessions, 0);
     assert.equal(report.guests, 0);
     assert.equal(report.memoryBytes, 0);
     assert.equal(report.binaryBytes, 0);
   });
 });
+
+function gatingSave(mark: () => void, gate: Promise<void>): ModulePackage {
+  return {
+    manifest: manifest("org.example.sim-gate", { save: { version: "1.0.0" } }),
+    implementation: {
+      register(ctx) {
+        ctx.keep({ n: 0 });
+      },
+      exportState(ctx) {
+        const state = ctx.kept() as { n?: unknown } | undefined;
+        return { n: typeof state?.n === "number" ? state.n : 0 };
+      },
+      importState(ctx, saved) {
+        const state = ctx.kept() as { n: number } | undefined;
+        const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+        mark();
+        return gate.then(() => {
+          if (state && typeof n === "number") state.n = n;
+        });
+      },
+    },
+  };
+}
 
 function stalling(mark: () => void, gate: Promise<void>): ModulePackage {
   return {

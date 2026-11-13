@@ -52,7 +52,7 @@ export const implementation: ModuleImplementation = {
 
 `initialize` and `shutdown` receive `kept()` and `ownedSlot(slotId)`. `shutdown` runs in reverse initialization order. It is single-flight: a second call reports `already` and does not run the hooks again. If one module's shutdown throws, the host records it and continues with the rest. `release` still runs, including when a hook throws, so the composition's workers are terminated. After `shutdown()`, the result is quiesced and dispatch and save refuse.
 
-`exportState` returns JSON. `importState` receives a slice whose major version matches the manifest. The host does not migrate for you.
+`exportState` returns JSON. `importState` receives a slice whose major version matches the manifest. The host does not migrate for you. Check the slice before writing. If `importState` throws, the host stops the restore and writes the pre-restore snapshot back into every module it had already changed, including the one that threw. Later slices are not written. `applied` is empty. The host waits if `importState` returns a promise. That promise must not call `restoreSave`, `advanceSimulation`, or `seedSimulation`. Those three share one lane and would wait on each other. If the snapshot write throws, the notice is `save.rollback` and that module can be left changed. A direct ledger open is not the runner. A restore during that open mark is refused by the ledger, and the witness does not keep the rejected document.
 
 A callable contribution is a function, an object with a `handle` function, or an ABI handle. `publish` keeps going after a throw. `runPipeline` stops. `callService` calls the one provider. A service may return `undefined`. A pipeline stage may not.
 

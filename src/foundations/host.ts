@@ -67,13 +67,13 @@ export type LifecycleContext = {
 export type ModuleImplementation = {
   /** WebAssembly bytes for an isolating backend. The host does not instantiate them. */
   wasm?: Uint8Array;
-  register?: (ctx: RegisterContext) => void;
-  initialize?: (ctx: LifecycleContext) => void;
-  shutdown?: (ctx: LifecycleContext) => void;
+  register?: (ctx: RegisterContext) => void | Promise<void>;
+  initialize?: (ctx: LifecycleContext) => void | Promise<void>;
+  shutdown?: (ctx: LifecycleContext) => void | Promise<void>;
   /** Returns JSON this module owns. Called only by captureSave. */
   exportState?: (ctx: LifecycleContext) => unknown;
-  /** Applies a JSON slice from the same save major. Called only by restoreSave. */
-  importState?: (ctx: LifecycleContext, saved: unknown) => void;
+  /** Applies a JSON slice from the same save major. Called only by restoreSave. The host waits if this returns a promise. */
+  importState?: (ctx: LifecycleContext, saved: unknown) => void | Promise<void>;
 };
 
 export type ModulePackage = {
@@ -1386,6 +1386,25 @@ const sessionOfMap = new WeakMap<CompositionResult, ExecutionSession>();
 
 export function sessionOf(result: CompositionResult): ExecutionSession {
   return sessionOfMap.get(result) ?? deniedSession;
+}
+
+const exclusiveLanes = new WeakMap<CompositionResult, Promise<unknown>>();
+
+/**
+ * One lane for a composition. Calls run in the order they were made.
+ * A later call waits until the earlier one settles, including when it fails.
+ */
+export function runExclusive<T>(result: CompositionResult, body: () => Promise<T>): Promise<T> {
+  const previous = exclusiveLanes.get(result) ?? Promise.resolve();
+  const run = previous.then(body, body);
+  exclusiveLanes.set(
+    result,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
 }
 
 export function backendOf(result: CompositionResult): ExecutionBackend {

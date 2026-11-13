@@ -2,6 +2,7 @@ import { createBrowserWasmBackend } from "../src/foundations/wasm-browser.ts";
 import { compose, type CompositionResult } from "../src/foundations/host.ts";
 import { isAbiHandle } from "../src/foundations/abi.ts";
 import { captureSave, restoreSave, type SaveDocument } from "../src/foundations/save.ts";
+import { callService } from "../src/foundations/dispatch.ts";
 import { templateGuest, wasiGuest, withCustomPadding } from "../src/foundations/wasm-build.ts";
 import { CROSS_POLICY, createCrossBackend } from "../src/foundations/cross-backend.ts";
 import { SIM_IDS, packagesFor } from "../src/modules/registry.ts";
@@ -83,6 +84,8 @@ export async function runBrowserSimulation(): Promise<{
   blockedLedger: unknown;
   blockedWitness: unknown;
   blocked: boolean;
+  orderedLedger: unknown;
+  orderedHeard: unknown;
   sessions: number;
   guests: number;
   memoryBytes: number;
@@ -115,7 +118,8 @@ export async function runBrowserSimulation(): Promise<{
   let resumed: CompositionResult | undefined;
   let next: CompositionResult | undefined;
   let raced: CompositionResult | undefined;
-  let stalled: CompositionResult | undefined;
+  let blockedRun: CompositionResult | undefined;
+  let ordered: CompositionResult | undefined;
   try {
     continuous = await open("sim-browser");
     resumed = await open("sim-browser-resume");
@@ -158,44 +162,66 @@ export async function runBrowserSimulation(): Promise<{
     const racedSave = await captureSave(raced);
     if (!racedSave.ok) throw new Error(racedSave.notices.map((item) => item.message).join("\n"));
 
-    let release = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let mark = () => {};
-    const entered = new Promise<void>((resolve) => {
-      mark = resolve;
-    });
-    stalled = await compose([...packages, browserStall(mark, gate)], {
-      backend: createCrossBackend(backend),
-      policy: CROSS_POLICY,
-      profileName: "sim-browser-stall",
-    });
-    if (!stalled.runtimeActive) throw new Error(stalled.diagnostics.map((item) => item.message).join("\n"));
-    await plant(stalled);
-    const pending = advanceSimulation(stalled, { tick: 1, delta: 1, inputs: PROOF_DRIVES });
-    await entered;
-    const snap = await captureSave(stalled);
+    blockedRun = await open("sim-browser-block");
+    await plant(blockedRun);
+    const snap = await captureSave(blockedRun);
     if (!snap.ok) throw new Error(snap.notices.map((item) => item.message).join("\n"));
     const hostile = JSON.parse(JSON.stringify(snap.document)) as SaveDocument;
     const witnessSlice = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
     if (!witnessSlice) throw new Error("Browser simulation has no witness slice.");
     witnessSlice.payload = { heard: [99] };
-    const denied = await restoreSave(stalled, hostile);
-    const during = await captureSave(stalled);
+    const opened = await callService(blockedRun, "sim.commit", { phase: "open", tick: 1 });
+    if (!opened.ok) throw new Error(opened.message ?? opened.reason ?? "open failed");
+    const denied = await restoreSave(blockedRun, hostile);
+    const during = await captureSave(blockedRun);
     if (!during.ok) throw new Error(during.notices.map((item) => item.message).join("\n"));
-    release();
-    const stalledStep = await pending;
-    if (!stalledStep.ok) throw new Error(stalledStep.reason);
+    const aborted = await callService(blockedRun, "sim.commit", { phase: "abort" });
+    if (!aborted.ok) throw new Error(aborted.message ?? aborted.reason ?? "abort failed");
+
+    let releaseHold = () => {};
+    const holdGate = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    let markHold = () => {};
+    const holdEntered = new Promise<void>((resolve) => {
+      markHold = resolve;
+    });
+    ordered = await compose([...packages, browserGate(markHold, holdGate)], {
+      backend: createCrossBackend(backend),
+      policy: CROSS_POLICY,
+      profileName: "sim-browser-order",
+    });
+    if (!ordered.runtimeActive) throw new Error(ordered.diagnostics.map((item) => item.message).join("\n"));
+    await plant(ordered);
+    const orderedSnap = await captureSave(ordered);
+    if (!orderedSnap.ok) throw new Error(orderedSnap.notices.map((item) => item.message).join("\n"));
+    const restoring = restoreSave(ordered, orderedSnap.document);
+    await holdEntered;
+    let stepDone = false;
+    const stepping = advanceSimulation(ordered, { tick: 1, delta: 1, inputs: PROOF_DRIVES }).then((step) => {
+      stepDone = true;
+      return step;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (stepDone) throw new Error("A step finished while a restore was still running.");
+    releaseHold();
+    const restored = await restoring;
+    if (!restored.ok) throw new Error(restored.notices.map((item) => item.message).join("\n"));
+    const stepped = await stepping;
+    if (!stepped.ok) throw new Error(stepped.reason);
+    const orderedSave = await captureSave(ordered);
+    if (!orderedSave.ok) throw new Error(orderedSave.notices.map((item) => item.message).join("\n"));
 
     await finish(continuous);
     await finish(next);
     await finish(raced);
-    await finish(stalled);
+    await finish(blockedRun);
+    await finish(ordered);
     continuous = undefined;
     next = undefined;
     raced = undefined;
-    stalled = undefined;
+    blockedRun = undefined;
+    ordered = undefined;
     const usage = backend.resourceUsage();
     return {
       mixed,
@@ -209,6 +235,8 @@ export async function runBrowserSimulation(): Promise<{
       blocked: denied.ok,
       blockedLedger: sliceOf(during.document, "org.cgp.sim-ledger"),
       blockedWitness: sliceOf(during.document, "org.cgp.sim-witness"),
+      orderedLedger: sliceOf(orderedSave.document, "org.cgp.sim-ledger"),
+      orderedHeard: sliceOf(orderedSave.document, "org.cgp.sim-witness"),
       sessions: backend.openSessions(),
       guests: usage.guests,
       memoryBytes: usage.memoryBytes,
@@ -219,30 +247,31 @@ export async function runBrowserSimulation(): Promise<{
     await finish(resumed);
     await finish(next);
     await finish(raced);
-    await finish(stalled);
+    await finish(blockedRun);
+    await finish(ordered);
   }
 }
 
-function browserStall(mark: () => void, gate: Promise<void>) {
+function browserGate(mark: () => void, gate: Promise<void>) {
   return {
     manifest: {
-      moduleId: "org.example.sim-stall",
-      name: "stall",
+      moduleId: "org.example.sim-gate",
+      name: "gate",
       version: "1.0.0",
       moduleApi: ">=1.0.0 <2.0.0",
-      requires: [{ capability: "sim.core", version: "^1.0.0" }],
-      connectsTo: [{ slot: "sim.systems", contract: "sim.systems/1" }],
+      save: { version: "1.0.0" },
     },
     implementation: {
-      register(ctx: { contribute: (slotId: string, contribution: { id: string; order: number; payload: (input: unknown) => unknown }) => void }) {
-        ctx.contribute("sim.systems", {
-          id: "stall",
-          order: 25,
-          payload(input: unknown) {
-            mark();
-            return gate.then(() => input);
-          },
-        });
+      register(ctx: { keep: (value: unknown) => void }) {
+        ctx.keep({ n: 0 });
+      },
+      exportState(ctx: { kept: () => unknown }) {
+        const state = ctx.kept() as { n?: unknown } | undefined;
+        return { n: typeof state?.n === "number" ? state.n : 0 };
+      },
+      importState(_ctx: { kept: () => unknown }, _saved: unknown) {
+        mark();
+        return gate.then(() => undefined);
       },
     },
   };

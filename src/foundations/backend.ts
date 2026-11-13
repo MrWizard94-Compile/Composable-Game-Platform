@@ -102,14 +102,14 @@ function ownsWasm(implementation: unknown): boolean {
   );
 }
 
-function inProcessInvoke(call: HookCall): HookResult {
+async function inProcessInvoke(call: HookCall): Promise<HookResult> {
   if (ownsWasm(call.implementation)) {
     return { ok: false, error: new Error("This backend does not run WebAssembly. No module function was called.") };
   }
   const fn = call.implementation?.[call.hook];
   if (typeof fn !== "function") return { ok: true, value: undefined };
   try {
-    return { ok: true, value: fn(...call.args) };
+    return { ok: true, value: await fn(...call.args) };
   } catch (error) {
     return { ok: false, error: thrown(error) };
   }
