@@ -12,7 +12,7 @@
       "contract": "sim.systems",
       "contractVersion": "1.0.0",
       "kind": "pipeline",
-      "description": "Ordered systems. Each one returns a proposal. The first failure stops the step.",
+      "description": "Ordered systems. Each one returns a proposal and does not keep step state. The first failure stops the step.",
       "required": false
     },
     {
@@ -44,7 +44,7 @@
       "contract": "sim.commit",
       "contractVersion": "1.0.0",
       "kind": "service",
-      "description": "Replaces the ledger only when the next tick and the entity ids match.",
+      "description": "Replaces the ledger only for an open step, the next tick, the same entity ids, and positions from 0 through 1000.",
       "required": false
     }
   ],

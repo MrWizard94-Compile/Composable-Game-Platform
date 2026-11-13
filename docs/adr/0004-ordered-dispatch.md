@@ -6,7 +6,7 @@
 
 `publish(result, slotId, event)` fans one value out to a subscriber slot. `runPipeline(result, slotId, input)` folds one value through a pipeline slot. Both walk contributions in the order the host already stored: `(order, module id, contribution id)`.
 
-A callable contribution is a function, or an object with a `handle` function. The host does not interpret any other field.
+A callable contribution is a function, or an object with a `handle` function. The host does not interpret any other field. If the call returns a promise, the host waits for it. A rejection is a throw. A promise is not itself a pipeline value.
 
 Subscriber failures are isolated. A throw, or a contribution that is not callable, is reported and the next listener still runs. The composition is not rolled back.
 

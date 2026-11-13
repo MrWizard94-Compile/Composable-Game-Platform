@@ -1,7 +1,7 @@
 {
   "moduleId": "org.cgp.sim-ledger",
   "name": "Simulation Ledger",
-  "description": "Stores integer entity positions and the last committed tick. Systems do not write it.",
+  "description": "Stores positions from 0 through 1000 and the last committed tick. A commit has to be the open step.",
   "version": "1.0.0",
   "moduleApi": ">=1.0.0 <2.0.0",
   "requires": [{ "capability": "sim.core", "version": "^1.0.0" }],

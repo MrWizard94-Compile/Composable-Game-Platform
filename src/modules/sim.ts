@@ -7,9 +7,14 @@ import { callService, publish, runPipeline, type PipelineStage, type ServiceRepo
  * leaves the ledger untouched.
  *
  * Systems on `sim.systems` receive a proposal and return the next proposal.
- * They do not write the ledger. The runner commits only after the pipeline
- * returns one in-range move for every entity. `runPipeline` stops on the
- * first failure, so a later system does not see a rejected step.
+ * They do not write the ledger. Persistent module state is not rolled back if
+ * a later system fails, so a system must not keep its own state during the
+ * call. Record a committed step from `sim.completed` instead.
+ *
+ * Seed and advance for one composition run one at a time, in call order.
+ * The runner opens the ledger step and aborts that mark if it does not commit.
+ * It publishes one completion only after the ledger accepts the step.
+ * A completion subscriber must not call back into this runner.
  */
 
 export const SIM_MIN = 0;
@@ -71,6 +76,21 @@ function refused(reason: string, stages: SimStage[] = []): SimStep {
   return { ok: false, reason, stages };
 }
 
+const lanes = new WeakMap<CompositionResult, Promise<void>>();
+
+function enqueue<T>(result: CompositionResult, body: () => Promise<T>): Promise<T> {
+  const previous = lanes.get(result) ?? Promise.resolve();
+  const run = previous.then(body, body);
+  lanes.set(
+    result,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
 function stagesOf(stages: readonly PipelineStage[]): SimStage[] {
   return stages.map((stage) => ({ moduleId: stage.moduleId, id: stage.contributionId, ok: stage.ok }));
 }
@@ -115,15 +135,17 @@ function commandsFor(value: unknown, entities: readonly SimEntity[]): SimCommand
   return commands;
 }
 
-export async function seedSimulation(
+export function seedSimulation(
   result: CompositionResult,
   entity: SimEntity,
 ): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
-  const seeded = await callService(result, "sim.seed", entity);
-  if (!seeded.ok) return { ok: false, reason: serviceReason(seeded) };
-  const id = asRecord(seeded.output)?.id;
-  if (typeof id !== "string") return { ok: false, reason: "Simulation seed did not return an id." };
-  return { ok: true, id };
+  return enqueue(result, async () => {
+    const seeded = await callService(result, "sim.seed", entity);
+    if (!seeded.ok) return { ok: false, reason: serviceReason(seeded) };
+    const id = asRecord(seeded.output)?.id;
+    if (typeof id !== "string") return { ok: false, reason: "Simulation seed did not return an id." };
+    return { ok: true, id };
+  });
 }
 
 export async function readSimulation(
@@ -136,7 +158,7 @@ export async function readSimulation(
   return { ok: true, state };
 }
 
-export async function advanceSimulation(result: CompositionResult, request: SimStepRequest): Promise<SimStep> {
+async function advanceBody(result: CompositionResult, request: SimStepRequest): Promise<SimStep> {
   if (result.quiesced) return refused("Runtime has shut down.");
   if (!result.runtimeActive) return refused("Runtime is not active.");
   const read = await readSimulation(result);
@@ -162,50 +184,65 @@ export async function advanceSimulation(result: CompositionResult, request: SimS
 
   const sentInputs = clone(inputs);
   const sentEntities = clone(state.entities);
-  const proposal = {
-    tick: request.tick,
-    delta: request.delta,
-    inputs: clone(sentInputs),
-    entities: clone(sentEntities),
-    commands: [] as SimCommand[],
-  };
-  const folded = await runPipeline(result, "sim.systems", proposal);
-  const stages = stagesOf(folded.stages);
-  if (!folded.ok) {
-    const failed = [...folded.stages].reverse().find((stage) => !stage.ok);
-    return refused(failed?.message ?? folded.reason ?? "A simulation system failed.", stages);
-  }
+  let opened = false;
+  let committed = false;
+  try {
+    const opening = await callService(result, "sim.commit", { phase: "open", tick: request.tick });
+    if (!opening.ok) return refused(serviceReason(opening));
+    opened = true;
 
-  const output = asRecord(folded.output);
-  if (!output || output.tick !== request.tick || output.delta !== request.delta) {
-    return refused("Simulation proposal is not a complete step.", stages);
-  }
-  if (!sameRows(sentInputs, output.inputs, ["id", "vx", "vy"])) {
-    return refused("Simulation proposal is not a complete step.", stages);
-  }
-  if (!sameRows(sentEntities, output.entities, ["id", "x", "y"])) {
-    return refused("Simulation proposal is not a complete step.", stages);
-  }
-  const commands = commandsFor(output.commands, sentEntities);
-  if (!commands) return refused("Simulation proposal is not a complete step.", stages);
+    const proposal = {
+      tick: request.tick,
+      delta: request.delta,
+      inputs: clone(sentInputs),
+      entities: clone(sentEntities),
+      commands: [] as SimCommand[],
+    };
+    const folded = await runPipeline(result, "sim.systems", proposal);
+    const stages = stagesOf(folded.stages);
+    if (!folded.ok) {
+      const failed = [...folded.stages].reverse().find((stage) => !stage.ok);
+      return refused(failed?.message ?? folded.reason ?? "A simulation system failed.", stages);
+    }
 
-  const entities = commands.map((command) => ({ id: command.id, x: command.x, y: command.y }));
-  const committed = await callService(result, "sim.commit", { tick: request.tick, entities });
-  if (!committed.ok) return refused(serviceReason(committed), stages);
+    const output = asRecord(folded.output);
+    if (!output || output.tick !== request.tick || output.delta !== request.delta) {
+      return refused("Simulation proposal is not a complete step.", stages);
+    }
+    if (!sameRows(sentInputs, output.inputs, ["id", "vx", "vy"])) {
+      return refused("Simulation proposal is not a complete step.", stages);
+    }
+    if (!sameRows(sentEntities, output.entities, ["id", "x", "y"])) {
+      return refused("Simulation proposal is not a complete step.", stages);
+    }
+    const commands = commandsFor(output.commands, sentEntities);
+    if (!commands) return refused("Simulation proposal is not a complete step.", stages);
 
-  const fan = await publish(result, "sim.completed", {
-    tick: request.tick,
-    delta: request.delta,
-    entities,
-    commands,
-  });
-  return {
-    ok: true,
-    tick: request.tick,
-    delta: request.delta,
-    entities,
-    commands,
-    deliveries: fan.deliveries.length,
-    stages,
-  };
+    const entities = commands.map((command) => ({ id: command.id, x: command.x, y: command.y }));
+    const committedReport = await callService(result, "sim.commit", { tick: request.tick, entities });
+    if (!committedReport.ok) return refused(serviceReason(committedReport), stages);
+    committed = true;
+
+    const fan = await publish(result, "sim.completed", {
+      tick: request.tick,
+      delta: request.delta,
+      entities,
+      commands,
+    });
+    return {
+      ok: true,
+      tick: request.tick,
+      delta: request.delta,
+      entities,
+      commands,
+      deliveries: fan.deliveries.length,
+      stages,
+    };
+  } finally {
+    if (opened && !committed) await callService(result, "sim.commit", { phase: "abort" });
+  }
+}
+
+export function advanceSimulation(result: CompositionResult, request: SimStepRequest): Promise<SimStep> {
+  return enqueue(result, () => advanceBody(result, request));
 }

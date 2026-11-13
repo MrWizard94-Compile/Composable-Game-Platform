@@ -232,6 +232,48 @@ describe("runPipeline", () => {
     );
   });
 
+  it("waits for a stage promise and stops when that promise rejects", async () => {
+    const keep = (id: string, order: number, payload: unknown) =>
+      pkg(
+        moduleManifest(`org.example.${id}`, {
+          connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+        }),
+        {
+          register(ctx) {
+            ctx.contribute("example.pipe", { id, order, payload });
+          },
+        },
+      );
+    const later: string[] = [];
+    const folded = await runPipeline(
+      await compose([
+        owner,
+        keep("first", 1, async (value: unknown) => (typeof value === "number" ? value + 1 : value)),
+        keep("second", 2, (value: unknown) => Promise.resolve(typeof value === "number" ? value + 10 : value)),
+      ]),
+      "example.pipe",
+      4,
+    );
+    assert.equal(folded.ok, true);
+    assert.equal(folded.output, 15);
+
+    const rejected = await runPipeline(
+      await compose([
+        owner,
+        keep("bad", 1, () => Promise.reject(new Error("stage refused later"))),
+        keep("after", 2, () => {
+          later.push("ran");
+          return 1;
+        }),
+      ]),
+      "example.pipe",
+      0,
+    );
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.stages.at(-1)?.message, "stage refused later");
+    assert.deepEqual(later, []);
+  });
+
   it("stops at a throw, a missing function, or an undefined return", async () => {
     const keep = (id: string, order: number, payload: unknown) =>
       pkg(

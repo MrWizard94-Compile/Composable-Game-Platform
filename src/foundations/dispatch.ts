@@ -15,6 +15,7 @@ import { contributionsFor, sessionOf } from "./host.ts";
  *
  * `callService` calls the one provider of a service slot and returns its value,
  * including `undefined`. It does not pick among several providers.
+ * A promise returned by a handler is awaited. A rejection is a throw.
  *
  * None of these start a tick, and none of them change the composition.
  */
@@ -70,7 +71,8 @@ async function callHandler(result: CompositionResult, payload: unknown, arg: unk
   const outcome = await sessionOf(result).callPayload(payload, [arg]);
   if (!outcome.ok && outcome.code === "not-callable") return NOT_CALLABLE;
   if (!outcome.ok) throw outcome.error;
-  return outcome.value;
+  // A handler may be async. The promise is the call, not a value for the next stage.
+  return await outcome.value;
 }
 
 function thrownMessage(error: unknown): string {
