@@ -210,6 +210,12 @@ export type BrowserSimReport = {
   resumed: unknown;
   heardContinuous: unknown;
   heardResumed: unknown;
+  race: unknown;
+  raceHeard: unknown;
+  sameTick: number;
+  blockedLedger: unknown;
+  blockedWitness: unknown;
+  blocked: boolean;
   sessions: number;
   guests: number;
   memoryBytes: number;

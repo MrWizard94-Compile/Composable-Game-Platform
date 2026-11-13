@@ -77,6 +77,12 @@ export async function runBrowserSimulation(): Promise<{
   resumed: unknown;
   heardContinuous: unknown;
   heardResumed: unknown;
+  race: unknown;
+  raceHeard: unknown;
+  sameTick: number;
+  blockedLedger: unknown;
+  blockedWitness: unknown;
+  blocked: boolean;
   sessions: number;
   guests: number;
   memoryBytes: number;
@@ -108,6 +114,8 @@ export async function runBrowserSimulation(): Promise<{
   let continuous: CompositionResult | undefined;
   let resumed: CompositionResult | undefined;
   let next: CompositionResult | undefined;
+  let raced: CompositionResult | undefined;
+  let stalled: CompositionResult | undefined;
   try {
     continuous = await open("sim-browser");
     resumed = await open("sim-browser-resume");
@@ -133,10 +141,61 @@ export async function runBrowserSimulation(): Promise<{
     const resumedLedger = sliceOf(right.document, "org.cgp.sim-ledger");
     const heardContinuous = sliceOf(left.document, "org.cgp.sim-witness");
     const heardResumed = sliceOf(right.document, "org.cgp.sim-witness");
+
+    raced = await open("sim-browser-race");
+    await plant(raced);
+    const [first, second] = await Promise.all([
+      advanceSimulation(raced, { tick: 1, delta: 1, inputs: PROOF_DRIVES }),
+      advanceSimulation(raced, { tick: 1, delta: 1, inputs: PROOF_DRIVES }),
+    ]);
+    const sameTick = Number(first.ok) + Number(second.ok);
+    const [third, fourth] = await Promise.all([
+      advanceSimulation(raced, { tick: 2, delta: 1, inputs: PROOF_DRIVES }),
+      advanceSimulation(raced, { tick: 3, delta: 1, inputs: PROOF_DRIVES }),
+    ]);
+    if (!third.ok) throw new Error(third.reason);
+    if (!fourth.ok) throw new Error(fourth.reason);
+    const racedSave = await captureSave(raced);
+    if (!racedSave.ok) throw new Error(racedSave.notices.map((item) => item.message).join("\n"));
+
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let mark = () => {};
+    const entered = new Promise<void>((resolve) => {
+      mark = resolve;
+    });
+    stalled = await compose([...packages, browserStall(mark, gate)], {
+      backend: createCrossBackend(backend),
+      policy: CROSS_POLICY,
+      profileName: "sim-browser-stall",
+    });
+    if (!stalled.runtimeActive) throw new Error(stalled.diagnostics.map((item) => item.message).join("\n"));
+    await plant(stalled);
+    const pending = advanceSimulation(stalled, { tick: 1, delta: 1, inputs: PROOF_DRIVES });
+    await entered;
+    const snap = await captureSave(stalled);
+    if (!snap.ok) throw new Error(snap.notices.map((item) => item.message).join("\n"));
+    const hostile = JSON.parse(JSON.stringify(snap.document)) as SaveDocument;
+    const witnessSlice = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
+    if (!witnessSlice) throw new Error("Browser simulation has no witness slice.");
+    witnessSlice.payload = { heard: [99] };
+    const denied = await restoreSave(stalled, hostile);
+    const during = await captureSave(stalled);
+    if (!during.ok) throw new Error(during.notices.map((item) => item.message).join("\n"));
+    release();
+    const stalledStep = await pending;
+    if (!stalledStep.ok) throw new Error(stalledStep.reason);
+
     await finish(continuous);
     await finish(next);
+    await finish(raced);
+    await finish(stalled);
     continuous = undefined;
     next = undefined;
+    raced = undefined;
+    stalled = undefined;
     const usage = backend.resourceUsage();
     return {
       mixed,
@@ -144,6 +203,12 @@ export async function runBrowserSimulation(): Promise<{
       resumed: resumedLedger,
       heardContinuous,
       heardResumed,
+      race: sliceOf(racedSave.document, "org.cgp.sim-ledger"),
+      raceHeard: sliceOf(racedSave.document, "org.cgp.sim-witness"),
+      sameTick,
+      blocked: denied.ok,
+      blockedLedger: sliceOf(during.document, "org.cgp.sim-ledger"),
+      blockedWitness: sliceOf(during.document, "org.cgp.sim-witness"),
       sessions: backend.openSessions(),
       guests: usage.guests,
       memoryBytes: usage.memoryBytes,
@@ -153,5 +218,32 @@ export async function runBrowserSimulation(): Promise<{
     await finish(continuous);
     await finish(resumed);
     await finish(next);
+    await finish(raced);
+    await finish(stalled);
   }
+}
+
+function browserStall(mark: () => void, gate: Promise<void>) {
+  return {
+    manifest: {
+      moduleId: "org.example.sim-stall",
+      name: "stall",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      requires: [{ capability: "sim.core", version: "^1.0.0" }],
+      connectsTo: [{ slot: "sim.systems", contract: "sim.systems/1" }],
+    },
+    implementation: {
+      register(ctx: { contribute: (slotId: string, contribution: { id: string; order: number; payload: (input: unknown) => unknown }) => void }) {
+        ctx.contribute("sim.systems", {
+          id: "stall",
+          order: 25,
+          payload(input: unknown) {
+            mark();
+            return gate.then(() => input);
+          },
+        });
+      },
+    },
+  };
 }

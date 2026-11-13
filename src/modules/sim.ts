@@ -14,6 +14,7 @@ import { callService, publish, runPipeline, type PipelineStage, type ServiceRepo
  * Seed and advance for one composition run one at a time, in call order.
  * The runner opens the ledger step and aborts that mark if it does not commit.
  * It publishes one completion only after the ledger accepts the step.
+ * A subscriber that throws is reported on the step and does not roll that commit back.
  * A completion subscriber must not call back into this runner.
  */
 
@@ -37,6 +38,8 @@ export type SimStepRequest = {
 
 export type SimStage = { moduleId: string; id: string; ok: boolean };
 
+export type SimFailure = { moduleId: string; id: string; message: string };
+
 export type SimState = { tick: number; entities: SimEntity[] };
 
 export type SimStep =
@@ -47,6 +50,7 @@ export type SimStep =
       entities: SimEntity[];
       commands: SimCommand[];
       deliveries: number;
+      failures: SimFailure[];
       stages: SimStage[];
     }
   | { ok: false; reason: string; stages: SimStage[] };
@@ -229,6 +233,13 @@ async function advanceBody(result: CompositionResult, request: SimStepRequest): 
       entities,
       commands,
     });
+    const failures = fan.deliveries
+      .filter((item) => !item.ok)
+      .map((item) => ({
+        moduleId: item.moduleId,
+        id: item.contributionId,
+        message: item.message ?? "A completion subscriber failed.",
+      }));
     return {
       ok: true,
       tick: request.tick,
@@ -236,6 +247,7 @@ async function advanceBody(result: CompositionResult, request: SimStepRequest): 
       entities,
       commands,
       deliveries: fan.deliveries.length,
+      failures,
       stages,
     };
   } finally {

@@ -242,7 +242,7 @@ export async function restoreSave(result: CompositionResult, document: unknown):
   for (const slice of slices) {
     if ((counts.get(slice.moduleId) ?? 0) === 1) byId.set(slice.moduleId, slice);
   }
-  const applied: string[] = [];
+  const planned: Array<{ moduleId: string; payload: unknown; implementation: HookCall["implementation"] }> = [];
   for (const moduleId of result.order) {
     const module = result.modules.find((item) => item.moduleId === moduleId);
     if (!module || module.status !== "active" || !module.save) continue;
@@ -287,18 +287,78 @@ export async function restoreSave(result: CompositionResult, document: unknown):
       );
       continue;
     }
-    const imported = await sessionOf(result).invoke({
+    planned.push({
       moduleId,
-      hook: "importState",
+      payload: slice.payload,
       implementation: implementation as HookCall["implementation"],
-      args: [life(result, moduleId), slice.payload],
     });
-    if (!imported.ok) {
-      const message = imported.error instanceof Error ? imported.error.message : "importState threw a non-error value.";
-      notices.push(notice("error", "save.threw", message, moduleId));
-      continue;
+  }
+
+  const prior = new Map<string, unknown>();
+  let halted = false;
+  for (const item of planned) {
+    const exported = await sessionOf(result).invoke({
+      moduleId: item.moduleId,
+      hook: "exportState",
+      implementation: item.implementation,
+      args: [life(result, item.moduleId)],
+    });
+    if (!exported.ok) {
+      const message = exported.error instanceof Error ? exported.error.message : "exportState threw a non-error value.";
+      notices.push(notice("error", "save.threw", message, item.moduleId));
+      halted = true;
+      break;
     }
-    applied.push(moduleId);
+    const cloned = jsonClone(exported.value);
+    if (!cloned.ok) {
+      notices.push(
+        notice("error", "save.not-json", `Module "${item.moduleId}" returned a value that is not JSON.`, item.moduleId),
+      );
+      halted = true;
+      break;
+    }
+    prior.set(item.moduleId, cloned.value);
+  }
+
+  const applied: string[] = [];
+  if (!halted) {
+    for (const item of planned) {
+      const imported = await sessionOf(result).invoke({
+        moduleId: item.moduleId,
+        hook: "importState",
+        implementation: item.implementation,
+        args: [life(result, item.moduleId), item.payload],
+      });
+      if (!imported.ok) {
+        const message = imported.error instanceof Error ? imported.error.message : "importState threw a non-error value.";
+        notices.push(notice("error", "save.threw", message, item.moduleId));
+        const rolled: string[] = [];
+        for (const moduleId of applied) {
+          const previous = prior.get(moduleId);
+          const owner = planned.find((entry) => entry.moduleId === moduleId);
+          const back = await sessionOf(result).invoke({
+            moduleId,
+            hook: "importState",
+            implementation: owner?.implementation,
+            args: [life(result, moduleId), previous],
+          });
+          if (!back.ok) {
+            const rollbackMessage = back.error instanceof Error ? back.error.message : "importState threw a non-error value.";
+            notices.push(notice("error", "save.rollback", rollbackMessage, moduleId));
+            continue;
+          }
+          rolled.push(moduleId);
+        }
+        if (rolled.length > 0) {
+          notices.push(
+            notice("error", "save.rolled-back", `Restore stopped. Slices put back: ${rolled.join(", ")}.`, item.moduleId),
+          );
+        }
+        applied.length = 0;
+        break;
+      }
+      applied.push(item.moduleId);
+    }
   }
 
   for (const slice of slices) {

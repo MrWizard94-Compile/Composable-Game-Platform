@@ -264,4 +264,54 @@ describe("capture and restore", () => {
     assert.equal(Object.hasOwn(Object.prototype, "polluted"), false);
     await result.shutdown();
   });
+
+  it("puts back slices already written when a later import throws", async () => {
+    const late = pkg(
+      moduleManifest("org.example.late", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 0 });
+          ctx.contribute("example.listeners", {
+            id: "late",
+            payload() {},
+          });
+        },
+        exportState(ctx) {
+          const state = ctx.kept() as { n?: unknown } | undefined;
+          return { n: typeof state?.n === "number" ? state.n : 0 };
+        },
+        importState() {
+          throw new Error("late refused");
+        },
+      },
+    );
+    const result = await compose([
+      owner,
+      counter("org.example.early"),
+      late,
+      counter("org.example.tail"),
+    ]);
+    const report = await restoreSave(result, {
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.early", version: "1.0.0", payload: { n: 5 } },
+        { moduleId: "org.example.late", version: "1.0.0", payload: { n: 1 } },
+        { moduleId: "org.example.tail", version: "1.0.0", payload: { n: 9 } },
+      ],
+    });
+    assert.equal(report.ok, false);
+    assert.deepEqual(report.applied, []);
+    assert.ok(report.notices.some((item) => item.code === "save.threw" && item.moduleId === "org.example.late"));
+    assert.ok(report.notices.some((item) => item.code === "save.rolled-back"));
+    const again = await captureSave(result);
+    const payload = (id: string) => again.document.slices.find((item) => item.moduleId === id)?.payload;
+    assert.deepEqual(payload("org.example.early"), { n: 0 });
+    assert.deepEqual(payload("org.example.late"), { n: 0 });
+    assert.deepEqual(payload("org.example.tail"), { n: 0 });
+  });
 });

@@ -483,9 +483,20 @@ describe("deterministic simulation", () => {
       assert.equal(mid.state.tick, 0);
       assert.equal(mid.state.entities.length, 2);
       const snap = await captureSave(stalled);
-      const denied = await restoreSave(stalled, snap.document);
+      const hostile = structuredClone(snap.document);
+      const witness = hostile.slices.find((item) => item.moduleId === "org.cgp.sim-witness");
+      assert.ok(witness);
+      witness.payload = { heard: [99] };
+      const denied = await restoreSave(stalled, hostile);
       assert.equal(denied.ok, false);
+      assert.deepEqual(denied.applied, []);
       assert.match(denied.notices.map((item) => item.message).join("\n"), /conflicts with an open step/);
+      const during = await captureSave(stalled);
+      assert.deepEqual(slice(during.document, "org.cgp.sim-ledger"), slice(snap.document, "org.cgp.sim-ledger"));
+      assert.deepEqual(slice(during.document, "org.cgp.sim-witness"), { heard: [] });
+      const secondOpen = await callService(stalled, "sim.commit", { phase: "open", tick: 1 });
+      assert.equal(secondOpen.ok, false);
+      assert.match(secondOpen.message ?? "", /already open/);
       let seedFinished = false;
       const seeding = seedSimulation(stalled, { id: "e3", x: 3, y: 3 }).then((report) => {
         seedFinished = true;
@@ -604,6 +615,42 @@ describe("deterministic simulation", () => {
     }
   });
 
+  it("reports a completion subscriber failure without rolling the commit back", async () => {
+    const wasm = createWasmBackend();
+    try {
+      const noted: number[] = [];
+      const result = await open(
+        [...packagesFor([...SIM_IDS]), noting({ n: 0 }, noted), breakingSubscriber()],
+        wasm,
+        "sim-subscriber",
+      );
+      await plant(result, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const step = await advanceSimulation(result, { tick: 1, delta: 1, inputs: DRIVES });
+      assert.equal(step.ok, true, step.ok ? "" : step.reason);
+      if (!step.ok) return;
+      assert.deepEqual(step.failures, [{ moduleId: "org.example.sim-break", id: "break", message: "subscriber broke" }]);
+      assert.deepEqual(noted, [1]);
+      const saved = await captureSave(result);
+      assert.deepEqual(slice(saved.document, "org.cgp.sim-ledger"), { tick: 1, entities: at(1) });
+      assert.deepEqual(slice(saved.document, "org.cgp.sim-witness"), { heard: [1] });
+      const repeated = await advanceSimulation(result, { tick: 1, delta: 1, inputs: DRIVES });
+      assert.equal(repeated.ok, false);
+      if (repeated.ok) return;
+      assert.equal(repeated.reason, "Tick must be the next integer.");
+      const held = await readSimulation(result);
+      if (!held.ok) assert.fail(held.reason);
+      assert.equal(held.state.tick, 1);
+
+      await result.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+      assert.equal(wasm.resourceUsage().memoryBytes, 0);
+      assert.equal(wasm.resourceUsage().binaryBytes, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
   it("releases the isolate when shutdown arrives during an open step", async () => {
     const wasm = createWasmBackend();
     try {
@@ -656,6 +703,18 @@ describe("deterministic simulation", () => {
     assert.deepEqual(report.resumed, { tick: 80, entities: at(80) });
     assert.deepEqual(report.heardContinuous, { heard });
     assert.deepEqual(report.heardResumed, { heard });
+    assert.equal(report.sameTick, 1);
+    assert.deepEqual(report.race, { tick: 3, entities: at(3) });
+    assert.deepEqual(report.raceHeard, { heard: [1, 2, 3] });
+    assert.equal(report.blocked, false);
+    assert.deepEqual(report.blockedLedger, {
+      tick: 0,
+      entities: [
+        { id: "e1", x: 0, y: 0 },
+        { id: "e2", x: 10, y: 0 },
+      ],
+    });
+    assert.deepEqual(report.blockedWitness, { heard: [] });
     assert.equal(report.sessions, 0);
     assert.equal(report.guests, 0);
     assert.equal(report.memoryBytes, 0);
@@ -729,6 +788,26 @@ function haltingAlways(): ModulePackage {
           order: 15,
           payload() {
             throw new Error("halted the step");
+          },
+        });
+      },
+    },
+  };
+}
+
+function breakingSubscriber(): ModulePackage {
+  return {
+    manifest: manifest("org.example.sim-break", {
+      requires: [{ capability: "sim.core", version: "^1.0.0" }],
+      connectsTo: [{ slot: "sim.completed", contract: "sim.completed/1" }],
+    }),
+    implementation: {
+      register(ctx) {
+        ctx.contribute("sim.completed", {
+          id: "break",
+          order: -1,
+          payload() {
+            throw new Error("subscriber broke");
           },
         });
       },
