@@ -1,6 +1,7 @@
 import type { HookCall } from "./backend.ts";
 import type { CompositionResult, LifecycleContext } from "./host.ts";
 import { FOUNDATIONS_API, backendOf, moduleImplementation, moduleMemory, runExclusive, sessionOf } from "./host.ts";
+import { inSaveZone } from "./save-zone.ts";
 import { parseSemVer } from "./semver.ts";
 
 /**
@@ -64,6 +65,8 @@ function blocked(result: CompositionResult): string | undefined {
   return undefined;
 }
 
+const REENTER = "A save cannot start inside the hook that called it.";
+
 function life(result: CompositionResult, moduleId: string): LifecycleContext {
   return {
     moduleId,
@@ -112,7 +115,18 @@ function sameMajor(left: string, right: string): boolean {
   return a !== null && b !== null && a.major === b.major;
 }
 
-export async function captureSave(result: CompositionResult): Promise<CaptureReport> {
+export function captureSave(result: CompositionResult): Promise<CaptureReport> {
+  if (inSaveZone()) {
+    return Promise.resolve({
+      ok: false,
+      document: emptyDocument(result),
+      notices: [notice("error", "save.reentrant", REENTER)],
+    });
+  }
+  return runExclusive(result, () => captureBody(result));
+}
+
+async function captureBody(result: CompositionResult): Promise<CaptureReport> {
   const reason = blocked(result);
   const document = emptyDocument(result);
   if (reason) return { ok: false, document, notices: [notice("error", "save.inactive", reason)] };
@@ -160,6 +174,13 @@ export async function captureSave(result: CompositionResult): Promise<CaptureRep
 }
 
 export function restoreSave(result: CompositionResult, document: unknown): Promise<RestoreReport> {
+  if (inSaveZone()) {
+    return Promise.resolve({
+      ok: false,
+      applied: [],
+      notices: [notice("error", "save.reentrant", REENTER)],
+    });
+  }
   return runExclusive(result, () => restoreBody(result, document));
 }
 

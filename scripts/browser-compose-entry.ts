@@ -86,6 +86,11 @@ export async function runBrowserSimulation(): Promise<{
   blocked: boolean;
   orderedLedger: unknown;
   orderedHeard: unknown;
+  pairedEarly: unknown;
+  pairedLate: unknown;
+  subscriberLedger: unknown;
+  subscriberWitness: unknown;
+  subscriberLate: unknown;
   sessions: number;
   guests: number;
   memoryBytes: number;
@@ -212,6 +217,9 @@ export async function runBrowserSimulation(): Promise<{
     const orderedSave = await captureSave(ordered);
     if (!orderedSave.ok) throw new Error(orderedSave.notices.map((item) => item.message).join("\n"));
 
+    const paired = await browserPairedRestore(backend);
+    const subscriber = await browserSubscriberSnapshot(backend, packages);
+
     await finish(continuous);
     await finish(next);
     await finish(raced);
@@ -237,6 +245,11 @@ export async function runBrowserSimulation(): Promise<{
       blockedWitness: sliceOf(during.document, "org.cgp.sim-witness"),
       orderedLedger: sliceOf(orderedSave.document, "org.cgp.sim-ledger"),
       orderedHeard: sliceOf(orderedSave.document, "org.cgp.sim-witness"),
+      pairedEarly: paired.early,
+      pairedLate: paired.late,
+      subscriberLedger: subscriber.ledger,
+      subscriberWitness: subscriber.witness,
+      subscriberLate: subscriber.late,
       sessions: backend.openSessions(),
       guests: usage.guests,
       memoryBytes: usage.memoryBytes,
@@ -275,4 +288,166 @@ function browserGate(mark: () => void, gate: Promise<void>) {
       },
     },
   };
+}
+
+async function browserPairedRestore(backend: Parameters<typeof createCrossBackend>[0]) {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let mark = () => {};
+  const entered = new Promise<void>((resolve) => {
+    mark = resolve;
+  });
+  const count = (id: string, block: boolean) => ({
+    manifest: {
+      moduleId: id,
+      name: id.split(".").at(-1) ?? id,
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      save: { version: "1.0.0" },
+    },
+    implementation: {
+      register(ctx: { keep: (value: unknown) => void }) {
+        ctx.keep({ n: 0 });
+      },
+      exportState(ctx: { kept: () => unknown }) {
+        const state = ctx.kept() as { n?: unknown } | undefined;
+        return { n: typeof state?.n === "number" ? state.n : 0 };
+      },
+      importState(ctx: { kept: () => unknown }, saved: unknown) {
+        const state = ctx.kept() as { n: number } | undefined;
+        const n = saved && typeof saved === "object" && "n" in saved ? (saved as { n?: unknown }).n : undefined;
+        if (!block) {
+          if (state && typeof n === "number") state.n = n;
+          return;
+        }
+        mark();
+        return gate.then(() => {
+          if (state && typeof n === "number") state.n = n;
+        });
+      },
+    },
+  });
+  const result = await compose([count("org.example.early", false), count("org.example.late", true)], {
+    backend: createCrossBackend(backend),
+    policy: CROSS_POLICY,
+    profileName: "sim-browser-pair",
+  });
+  if (!result.runtimeActive) throw new Error(result.diagnostics.map((item) => item.message).join("\n"));
+  try {
+    const restoring = restoreSave(result, {
+      foundationsApi: "1.0.0",
+      profileName: result.profileName,
+      fingerprint: result.fingerprint,
+      slices: [
+        { moduleId: "org.example.early", version: "1.0.0", payload: { n: 6 } },
+        { moduleId: "org.example.late", version: "1.0.0", payload: { n: 6 } },
+      ],
+    });
+    await entered;
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone) throw new Error("Capture returned during a partial restore.");
+    release();
+    const restored = await restoring;
+    if (!restored.ok) throw new Error(restored.notices.map((item) => item.message).join("\n"));
+    const captured = await shot;
+    if (!captured.ok) throw new Error(captured.notices.map((item) => item.message).join("\n"));
+    return {
+      early: sliceOf(captured.document, "org.example.early"),
+      late: sliceOf(captured.document, "org.example.late"),
+    };
+  } finally {
+    if (result.runtimeActive && !result.quiesced) await result.shutdown();
+  }
+}
+
+async function browserSubscriberSnapshot(
+  backend: Parameters<typeof createCrossBackend>[0],
+  packages: ReturnType<typeof packagesFor>,
+) {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let mark = () => {};
+  const entered = new Promise<void>((resolve) => {
+    mark = resolve;
+  });
+  const heard: number[] = [];
+  let live: CompositionResult | undefined;
+  const late = {
+    manifest: {
+      moduleId: "org.example.sim-late",
+      name: "late",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      save: { version: "1.0.0" },
+      requires: [{ capability: "sim.core", version: "^1.0.0" }],
+      connectsTo: [{ slot: "sim.completed", contract: "sim.completed/1" }],
+    },
+    implementation: {
+      register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; order: number; payload: (event: unknown) => unknown }) => void }) {
+        ctx.keep({ heard });
+        ctx.contribute("sim.completed", {
+          id: "late",
+          order: -1,
+          payload(event: unknown) {
+            const tick = event && typeof event === "object" && "tick" in event ? (event as { tick?: unknown }).tick : undefined;
+            const host = live;
+            if (!host) throw new Error("missing composition");
+            mark();
+            return gate.then(() =>
+              captureSave(host).then((report) => {
+                if (report.notices[0]?.code !== "save.reentrant") throw new Error("Subscriber capture was not refused.");
+                if (typeof tick === "number") heard.push(tick);
+              }),
+            );
+          },
+        });
+      },
+      exportState() {
+        return { heard: [...heard] };
+      },
+    },
+  };
+  const result = await compose([...packages, late], {
+    backend: createCrossBackend(backend),
+    policy: CROSS_POLICY,
+    profileName: "sim-browser-subscriber",
+  });
+  if (!result.runtimeActive) throw new Error(result.diagnostics.map((item) => item.message).join("\n"));
+  live = result;
+  try {
+    const first = await seedSimulation(result, { id: "e1", x: 0, y: 0 });
+    if (!first.ok) throw new Error(first.reason);
+    const second = await seedSimulation(result, { id: "e2", x: 10, y: 0 });
+    if (!second.ok) throw new Error(second.reason);
+    const pending = advanceSimulation(result, { tick: 1, delta: 1, inputs: PROOF_DRIVES });
+    await entered;
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone) throw new Error("Capture returned before the subscriber finished.");
+    release();
+    const step = await pending;
+    if (!step.ok) throw new Error(step.reason);
+    const captured = await shot;
+    if (!captured.ok) throw new Error(captured.notices.map((item) => item.message).join("\n"));
+    return {
+      ledger: sliceOf(captured.document, "org.cgp.sim-ledger"),
+      witness: sliceOf(captured.document, "org.cgp.sim-witness"),
+      late: sliceOf(captured.document, "org.example.sim-late"),
+    };
+  } finally {
+    if (result.runtimeActive && !result.quiesced) await result.shutdown();
+  }
 }

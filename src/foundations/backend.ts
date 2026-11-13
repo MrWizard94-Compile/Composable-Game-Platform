@@ -1,4 +1,5 @@
 import { isCallablePayload } from "./slots.ts";
+import { runInSaveZone } from "./save-zone.ts";
 
 /**
  * The only way the host runs a module hook or a slot payload.
@@ -109,7 +110,7 @@ async function inProcessInvoke(call: HookCall): Promise<HookResult> {
   const fn = call.implementation?.[call.hook];
   if (typeof fn !== "function") return { ok: true, value: undefined };
   try {
-    return { ok: true, value: await fn(...call.args) };
+    return { ok: true, value: await runInSaveZone(() => fn(...call.args)) };
   } catch (error) {
     return { ok: false, error: thrown(error) };
   }
@@ -118,10 +119,11 @@ async function inProcessInvoke(call: HookCall): Promise<HookResult> {
 function inProcessPayload(payload: unknown, args: readonly unknown[]): PayloadResult {
   if (!isCallablePayload(payload)) return { ok: false, code: "not-callable" };
   try {
-    const value =
+    const value = runInSaveZone(() =>
       typeof payload === "function"
         ? payload(...args)
-        : (payload as { handle: (...input: unknown[]) => unknown }).handle(...args);
+        : (payload as { handle: (...input: unknown[]) => unknown }).handle(...args),
+    );
     return { ok: true, value };
   } catch (error) {
     return { ok: false, code: "threw", error: thrown(error) };

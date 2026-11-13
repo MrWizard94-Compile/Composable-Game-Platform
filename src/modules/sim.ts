@@ -12,7 +12,7 @@ import { callService, publish, runPipeline, type PipelineStage, type ServiceRepo
  * a later system fails, so a system must not keep its own state during the
  * call. Record a committed step from `sim.completed` instead.
  *
- * Seed, advance, and restore for one composition run one at a time, in call order.
+ * Seed, advance, restore, and capture for one composition run one at a time, in call order.
  * The runner opens the ledger step and aborts that mark if it does not commit.
  * It publishes one completion only after the ledger accepts the step.
  * A subscriber that throws is reported on the step and does not roll that commit back.

@@ -218,6 +218,11 @@ export type BrowserSimReport = {
   blocked: boolean;
   orderedLedger: unknown;
   orderedHeard: unknown;
+  pairedEarly: unknown;
+  pairedLate: unknown;
+  subscriberLedger: unknown;
+  subscriberWitness: unknown;
+  subscriberLate: unknown;
   sessions: number;
   guests: number;
   memoryBytes: number;
