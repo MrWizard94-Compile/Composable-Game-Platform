@@ -13,7 +13,7 @@ Import from `src/foundations/index.ts` only. That file is also the package expor
 | `validateManifest` | Check one manifest before you compose. |
 | `compose` | Load packages. Pass `{ trust: "trusted-in-process" }` or a backend. |
 | `contributionsFor` | Read a slot. The host does not interpret payloads. |
-| `publish`, `runPipeline`, `callService` | Caller-initiated execution. There is no tick. |
+| `publish`, `runPipeline`, `callService` | Caller-initiated execution. The host has no tick. A runner outside the host may request one step. |
 | `captureSave`, `restoreSave` | JSON a module exports. Same major version only. |
 | `FOUNDATIONS_API` | The host version a `moduleApi` range must admit. Today `1.0.0`. |
 | `createWasmBackend`, `createCrossBackend`, `CROSS_POLICY` | Run a guest, or run guests and JavaScript in one composition. |

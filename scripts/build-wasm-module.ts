@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { guestFromContributions, templateGuest, type GuestContribution } from "../src/foundations/wasm-build.ts";
 import { duneGrowthGuest } from "../src/modules/org.cgp.dune-growth/guest.ts";
+import { boundGuest } from "../src/modules/org.cgp.sim-bound/guest.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -22,14 +23,10 @@ export function compileGuestPackage(dir: string): Uint8Array {
   return bytes;
 }
 
-function writeBuiltins() {
-  const dune = duneGrowthGuest();
-  const template = templateGuest();
-  writeBytes(join(root, "examples/wasm-module/module.wasm"), template);
-  writeBytes(join(root, "src/modules/org.cgp.dune-growth/module.wasm"), dune);
-  writeFileSync(
-    join(root, "src/modules/org.cgp.dune-growth/bytes.ts"),
-    `const DUNE_WASM_BASE64 = ${JSON.stringify(Buffer.from(dune).toString("base64"))};
+function wasmModule(name: string, bytes: Uint8Array): string {
+  const constant = `${name.toUpperCase()}_WASM_BASE64`;
+  const exportName = `${name}WasmBytes`;
+  return `const ${constant} = ${JSON.stringify(Buffer.from(bytes).toString("base64"))};
 
 function decode(encoded: string): Uint8Array {
   const binary = atob(encoded);
@@ -38,10 +35,20 @@ function decode(encoded: string): Uint8Array {
   return out;
 }
 
-export const duneWasmBytes = decode(DUNE_WASM_BASE64);
-`,
-  );
-  console.log(`wrote dune bytes.ts (${dune.byteLength} bytes) and template ${template.byteLength} bytes`);
+export const ${exportName} = decode(${constant});
+`;
+}
+
+function writeBuiltins() {
+  const dune = duneGrowthGuest();
+  const bound = boundGuest();
+  const template = templateGuest();
+  writeBytes(join(root, "examples/wasm-module/module.wasm"), template);
+  writeBytes(join(root, "src/modules/org.cgp.dune-growth/module.wasm"), dune);
+  writeBytes(join(root, "src/modules/org.cgp.sim-bound/module.wasm"), bound);
+  writeFileSync(join(root, "src/modules/org.cgp.dune-growth/bytes.ts"), wasmModule("dune", dune));
+  writeFileSync(join(root, "src/modules/org.cgp.sim-bound/bytes.ts"), wasmModule("bound", bound));
+  console.log(`wrote dune ${dune.byteLength} bytes, boundary ${bound.byteLength} bytes, template ${template.byteLength} bytes`);
 }
 
 const packages = process.argv.slice(2);

@@ -1,0 +1,11 @@
+{
+  "moduleId": "org.cgp.sim-bound",
+  "name": "Simulation Boundary",
+  "description": "Clamps proposed integer positions into the inclusive range 0 through 1000. It does not write the ledger.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "sim.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "sim.systems", "contract": "sim.systems/1" }],
+  "author": "Composable Game Platform",
+  "license": "MIT"
+}

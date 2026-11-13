@@ -1,0 +1,12 @@
+{
+  "moduleId": "org.cgp.sim-witness",
+  "name": "Simulation Witness",
+  "description": "Records ticks a caller publishes after a committed step. It does not advance the ledger.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "sim.core", "version": "^1.0.0" }],
+  "connectsTo": [{ "slot": "sim.completed", "contract": "sim.completed/1" }],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "MIT"
+}

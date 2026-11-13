@@ -24,6 +24,7 @@ Milestone 1 through an isolated WebAssembly guest. Working, not a game.
 - Capability requirements. One matching provider is a dependency. Two matching providers are ambiguous, and the host does not pick one. Naming `moduleId` on the requirement pins the provider. An optional requirement still refuses when more than one provider matches. A module that lists the same capability twice is isolated.
 - Resolved order edges. Each edge names the provider, the dependent, and a capability or a module-owned slot. A missing or ambiguous requirement adds no edge.
 - A world record table and a caller-driven step, as modules. World Core exposes spawn, remove, and list. World Store keeps the records and the save slice. Step Clock counts only when a caller asks. Step Witness hears that one publish. Neither module runs a loop, and the host does not know what an entity or a step means.
+- A caller-driven simulation step, outside the Foundations. Simulation Core owns the system pipeline, the completion slot, and the ledger services. Systems return proposals. `runPipeline` stops on the first failure. The runner commits only a complete step, then publishes. Movement is JavaScript. The boundary is a WebAssembly guest that clamps integer positions into 0 through 1000. The same inputs, including after save and restore, produce the same ledger. Nothing advances unless a caller passes the next tick. There is still no loop.
 
 ## Not implemented
 
@@ -31,7 +32,7 @@ Milestone 1 through an isolated WebAssembly guest. Working, not a game.
 - Rendering.
 - Input.
 - Audio.
-- A simulation tick or a scheduler that runs by itself. A step happens only when a caller asks.
+- A scheduler that advances time by itself. A step still happens only when a caller asks.
 - Multiplayer networking or replication.
 - Hot module reloading.
 - Enforced permissions for in-process JavaScript. A declared permission is still not a boundary there. The WASM backend does enforce its import allow-list. A cross composition does not make the JavaScript half limited.

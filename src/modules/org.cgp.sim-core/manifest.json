@@ -1,0 +1,53 @@
+{
+  "moduleId": "org.cgp.sim-core",
+  "name": "Simulation Core",
+  "description": "Owns the system pipeline, the completion slot, and the ledger services. It does not step them.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "provides": [{ "capability": "sim.core", "version": "1.0.0" }],
+  "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
+  "exposesSlots": [
+    {
+      "slotId": "sim.systems",
+      "contract": "sim.systems",
+      "contractVersion": "1.0.0",
+      "kind": "pipeline",
+      "description": "Ordered systems. Each one returns a proposal. The first failure stops the step.",
+      "required": false
+    },
+    {
+      "slotId": "sim.completed",
+      "contract": "sim.completed",
+      "contractVersion": "1.0.0",
+      "kind": "subscriber",
+      "description": "Listeners for one committed step. The caller publishes. There is no loop.",
+      "required": false
+    },
+    {
+      "slotId": "sim.seed",
+      "contract": "sim.seed",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Adds one entity before any step.",
+      "required": false
+    },
+    {
+      "slotId": "sim.read",
+      "contract": "sim.read",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Returns a copy of the ledger.",
+      "required": false
+    },
+    {
+      "slotId": "sim.commit",
+      "contract": "sim.commit",
+      "contractVersion": "1.0.0",
+      "kind": "service",
+      "description": "Replaces the ledger only when the next tick and the entity ids match.",
+      "required": false
+    }
+  ],
+  "author": "Composable Game Platform",
+  "license": "MIT"
+}

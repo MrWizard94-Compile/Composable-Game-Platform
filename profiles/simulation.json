@@ -1,0 +1,11 @@
+{
+  "profileId": "org.cgp.simulation",
+  "name": "Simulation",
+  "modules": [
+    { "moduleId": "org.cgp.sim-core", "version": "1.0.0" },
+    { "moduleId": "org.cgp.sim-ledger", "version": "1.0.0" },
+    { "moduleId": "org.cgp.sim-move", "version": "1.0.0" },
+    { "moduleId": "org.cgp.sim-bound", "version": "1.0.0" },
+    { "moduleId": "org.cgp.sim-witness", "version": "1.0.0" }
+  ]
+}

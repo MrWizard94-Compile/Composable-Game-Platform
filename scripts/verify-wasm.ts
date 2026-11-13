@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { guestFromContributions, templateGuest, type GuestContribution } from "../src/foundations/wasm-build.ts";
 import { duneWasmBytes } from "../src/modules/org.cgp.dune-growth/bytes.ts";
 import { duneGrowthGuest } from "../src/modules/org.cgp.dune-growth/guest.ts";
+import { boundWasmBytes } from "../src/modules/org.cgp.sim-bound/bytes.ts";
+import { boundGuest } from "../src/modules/org.cgp.sim-bound/guest.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -16,7 +18,9 @@ function same(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 const dune = duneGrowthGuest();
+const bound = boundGuest();
 const shipped = new Uint8Array(readFileSync(join(root, "src/modules/org.cgp.dune-growth/module.wasm")));
+const boundShipped = new Uint8Array(readFileSync(join(root, "src/modules/org.cgp.sim-bound/module.wasm")));
 const template = templateGuest();
 const example = new Uint8Array(readFileSync(join(root, "examples/wasm-module/module.wasm")));
 const thirdPartyDir = join(root, "examples/third-party-module");
@@ -28,6 +32,10 @@ if (!same(dune, duneWasmBytes) || !same(dune, shipped)) {
   console.error("Dune guest bytes do not match module.wasm or bytes.ts. Regenerate both from duneGrowthGuest().");
   process.exit(1);
 }
+if (!same(bound, boundWasmBytes) || !same(bound, boundShipped)) {
+  console.error("Boundary guest bytes do not match module.wasm or bytes.ts. Regenerate both from boundGuest().");
+  process.exit(1);
+}
 if (!same(template, example)) {
   console.error("examples/wasm-module/module.wasm does not match templateGuest().");
   process.exit(1);
@@ -37,5 +45,5 @@ if (!same(thirdBuilt, thirdShipped)) {
   process.exit(1);
 }
 console.log(
-  `wasm ok  dune ${dune.byteLength} bytes  template ${template.byteLength} bytes  third-party ${thirdShipped.byteLength} bytes`,
+  `wasm ok  dune ${dune.byteLength} bytes  boundary ${bound.byteLength} bytes  template ${template.byteLength} bytes  third-party ${thirdShipped.byteLength} bytes`,
 );

@@ -1,0 +1,16 @@
+{
+  "moduleId": "org.cgp.sim-ledger",
+  "name": "Simulation Ledger",
+  "description": "Stores integer entity positions and the last committed tick. Systems do not write it.",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "requires": [{ "capability": "sim.core", "version": "^1.0.0" }],
+  "connectsTo": [
+    { "slot": "sim.seed", "contract": "sim.seed/1" },
+    { "slot": "sim.read", "contract": "sim.read/1" },
+    { "slot": "sim.commit", "contract": "sim.commit/1" }
+  ],
+  "save": { "version": "1.0.0" },
+  "author": "Composable Game Platform",
+  "license": "MIT"
+}

@@ -59,8 +59,18 @@ import stepClockManifest from "./org.cgp.step-clock/manifest.json" with { type: 
 import { implementation as stepClock } from "./org.cgp.step-clock/module.ts";
 import stepWitnessManifest from "./org.cgp.step-witness/manifest.json" with { type: "json" };
 import { implementation as stepWitness } from "./org.cgp.step-witness/module.ts";
+import simCoreManifest from "./org.cgp.sim-core/manifest.json" with { type: "json" };
+import { implementation as simCore } from "./org.cgp.sim-core/module.ts";
+import simLedgerManifest from "./org.cgp.sim-ledger/manifest.json" with { type: "json" };
+import { implementation as simLedger } from "./org.cgp.sim-ledger/module.ts";
+import simMoveManifest from "./org.cgp.sim-move/manifest.json" with { type: "json" };
+import { implementation as simMove } from "./org.cgp.sim-move/module.ts";
+import simBoundManifest from "./org.cgp.sim-bound/manifest.json" with { type: "json" };
+import { boundWasmBytes } from "./org.cgp.sim-bound/bytes.ts";
+import simWitnessManifest from "./org.cgp.sim-witness/manifest.json" with { type: "json" };
+import { implementation as simWitness } from "./org.cgp.sim-witness/module.ts";
 
-export type ModuleGroup = "Flora" | "Lighting" | "Signals" | "Queries" | "World" | "Faults";
+export type ModuleGroup = "Flora" | "Lighting" | "Signals" | "Queries" | "World" | "Simulation" | "Faults";
 
 export type CatalogEntry = {
   group: ModuleGroup;
@@ -105,6 +115,11 @@ export const CATALOG: readonly CatalogEntry[] = [
   entry("World", false, stepCoreManifest, stepCore),
   entry("World", false, stepClockManifest, stepClock),
   entry("World", false, stepWitnessManifest, stepWitness),
+  entry("Simulation", false, simCoreManifest, simCore),
+  entry("Simulation", false, simLedgerManifest, simLedger),
+  entry("Simulation", false, simMoveManifest, simMove),
+  entry("Simulation", false, simBoundManifest, { wasm: boundWasmBytes }),
+  entry("Simulation", false, simWitnessManifest, simWitness),
   entry("Faults", false, cycleAlphaManifest),
   entry("Faults", false, cycleBetaManifest),
   entry("Faults", false, initFaultManifest, initFault),
@@ -146,3 +161,12 @@ export const DISPATCH_IDS = [
 
 /** One service owner and its single provider. A second provider is a separate fault. */
 export const SERVICE_IDS = ["org.cgp.query-core", "org.cgp.name-index"] as const;
+
+/** Caller-driven simulation. Off in the default proof. The boundary guest is WebAssembly. */
+export const SIM_IDS = [
+  "org.cgp.sim-core",
+  "org.cgp.sim-ledger",
+  "org.cgp.sim-move",
+  "org.cgp.sim-bound",
+  "org.cgp.sim-witness",
+] as const;

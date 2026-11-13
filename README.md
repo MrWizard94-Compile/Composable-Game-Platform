@@ -28,6 +28,8 @@ Pulse Count listens on that same slot and owns a save slice. `captureSave` asks 
 
 Query Core owns a service slot. `callService` invokes the one provider and returns its value unchanged. A second provider makes the slot ambiguous, and neither function is called.
 
+Simulation Core is another package on the same platform slot. It owns a pipeline of systems and a ledger those systems do not write. A caller outside the host requests one integer step. Movement proposes positions. A WebAssembly boundary clamps them. The ledger changes only when the whole step is accepted. Save and restore repeat the rest of a run. Nothing in that path schedules itself.
+
 ## Run the tests
 
 ```sh
@@ -46,7 +48,8 @@ node --experimental-strip-types --test \
   src/foundations/browser-isolation.test.ts \
   src/foundations/browser-wasm.test.ts \
   src/foundations/stress.test.ts \
-  src/modules/composition.test.ts
+  src/modules/composition.test.ts \
+  src/modules/sim.test.ts
 npx tsc -p tsconfig.foundations.json --noEmit
 node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
 node --experimental-strip-types scripts/browser-wasm.ts
@@ -75,4 +78,4 @@ The browser console is a viewer. It calls the same `compose()` function. It is n
 
 ## Honest limits
 
-Discovery reads manifests and WebAssembly bytes. It does not import or instantiate module code. Guests run through the `wasm-isolate` backend: one worker and one memory each, a maximum memory, a time limit that stops the isolate, and no filesystem, network, or operating-system imports. The in-process backend still runs only as an explicit opt-in and cannot enforce those limits. Save slices are plain JSON and restore across those backends. A world module can store entity records, and a step counts only when a caller asks. Nothing here is a renderer, a physics engine, or a tick that runs itself. See [docs/STATUS.md](docs/STATUS.md) and [docs/abi.md](docs/abi.md).
+Discovery reads manifests and WebAssembly bytes. It does not import or instantiate module code. Guests run through the `wasm-isolate` backend: one worker and one memory each, a maximum memory, a time limit that stops the isolate, and no filesystem, network, or operating-system imports. The in-process backend still runs only as an explicit opt-in and cannot enforce those limits. Save slices are plain JSON and restore across those backends. A world module can store entity records, and a step counts only when a caller asks. A simulation runner, also outside the host, can ask several systems to share one integer step and commits that step only when all of them agree. Nothing here is a renderer, a physics engine, or a clock that runs itself. See [docs/STATUS.md](docs/STATUS.md) and [docs/abi.md](docs/abi.md).
