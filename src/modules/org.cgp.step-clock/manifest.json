@@ -8,5 +8,5 @@
   "connectsTo": [{ "slot": "step.advance", "contract": "step.advance/1" }],
   "save": { "version": "1.0.0" },
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

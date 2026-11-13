@@ -29,7 +29,7 @@ The schema is closed. An unknown field is an error. Versions are `major.minor.pa
 - `connectsTo`: a slot id and a contract reference (`platform.system/1` or a full version).
 - `exposesSlots`: slots this module owns. Kind is `singleton`, `policy`, `registry`, `pipeline`, `subscriber`, or `service`.
 - `save`: optional `{ "version": "1.0.0" }`. Exact. This module then owns one JSON slice. A document with two slices for that module is refused. Object keys are sorted. Array order is kept.
-- `permissions`: stored on the result. Not a sandbox for JavaScript. For a guest, `cgp.log` is linked only when this list and the policy's `allowCapabilities` both include it. Every other import is refused before the guest runs.
+- `permissions`: stored on the result. Not a sandbox for JavaScript. For a guest, `cgp.log` is linked only when this list and the policy's `allowCapabilities` both include it. Every other import is refused before the guest runs. `license`, when present, is an SPDX expression such as `MIT` or `LicenseRef-Proprietary`. "Not yet licensed" is rejected. The examples in this repository are MIT. See [ADR 0013](adr/0013-authoring-toolchain-and-license.md).
 
 A module cannot connect to a slot it owns. Two modules cannot own the same slot id.
 
@@ -66,9 +66,13 @@ Copy `examples/wasm-module`. It has `manifest.json` and `module.wasm` and no `mo
 
 `org.cgp.dune-growth` is the first guest that computes a real contribution. It is off by default. It provides the same growth capability as Seasonal Growth, so enabling both is a conflict. Its arithmetic is fixed-point hundredths: `delta = (growthHundredths * factorHundredths + 50) / 100`, with spring 120, summer 80, autumn 30, and winter 5.
 
-Aggregate budgets are optional fields on the policy: `maxGuests`, `maxTotalMemoryBytes`, `maxTotalBinaryBytes`, and `maxTotalHookMs`. Unset means unlimited. Only an isolating backend enforces them, and only for the composition that opened the session. A failed load refunds the guest, binary, and memory charge. Hook time is wall clock. Once it reaches the budget, further calls are refused. The in-process backend cannot enforce these, so a policy that sets them refuses that backend before any hook runs.
+Aggregate budgets are optional fields on the policy: `maxGuests`, `maxTotalMemoryBytes`, `maxTotalBinaryBytes`, and `maxTotalHookMs`. Unset means unlimited. Only an isolating backend enforces them, and only for the composition that opened the session. A failed load refunds the guest, binary, and memory charge. Host ceilings are separate and are set on the backend (`host: { maxGuests, maxMemoryBytes, maxBinaryBytes, maxHookMs }`). They cover every composition that backend has open. Guest, memory, and binary charges return when the composition releases. Host hook time does not.
 
-`scripts/verify-wasm.ts` checks the shipped dune bytes and the template binary against the generators. The foundations workflow runs that check and the host tests on Node 22.
+`maxTotalHookMs` and a host `maxHookMs` admit one hook at a time on that ledger. A call starts only while time already spent is below the budget. Its wall-clock time is added when it settles, so the in-flight call can carry the total past the budget by less than `maxHookMs`, and the next call then sees that total. When the budget is unset, calls are not serialized. `isolateHeapMb` asks for a Node worker heap cap. The browser isolate cannot apply it and refuses that policy before any hook runs. Both isolates otherwise enforce the same declared limits, including refusal of a bad binary before a worker starts.
+
+`cgp.log` lines are kept per composition, prefixed with the module id, and capped (4096 bytes, 32 lines, 240 bytes each, unless the backend was given a tighter `log` budget). A further line becomes one `[log dropped]` marker. One composition cannot read another's buffer. `release` resolves only after that composition's workers have been terminated.
+
+`node --experimental-strip-types scripts/build-wasm-module.ts` regenerates the template binary and the Dune Growth bytes. `scripts/verify-wasm.ts` checks them. The foundations workflow runs that check, the tests (including the browser isolate), and `tsc -p tsconfig.foundations.json`.
 
 ## What a refusal looks like
 

@@ -8,5 +8,5 @@
   "provides": [{ "capability": "lighting.source", "version": "1.0.0" }],
   "connectsTo": [{ "slot": "lighting.sources", "contract": "lighting.source/1" }],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

@@ -601,6 +601,44 @@ export function shutdownLoopGuest(): Uint8Array {
   });
 }
 
+/** Loops only while a caller invokes the contribution. Register and every other hook return. */
+export function callLoopGuest(id: string): Uint8Array {
+  const register = text(
+    JSON.stringify({
+      contributions: [{ slotId: "platform.systems", id, dispatch: true, payload: { systemId: id } }],
+    }),
+  );
+  const body = [
+    ...op.localGet(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(400),
+    ...op.globalSet(1),
+    ...op.i32Const(register.length),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Const(5),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.loop,
+    ...op.br(0),
+    ...op.end,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  return compileWasm({
+    types: STANDARD_TYPES,
+    funcs: [allocFunc(), outPtrFunc(), outLenFunc(), { type: 0, body }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+    data: [{ offset: 400, bytes: register }],
+  });
+}
+
 /** Copyable guest. It contributes one opaque record and does not import anything. */
 export function templateGuest(): Uint8Array {
   return storeGuest(

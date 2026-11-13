@@ -7,5 +7,5 @@
   "provides": [{ "capability": "demo.alpha", "version": "1.0.0" }],
   "requires": [{ "capability": "demo.beta", "version": "^1.0.0" }],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

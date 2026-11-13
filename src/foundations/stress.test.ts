@@ -7,7 +7,7 @@ import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
 import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { publish } from "./dispatch.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
-import { counterGuest, shutdownLoopGuest, storeGuest, templateGuest } from "./wasm-build.ts";
+import { counterGuest, shutdownLoopGuest, storeGuest, templateGuest, callLoopGuest } from "./wasm-build.ts";
 import { createWasmBackend } from "./wasm-backend.ts";
 import { duneGrowthGuest } from "../modules/org.cgp.dune-growth/guest.ts";
 import { duneWasmBytes } from "../modules/org.cgp.dune-growth/bytes.ts";
@@ -231,6 +231,63 @@ describe("lifecycle termination", () => {
     assert.ok(report.diagnostics.some((item) => item.moduleId === "org.example.zloop"));
     const third = await result.shutdown();
     assert.equal(third.already, true);
+    assert.equal(backend.openSessions(), 0);
+  });
+
+  it("enforces host ceilings across compositions and returns guest slots on release", async () => {
+    const one = storeGuest("{}");
+    const capped = createWasmBackend({ host: { maxGuests: 1, maxBinaryBytes: one.byteLength * 4 } });
+    const first = await compose([pkg("org.example.one", one)], { backend: capped, policy: wasmPolicy() });
+    assert.equal(first.runtimeActive, true, messages(first));
+    const second = await compose([pkg("org.example.two", one)], { backend: capped, policy: wasmPolicy() });
+    assert.match(messages(second), /exceeds the host guest budget of 1/);
+    await first.shutdown();
+    const third = await compose([pkg("org.example.three", one)], { backend: capped, policy: wasmPolicy() });
+    assert.equal(third.runtimeActive, true, messages(third));
+    await third.shutdown();
+    assert.equal(capped.openSessions(), 0);
+
+    const bytes = createWasmBackend({ host: { maxBinaryBytes: one.byteLength } });
+    const crowded = await compose([pkg("org.example.a", one), pkg("org.example.b", one)], {
+      backend: bytes,
+      policy: wasmPolicy(),
+    });
+    assert.match(messages(crowded), new RegExp(`exceeds the host binary budget of ${one.byteLength} bytes`));
+    assert.equal(bytes.openSessions(), 0);
+  });
+
+  it("keeps spent host hook time after the composition is released", async () => {
+    const backend = createWasmBackend({ host: { maxHookMs: 1 } });
+    const one = storeGuest("{}");
+    const first = await compose([pkg("org.example.one", one)], { backend, policy: wasmPolicy() });
+    assert.match(messages(first), /Host hook budget exceeded\./);
+    const second = await compose([pkg("org.example.two", one)], { backend, policy: wasmPolicy() });
+    assert.match(messages(second), /Host hook budget exceeded\./);
+    assert.equal(backend.openSessions(), 0);
+  });
+
+  it("admits budgeted hook calls one at a time", async () => {
+    const backend = createWasmBackend();
+    const link = { connectsTo: [{ slot: "platform.systems", contract: "platform.system/1" }] };
+    const result = await compose(
+      [pkg("org.example.a", callLoopGuest("a"), link), pkg("org.example.b", callLoopGuest("b"), link)],
+      {
+      backend,
+      policy: wasmPolicy({ maxHookMs: 180, maxTotalHookMs: 60_000 }),
+    });
+    assert.equal(result.runtimeActive, true, messages(result));
+    const session = sessionOf(result);
+    const handles = result.contributions.filter((item) => item.id === "a" || item.id === "b");
+    assert.equal(handles.length, 2);
+    const started = Date.now();
+    const [left, right] = await Promise.all(handles.map((item) => session.callPayload(item.payload, [{}])));
+    const elapsed = Date.now() - started;
+    assert.equal(left.ok, false);
+    assert.equal(right.ok, false);
+    if (left.ok || left.code !== "threw") assert.fail("expected the first call to hit the time limit");
+    assert.match(String(left.error), /Time limit exceeded/);
+    assert.ok(elapsed >= 300, `budgeted calls overlapped or returned early (${elapsed}ms)`);
+    await result.shutdown();
     assert.equal(backend.openSessions(), 0);
   });
 });

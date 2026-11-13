@@ -8,5 +8,5 @@
   "connectsTo": [{ "slot": "signals.listeners", "contract": "signals.listener/1" }],
   "save": { "version": "1.0.0" },
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

@@ -125,7 +125,7 @@ export function validateManifest(input: unknown): ManifestValidation {
   const moduleApi = readRange(input.moduleApi, "moduleApi", errors, moduleId);
   const description = readOptionalString(input.description, "description", errors, moduleId);
   const author = readOptionalString(input.author, "author", errors, moduleId);
-  const license = readOptionalString(input.license, "license", errors, moduleId);
+  const license = readLicense(input.license, errors, moduleId);
   const requires = readRequires(input.requires, errors, moduleId);
   const provides = readProvides(input.provides, errors, moduleId);
   const connectsTo = readConnections(input.connectsTo, errors, moduleId);
@@ -304,6 +304,25 @@ function readOptionalString(
     return undefined;
   }
   return value;
+}
+
+const LICENSE_RE =
+  /^(?:LicenseRef-[A-Za-z0-9.-]+|[A-Za-z0-9][A-Za-z0-9.+-]*)(?: (?:OR|AND|WITH) (?:LicenseRef-[A-Za-z0-9.-]+|[A-Za-z0-9][A-Za-z0-9.+-]*))*$/;
+
+function readLicense(value: unknown, errors: Diagnostic[], moduleId?: string): string | undefined {
+  const license = readOptionalString(value, "license", errors, moduleId);
+  if (license === undefined) return undefined;
+  if (!LICENSE_RE.test(license)) {
+    errors.push(
+      fieldError(
+        "license",
+        "license must be an SPDX expression such as MIT, Apache-2.0, or LicenseRef-Proprietary.",
+        moduleId,
+      ),
+    );
+    return undefined;
+  }
+  return license;
 }
 
 function readRequires(

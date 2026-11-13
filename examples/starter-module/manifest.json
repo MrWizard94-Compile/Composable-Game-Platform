@@ -6,5 +6,5 @@
   "moduleApi": ">=1.0.0 <2.0.0",
   "connectsTo": [{ "slot": "platform.systems", "contract": "platform.system/1" }],
   "author": "Copy and replace",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

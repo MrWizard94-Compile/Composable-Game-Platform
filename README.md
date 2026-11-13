@@ -31,6 +31,7 @@ Query Core owns a service slot. `callService` invokes the one provider and retur
 ## Run the tests
 
 ```sh
+node --experimental-strip-types scripts/build-wasm-module.ts
 node --experimental-strip-types scripts/verify-wasm.ts
 node --experimental-strip-types --test \
   src/foundations/semver.test.ts \
@@ -40,8 +41,10 @@ node --experimental-strip-types --test \
   src/foundations/authoring.test.ts \
   src/foundations/profile.test.ts \
   src/foundations/isolation.test.ts \
+  src/foundations/browser-isolation.test.ts \
   src/foundations/stress.test.ts \
   src/modules/composition.test.ts
+npx tsc -p tsconfig.foundations.json --noEmit
 ```
 
 Headless proof:

@@ -127,7 +127,7 @@ describe("isolated wasm execution", () => {
       policy: wasmPolicy({ allowCapabilities: ["cgp.log"] }),
     });
     assert.equal(live.runtimeActive, true, live.diagnostics.map((item) => item.message).join("\n"));
-    assert.ok(allowed.takeLogs().includes("ping"));
+    assert.ok(allowed.takeLogs().some((line) => line === "[org.example.log] ping"));
     await live.shutdown();
   });
 

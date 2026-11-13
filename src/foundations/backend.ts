@@ -28,6 +28,11 @@ export type ExecutionPolicy = {
   maxTotalMemoryBytes?: number;
   maxTotalBinaryBytes?: number;
   maxTotalHookMs?: number;
+  /**
+   * Old-generation heap cap of a Node guest worker, in megabytes.
+   * The browser isolate cannot apply it and refuses the policy before any hook runs.
+   */
+  isolateHeapMb?: number;
 };
 
 /** No implicit filesystem, network, or operating-system grant. No unenforced limit. */
@@ -75,6 +80,11 @@ export type ExecutionBackend = {
   recognizesPayload(payload: unknown): boolean;
   /** True when this backend can run the hook. The host does not call the function itself. */
   hasHook(implementation: unknown, hook: HookName): boolean;
+  /**
+   * Set when this backend cannot enforce one declared limit.
+   * The host refuses the policy before any hook runs.
+   */
+  unsupportedPolicy?(policy: ExecutionPolicy): PolicyConflict | undefined;
   /** One composition. Its guests die with `release`, not with another composition. */
   open(): ExecutionSession;
 };
@@ -192,7 +202,8 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
     policy.maxGuests !== undefined ||
     policy.maxTotalMemoryBytes !== undefined ||
     policy.maxTotalBinaryBytes !== undefined ||
-    policy.maxTotalHookMs !== undefined;
+    policy.maxTotalHookMs !== undefined ||
+    policy.isolateHeapMb !== undefined;
   if (asksForLimit && !backend.enforcesLimits) {
     return {
       code: "trust.limits",
@@ -217,6 +228,9 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
   if (policy.maxTotalHookMs !== undefined && (!Number.isFinite(policy.maxTotalHookMs) || policy.maxTotalHookMs <= 0)) {
     return { code: "trust.limits", message: "maxTotalHookMs must be a positive finite number." };
   }
+  if (policy.isolateHeapMb !== undefined && (!Number.isInteger(policy.isolateHeapMb) || policy.isolateHeapMb <= 0)) {
+    return { code: "trust.limits", message: "isolateHeapMb must be a positive integer." };
+  }
   if (policy.allowCapabilities !== undefined) {
     const names = policy.allowCapabilities;
     if (!Array.isArray(names) || names.some((item) => typeof item !== "string" || item.length === 0)) {
@@ -229,7 +243,7 @@ export function policyConflict(backend: ExecutionBackend, policy: ExecutionPolic
       };
     }
   }
-  return undefined;
+  return backend.unsupportedPolicy?.(policy);
 }
 
 function thrown(error: unknown): unknown {

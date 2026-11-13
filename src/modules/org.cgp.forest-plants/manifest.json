@@ -12,5 +12,5 @@
   "connectsTo": [{ "slot": "flora.plant-species", "contract": "flora.plant-species/1" }],
   "permissions": ["flora.species.register"],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

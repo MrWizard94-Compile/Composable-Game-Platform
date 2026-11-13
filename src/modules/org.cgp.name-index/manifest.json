@@ -7,5 +7,5 @@
   "requires": [{ "capability": "query.core", "version": "^1.0.0" }],
   "connectsTo": [{ "slot": "queries.ask", "contract": "queries.answer/1" }],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

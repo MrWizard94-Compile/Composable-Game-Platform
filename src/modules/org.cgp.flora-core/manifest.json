@@ -26,5 +26,5 @@
   ],
   "permissions": ["world.read"],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

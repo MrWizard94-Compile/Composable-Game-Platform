@@ -36,10 +36,13 @@ export function createCrossBackend(isolate: ExecutionBackend, trusted: Execution
       if (hasWasm(implementation)) return isolate.hasHook(implementation, hook);
       return trusted.hasHook(implementation, hook);
     },
+    unsupportedPolicy(policy) {
+      return isolate.unsupportedPolicy?.(policy) ?? trusted.unsupportedPolicy?.(policy);
+    },
     open() {
       const isolated = isolate.open();
       const local = trusted.open();
-      let released = false;
+      let releasing: Promise<void> | undefined;
       const session: ExecutionSession = {
         id: `cross-${isolated.id}`,
         invoke(call: HookCall) {
@@ -49,14 +52,16 @@ export function createCrossBackend(isolate: ExecutionBackend, trusted: Execution
           const target = isolate.recognizesPayload(payload) ? isolated : local;
           return target.callPayload(payload, args);
         },
-        async release() {
-          if (released) return;
-          released = true;
-          try {
-            await isolated.release();
-          } finally {
-            await local.release();
-          }
+        release() {
+          if (releasing) return releasing;
+          releasing = (async () => {
+            try {
+              await isolated.release();
+            } finally {
+              await local.release();
+            }
+          })();
+          return releasing;
         },
       };
       return session;

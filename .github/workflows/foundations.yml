@@ -12,7 +12,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install the typechecker
+        run: npm install --no-save --no-fund --no-audit typescript@5.7.3 @types/node@22.16.5
+      - name: Typecheck foundations and the browser isolate
+        run: npx tsc -p tsconfig.foundations.json --noEmit
       - name: Verify shipped WebAssembly
         run: node --experimental-strip-types scripts/verify-wasm.ts
-      - name: Foundations, composition, and stress
-        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/stress.test.ts src/modules/composition.test.ts
+      - name: Foundations, browser isolation, composition, and stress
+        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/stress.test.ts src/modules/composition.test.ts

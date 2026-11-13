@@ -31,6 +31,10 @@ describe("starter module", () => {
     const manifest = JSON.parse(readFileSync(join(folder, "manifest.json"), "utf8")) as unknown;
     const checked = validateManifest(manifest);
     assert.equal(checked.ok, true);
+    if (checked.ok) assert.equal(checked.manifest.license, "MIT");
+
+    const placeholder = validateManifest({ ...(manifest as Record<string, unknown>), license: "Not yet licensed" });
+    assert.equal(placeholder.ok, false);
 
     const loaded = (await import(pathToFileURL(join(folder, "module.ts")).href)) as {
       implementation?: ModuleImplementation;

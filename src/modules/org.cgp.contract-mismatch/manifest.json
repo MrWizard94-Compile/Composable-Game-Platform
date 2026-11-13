@@ -7,5 +7,5 @@
   "requires": [{ "capability": "flora.core", "version": "^1.0.0" }],
   "connectsTo": [{ "slot": "flora.plant-species", "contract": "flora.plant-species/2" }],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }

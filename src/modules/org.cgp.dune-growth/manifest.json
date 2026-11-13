@@ -8,5 +8,5 @@
   "provides": [{ "capability": "flora.growth-model", "version": "1.0.0" }],
   "connectsTo": [{ "slot": "flora.growth-model", "contract": "flora.growth-model/1" }],
   "author": "Composable Game Platform",
-  "license": "Not yet licensed"
+  "license": "MIT"
 }
