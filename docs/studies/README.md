@@ -26,6 +26,12 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | [002 — ModuleManager and native module lifecycle](o3de/002-module-manager-and-native-lifecycle.md) | Native library loading, staged initialization, ownership, component activation, and shutdown | Complete |
 | [003 — System Component services and dependency ordering](o3de/003-system-component-services-and-dependency-ordering.md) | Provided, required, optional-dependent, and incompatible services; entity and system-component activation order | Complete |
 
+### wasmCloud
+
+| Study | Subject | Status |
+|---|---|---|
+| [001 — Component host and capability model](wasmcloud/001-component-host-and-capability-model.md) | v2 host architecture, WIT contracts, host plugins, services, workload boundaries, and security model | Complete |
+
 ### Explicitly requested future studies
 
 These projects are queued for later comparative research:
@@ -33,17 +39,17 @@ These projects are queued for later comparative research:
 | Project | Planned focus |
 |---|---|
 | **Bevy** | Plugin architecture, modular engine features, application composition, and developer experience |
-| **wasmCloud** | WebAssembly component hosting, capability providers, interfaces, and runtime boundaries |
 | **Extism** | Embedded WebAssembly plugin hosting, host/guest SDKs, and plugin lifecycle |
 | **OSGi** | Bundle lifecycle, service registry, dependency resolution, versioning, and dynamic modularity |
 
 ### Additional comparative subject
 
-- **WebAssembly Component Model:** typed interfaces, component composition, and cross-language interoperability.
+- **WebAssembly Component Model:** typed interfaces, component composition, and cross-language interoperability. The wasmCloud study identifies this as the next focused ABI investigation for CGP.
 
 ## CGP baselines
 
 - O3DE studies 001 and 002 used CGP commit **37739db60e77e69369e002bfa5d54ce4159c2438** as their implementation comparison baseline.
 - O3DE study 003 uses CGP commit **3ad9e3bb33e6b8bb046f8544523d21d0e96ee996** as its repository baseline. No CGP implementation changes occurred between these baselines; the intervening commits added studies documentation.
+- wasmCloud study 001 uses CGP commit **e6128a26ea41d09dbabb64bb7f48a1eb127e274e** as its implementation comparison baseline.
 
 Update baselines in later studies when the CGP architecture changes materially.
