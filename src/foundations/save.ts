@@ -123,7 +123,7 @@ export function captureSave(result: CompositionResult): Promise<CaptureReport> {
       notices: [notice("error", "save.reentrant", REENTER)],
     });
   }
-  return runExclusive(result, () => captureBody(result));
+  return runExclusive(result, () => captureBody(result), "capture");
 }
 
 async function captureBody(result: CompositionResult): Promise<CaptureReport> {
@@ -183,7 +183,7 @@ export function restoreSave(result: CompositionResult, document: unknown): Promi
       notices: [notice("error", "save.reentrant", REENTER)],
     });
   }
-  return runExclusive(result, () => restoreBody(result, document));
+  return runExclusive(result, () => restoreBody(result, document), "restore");
 }
 
 async function restoreBody(result: CompositionResult, document: unknown): Promise<RestoreReport> {

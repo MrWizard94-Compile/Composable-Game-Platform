@@ -1,20 +1,28 @@
 /**
- * Which composition a hook is running for, including after that hook awaits.
+ * Which composition a hook or lane body is running for, including after it awaits.
+ * One frame carries the lane, the save hook, and a step-time direct mutation.
  * Node uses AsyncLocalStorage. It does not modify Promise.prototype.
- * Chromium has no async-context primitive, so the page binds promise reactions
- * to the composition frame. That binder is not installed on Node.
+ * Chromium has no async-context primitive, and native await does not call
+ * Promise.prototype.then, so the browser bundle lowers await and the page binds
+ * those reactions. That binder is not installed on Node.
  */
 
-type SaveFrame = { readonly composition: object };
+type ZoneFrame = {
+  readonly composition: object;
+  readonly lane: boolean;
+  readonly save: boolean;
+  /** An outside mutating service admitted while a step holds the lane. */
+  readonly direct: boolean;
+};
 
 type SaveContext = {
-  run<T>(frame: SaveFrame, fn: () => T): T;
-  current(): SaveFrame | undefined;
+  run<T>(frame: ZoneFrame, fn: () => T): T;
+  current(): ZoneFrame | undefined;
 };
 
 type AsyncLocalStorageLike = {
-  run<T>(store: SaveFrame, callback: () => T): T;
-  getStore(): SaveFrame | undefined;
+  run<T>(store: ZoneFrame, callback: () => T): T;
+  getStore(): ZoneFrame | undefined;
 };
 
 function nodeContext(): SaveContext | undefined {
@@ -35,7 +43,7 @@ function nodeContext(): SaveContext | undefined {
 }
 
 function browserContext(): SaveContext {
-  let current: SaveFrame | undefined;
+  let current: ZoneFrame | undefined;
   let installed = false;
   const nativeThen = Promise.prototype.then;
   return {
@@ -79,10 +87,41 @@ function browserContext(): SaveContext {
 
 const context: SaveContext = nodeContext() ?? browserContext();
 
+function nested(composition: object, lane: boolean, save: boolean, direct: boolean): ZoneFrame {
+  const outer = context.current();
+  const same = outer?.composition === composition;
+  return {
+    composition,
+    lane: lane || (same && outer.lane),
+    save: save || (same && outer.save),
+    direct: direct || (same && outer.direct),
+  };
+}
+
 export function runInSaveZone<T>(composition: object, fn: () => T): T {
-  return context.run({ composition }, fn);
+  return context.run(nested(composition, false, true, false), fn);
+}
+
+export function runInLane<T>(composition: object, fn: () => T): T {
+  return context.run(nested(composition, true, false, false), fn);
+}
+
+/** Keeps a step-time service, and services it calls, off the lane until that call settles. */
+export function runInDirectMutation<T>(composition: object, fn: () => T): T {
+  return context.run(nested(composition, false, false, true), fn);
 }
 
 export function inSaveZone(composition: object): boolean {
-  return context.current()?.composition === composition;
+  const frame = context.current();
+  return frame?.composition === composition && frame.save;
+}
+
+export function inLane(composition: object): boolean {
+  const frame = context.current();
+  return frame?.composition === composition && frame.lane;
+}
+
+export function inDirectMutation(composition: object): boolean {
+  const frame = context.current();
+  return frame?.composition === composition && frame.direct;
 }

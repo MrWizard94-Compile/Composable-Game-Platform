@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compose as hostCompose, moduleMemory, type ComposeOptions, type ModulePackage } from "./host.ts";
+import { compose as hostCompose, moduleMemory, runExclusive, type ComposeOptions, type ModulePackage } from "./host.ts";
 import { IN_PROCESS_POLICY } from "./backend.ts";
 import { callService } from "./dispatch.ts";
 import { captureSave, restoreSave } from "./save.ts";
@@ -813,16 +813,25 @@ describe("capture and restore", () => {
     assert.deepEqual(capturedA.document.slices[0]?.payload, { n: 2 });
   });
 
-  it("lets a direct service change only the slices exported after the call", async () => {
-    let release = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+  it("orders an outside service before, during, and after a capture", async () => {
+    const state = { early: 0, late: 0 };
+    let releaseExport = () => {};
+    const exportGate = new Promise<void>((resolve) => {
+      releaseExport = resolve;
     });
-    let mark = () => {};
-    const entered = new Promise<void>((resolve) => {
-      mark = resolve;
+    let markExport = () => {};
+    const exportEntered = new Promise<void>((resolve) => {
+      markExport = resolve;
     });
-    const late = { n: 0 };
+    let releaseService = () => {};
+    const serviceGate = new Promise<void>((resolve) => {
+      releaseService = resolve;
+    });
+    let markService = () => {};
+    const serviceEntered = new Promise<void>((resolve) => {
+      markService = resolve;
+    });
+    let holdExport = false;
     const early = pkg(
       moduleManifest("org.example.early", {
         save: { version: "1.0.0" },
@@ -830,15 +839,16 @@ describe("capture and restore", () => {
       }),
       {
         register(ctx) {
-          ctx.keep({ n: 1 });
+          ctx.keep(state);
           ctx.contribute("example.listeners", { id: "early", payload() {} });
         },
-        async exportState(ctx) {
-          const state = ctx.kept() as { n?: unknown } | undefined;
-          const n = typeof state?.n === "number" ? state.n : 0;
-          mark();
-          await gate;
-          return { n };
+        async exportState() {
+          const snapshot = { early: state.early, late: state.late };
+          if (holdExport) {
+            markExport();
+            await exportGate;
+          }
+          return snapshot;
         },
       },
     );
@@ -849,11 +859,275 @@ describe("capture and restore", () => {
       }),
       {
         register(ctx) {
-          ctx.keep(late);
           ctx.contribute("example.listeners", { id: "late", payload() {} });
         },
         exportState() {
-          return { n: late.n };
+          return { early: state.early, late: state.late };
+        },
+      },
+    );
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.answer",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const bump = pkg(
+      moduleManifest("org.example.bump", {
+        connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload() {
+              markService();
+              await serviceGate;
+              state.early += 1;
+              state.late += 1;
+            },
+          });
+        },
+      },
+    );
+    const result = await compose([owner, desk, bump, early, next]);
+    const before = callService(result, "example.ask", undefined);
+    await serviceEntered;
+    let beforeCaptureDone = false;
+    const beforeCapture = captureSave(result).then((report) => {
+      beforeCaptureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(beforeCaptureDone, false);
+    releaseService();
+    const beforeReport = await before;
+    assert.equal(beforeReport.ok, true, beforeReport.reason ?? "");
+    const beforeSaved = await beforeCapture;
+    assert.equal(beforeSaved.ok, true, beforeSaved.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(beforeSaved.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, {
+      early: 1,
+      late: 1,
+    });
+    assert.deepEqual(beforeSaved.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, {
+      early: 1,
+      late: 1,
+    });
+
+    let releaseDuring = () => {};
+    const duringGate = new Promise<void>((resolve) => {
+      releaseDuring = resolve;
+    });
+    let markDuring = () => {};
+    const duringEntered = new Promise<void>((resolve) => {
+      markDuring = resolve;
+    });
+    holdExport = true;
+    const duringService = pkg(
+      moduleManifest("org.example.bump", {
+        connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload() {
+              markDuring();
+              await duringGate;
+              state.early += 1;
+              state.late += 1;
+            },
+          });
+        },
+      },
+    );
+    const second = await compose([owner, desk, duringService, early, next]);
+    const walking = captureSave(second);
+    await exportEntered;
+    let duringDone = false;
+    const during = callService(second, "example.ask", undefined).then((report) => {
+      duringDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(duringDone, false);
+    assert.deepEqual(state, { early: 1, late: 1 });
+    releaseExport();
+    const walked = await walking;
+    await duringEntered;
+    assert.equal(walked.ok, true, walked.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(walked.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, {
+      early: 1,
+      late: 1,
+    });
+    assert.deepEqual(walked.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, {
+      early: 1,
+      late: 1,
+    });
+    assert.equal(duringDone, false);
+    releaseDuring();
+    const duringReport = await during;
+    assert.equal(duringReport.ok, true, duringReport.reason ?? "");
+    const after = await captureSave(second);
+    assert.deepEqual(after.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, {
+      early: 2,
+      late: 2,
+    });
+    assert.deepEqual(after.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, {
+      early: 2,
+      late: 2,
+    });
+  });
+
+  it("runs two services and two captures in call order", async () => {
+    const state = { n: 0 };
+    let releaseFirst = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirst = () => {};
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirst = resolve;
+    });
+    const calls: number[] = [];
+    const counterModule = pkg(
+      moduleManifest("org.example.count", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep(state);
+          ctx.contribute("example.listeners", { id: "count", payload() {} });
+        },
+        exportState() {
+          return { n: state.n };
+        },
+      },
+    );
+    const other = pkg(
+      moduleManifest("org.example.other", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.listeners", { id: "other", payload() {} });
+        },
+        exportState() {
+          return { n: state.n };
+        },
+      },
+    );
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.answer",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const bump = pkg(
+      moduleManifest("org.example.bump", {
+        connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload(input: unknown) {
+              const amount = typeof input === "number" ? input : 0;
+              if (amount === 1) {
+                markFirst();
+                await firstGate;
+              }
+              state.n = amount;
+              calls.push(amount);
+            },
+          });
+        },
+      },
+    );
+    const result = await compose([owner, desk, bump, counterModule, other]);
+    const firstService = callService(result, "example.ask", 1);
+    await firstEntered;
+    let firstCaptureDone = false;
+    let secondServiceDone = false;
+    let secondCaptureDone = false;
+    const firstCapture = captureSave(result).then((report) => {
+      firstCaptureDone = true;
+      return report;
+    });
+    const secondService = callService(result, "example.ask", 2).then((report) => {
+      secondServiceDone = true;
+      return report;
+    });
+    const secondCapture = captureSave(result).then((report) => {
+      secondCaptureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(firstCaptureDone, false);
+    assert.equal(secondServiceDone, false);
+    assert.equal(secondCaptureDone, false);
+    releaseFirst();
+    const savedFirst = await firstCapture;
+    const savedSecond = await secondCapture;
+    await firstService;
+    await secondService;
+    assert.deepEqual(calls, [1, 2]);
+    assert.equal(savedFirst.document.slices.length, 2);
+    assert.deepEqual(savedFirst.document.slices.find((item) => item.moduleId === "org.example.count")?.payload, { n: 1 });
+    assert.deepEqual(savedFirst.document.slices.find((item) => item.moduleId === "org.example.other")?.payload, { n: 1 });
+    assert.deepEqual(savedSecond.document.slices.find((item) => item.moduleId === "org.example.count")?.payload, { n: 2 });
+    assert.deepEqual(savedSecond.document.slices.find((item) => item.moduleId === "org.example.other")?.payload, { n: 2 });
+  });
+
+  it("lets exportState call a service that later slices can see", async () => {
+    const state = { early: 1, late: 0 };
+    let live: Awaited<ReturnType<typeof compose>> | undefined;
+    const early = pkg(
+      moduleManifest("org.example.early", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.keep(state);
+          ctx.contribute("example.listeners", { id: "early", payload() {} });
+        },
+        async exportState() {
+          const host = live;
+          if (!host) throw new Error("missing composition");
+          const bumped = await callService(host, "example.ask", undefined);
+          if (!bumped.ok) throw new Error(bumped.reason ?? "bump failed");
+          return { early: 1, late: 0 };
+        },
+      },
+    );
+    const next = pkg(
+      moduleManifest("org.example.late", {
+        save: { version: "1.0.0" },
+        connectsTo: [{ slot: "example.listeners", contract: "example.listener/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.listeners", { id: "late", payload() {} });
+        },
+        exportState() {
+          return { early: state.early, late: state.late };
         },
       },
     );
@@ -879,21 +1153,296 @@ describe("capture and restore", () => {
           ctx.contribute("example.ask", {
             id: "bump",
             payload() {
-              late.n += 7;
+              state.late = 7;
             },
           });
         },
       },
     );
     const result = await compose([owner, desk, bump, early, next]);
-    const pending = captureSave(result);
-    await entered;
-    const bumped = await callService(result, "example.ask", undefined);
-    assert.equal(bumped.ok, true, bumped.reason ?? "");
-    release();
-    const captured = await pending;
+    live = result;
+    const captured = await captureSave(result);
     assert.equal(captured.ok, true, captured.notices.map((item) => item.message).join("\n"));
-    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, { n: 1 });
-    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, { n: 7 });
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.early")?.payload, {
+      early: 1,
+      late: 0,
+    });
+    assert.deepEqual(captured.document.slices.find((item) => item.moduleId === "org.example.late")?.payload, {
+      early: 1,
+      late: 7,
+    });
+  });
+
+  it("does not delay a service that declares it does not mutate", async () => {
+    const state = { n: 1 };
+    let releaseExport = () => {};
+    const exportGate = new Promise<void>((resolve) => {
+      releaseExport = resolve;
+    });
+    let markExport = () => {};
+    const exportEntered = new Promise<void>((resolve) => {
+      markExport = resolve;
+    });
+    let releaseBump = () => {};
+    const bumpGate = new Promise<void>((resolve) => {
+      releaseBump = resolve;
+    });
+    const early = pkg(
+      moduleManifest("org.example.early", { save: { version: "1.0.0" } }),
+      {
+        register(ctx) {
+          ctx.keep(state);
+        },
+        async exportState() {
+          const snapshot = { n: state.n };
+          markExport();
+          await exportGate;
+          return snapshot;
+        },
+      },
+    );
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.look",
+            contract: "example.look",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+            mutates: false,
+          },
+          {
+            slotId: "example.ask",
+            contract: "example.ask",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const providers = pkg(
+      moduleManifest("org.example.providers", {
+        connectsTo: [
+          { slot: "example.look", contract: "example.look/1" },
+          { slot: "example.ask", contract: "example.ask/1" },
+        ],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.look", {
+            id: "look",
+            payload() {
+              return state.n;
+            },
+          });
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload() {
+              await bumpGate;
+              state.n += 1;
+            },
+          });
+        },
+      },
+    );
+    const result = await compose([desk, providers, early]);
+    assert.equal(result.slots.find((item) => item.slotId === "example.look")?.mutates, false);
+    assert.equal(result.slots.find((item) => item.slotId === "example.ask")?.mutates, true);
+    const walking = captureSave(result);
+    await exportEntered;
+    const seen = await callService(result, "example.look", undefined);
+    assert.equal(seen.ok, true, seen.reason ?? "");
+    assert.equal(seen.output, 1);
+    let bumpDone = false;
+    const bumping = callService(result, "example.ask", undefined).then((report) => {
+      bumpDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(bumpDone, false);
+    assert.equal(state.n, 1);
+    releaseExport();
+    const walked = await walking;
+    assert.equal(walked.ok, true, walked.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(walked.document.slices[0]?.payload, { n: 1 });
+    assert.equal(bumpDone, false);
+    releaseBump();
+    const bumped = await bumping;
+    assert.equal(bumped.ok, true, bumped.reason ?? "");
+    const after = await captureSave(result);
+    assert.deepEqual(after.document.slices[0]?.payload, { n: 2 });
+  });
+
+  it("keeps a service called by a step-time mutation on that same call", async () => {
+    const state = { n: 0 };
+    let releaseStep = () => {};
+    const stepGate = new Promise<void>((resolve) => {
+      releaseStep = resolve;
+    });
+    let markStep = () => {};
+    const stepEntered = new Promise<void>((resolve) => {
+      markStep = resolve;
+    });
+    let releaseOuter = () => {};
+    const outerGate = new Promise<void>((resolve) => {
+      releaseOuter = resolve;
+    });
+    let markOuter = () => {};
+    const outerEntered = new Promise<void>((resolve) => {
+      markOuter = resolve;
+    });
+    let live: Awaited<ReturnType<typeof compose>> | undefined;
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.ask",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+          {
+            slotId: "example.more",
+            contract: "example.more",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const box = pkg(
+      moduleManifest("org.example.box", {
+        save: { version: "1.0.0" },
+        connectsTo: [
+          { slot: "example.ask", contract: "example.ask/1" },
+          { slot: "example.more", contract: "example.more/1" },
+        ],
+      }),
+      {
+        register(ctx) {
+          ctx.keep(state);
+          ctx.contribute("example.ask", {
+            id: "ask",
+            async payload() {
+              markOuter();
+              await outerGate;
+              const host = live;
+              if (!host) throw new Error("missing composition");
+              const inner = await callService(host, "example.more", undefined);
+              if (!inner.ok) throw new Error(inner.reason ?? "inner failed");
+            },
+          });
+          ctx.contribute("example.more", {
+            id: "more",
+            payload() {
+              state.n = 5;
+            },
+          });
+        },
+        exportState() {
+          return { n: state.n };
+        },
+      },
+    );
+    const result = await compose([desk, box]);
+    live = result;
+    const stepping = runExclusive(
+      result,
+      async () => {
+        markStep();
+        await stepGate;
+      },
+      "step",
+    );
+    await stepEntered;
+    const outer = callService(result, "example.ask", undefined);
+    await outerEntered;
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(captureDone, false);
+    releaseStep();
+    await stepping;
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    assert.equal(captureDone, false);
+    assert.equal(state.n, 0);
+    releaseOuter();
+    const outerReport = await outer;
+    assert.equal(outerReport.ok, true, outerReport.reason ?? "");
+    const saved = await shot;
+    assert.equal(saved.ok, true, saved.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(saved.document.slices[0]?.payload, { n: 5 });
+  });
+
+  it("does not let one composition's service delay another's capture", async () => {
+    const state = { n: 0 };
+    let releaseService = () => {};
+    const serviceGate = new Promise<void>((resolve) => {
+      releaseService = resolve;
+    });
+    let markService = () => {};
+    const serviceEntered = new Promise<void>((resolve) => {
+      markService = resolve;
+    });
+    const desk = pkg(
+      moduleManifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.ask",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    const bump = pkg(
+      moduleManifest("org.example.bump", {
+        connectsTo: [{ slot: "example.ask", contract: "example.ask/1" }],
+      }),
+      {
+        register(ctx) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload() {
+              markService();
+              await serviceGate;
+              state.n = 4;
+            },
+          });
+        },
+      },
+    );
+    const held = pkg(
+      moduleManifest("org.example.held", { save: { version: "1.0.0" } }),
+      {
+        register(ctx) {
+          ctx.keep({ n: 3 });
+        },
+        exportState(ctx) {
+          return ctx.kept();
+        },
+      },
+    );
+    const first = await compose([desk, bump]);
+    const second = await compose([held]);
+    const pending = callService(first, "example.ask", undefined);
+    await serviceEntered;
+    const shot = await captureSave(second);
+    assert.equal(shot.ok, true, shot.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual(shot.document.slices[0]?.payload, { n: 3 });
+    assert.equal(state.n, 0);
+    releaseService();
+    const bumped = await pending;
+    assert.equal(bumped.ok, true, bumped.reason ?? "");
+    assert.equal(state.n, 4);
   });
 });

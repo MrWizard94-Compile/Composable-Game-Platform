@@ -557,6 +557,68 @@ describe("deterministic simulation", () => {
     }
   });
 
+  it("waits to capture until a service that started during the step has settled", async () => {
+    const wasm = createWasmBackend();
+    try {
+      const state = { n: 0 };
+      let releaseStall = () => {};
+      const stallGate = new Promise<void>((resolve) => {
+        releaseStall = resolve;
+      });
+      let markStall = () => {};
+      const stallEntered = new Promise<void>((resolve) => {
+        markStall = resolve;
+      });
+      let releaseBump = () => {};
+      const bumpGate = new Promise<void>((resolve) => {
+        releaseBump = resolve;
+      });
+      let markBump = () => {};
+      const bumpEntered = new Promise<void>((resolve) => {
+        markBump = resolve;
+      });
+      const result = await open(
+        [...packagesFor([...SIM_IDS]), stalling(markStall, stallGate), bumpDesk(), directBump(state, markBump, bumpGate)],
+        wasm,
+        "sim-direct-service",
+      );
+      await plant(result, { id: "e1", x: 0, y: 0 }, { id: "e2", x: 10, y: 0 });
+      const pending = advanceSimulation(result, { tick: 1, delta: 1, inputs: DRIVES });
+      await stallEntered;
+      const bumping = callService(result, "example.bump", undefined);
+      await bumpEntered;
+      const mid = await readSimulation(result);
+      if (!mid.ok) assert.fail(mid.reason);
+      assert.equal(mid.state.tick, 0);
+      let captureDone = false;
+      const shot = captureSave(result).then((report) => {
+        captureDone = true;
+        return report;
+      });
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      assert.equal(captureDone, false);
+      releaseStall();
+      const step = await pending;
+      assert.equal(step.ok, true, step.ok ? "" : step.reason);
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      assert.equal(captureDone, false);
+      assert.equal(state.n, 0);
+      releaseBump();
+      const bumped = await bumping;
+      assert.equal(bumped.ok, true, bumped.message ?? bumped.reason ?? "");
+      const saved = await shot;
+      assert.equal(saved.ok, true, saved.notices.map((item) => item.message).join("\n"));
+      assert.deepEqual(slice(saved.document, "org.cgp.sim-ledger"), { tick: 1, entities: at(1) });
+      assert.deepEqual(slice(saved.document, "org.cgp.sim-witness"), { heard: [1] });
+      assert.deepEqual(slice(saved.document, "org.example.sim-bump"), { n: 1 });
+      await result.shutdown();
+      assert.equal(wasm.openSessions(), 0);
+      assert.equal(wasm.resourceUsage().guests, 0);
+    } finally {
+      await wasm.dispose();
+    }
+  });
+
   it("does not keep a rejected step in authoritative state or on the completion slot", async () => {
     const wasm = createWasmBackend();
     try {
@@ -1071,8 +1133,26 @@ describe("deterministic simulation", () => {
     assert.equal(report.context.pairHeld, true);
     assert.deepEqual(report.context.pairA, { n: 2 });
     assert.deepEqual(report.context.pairB, { n: 8 });
-    assert.deepEqual(report.context.serviceEarly, { n: 1 });
-    assert.deepEqual(report.context.serviceLate, { n: 7 });
+    assert.deepEqual(report.context.authority.beforeEarly, { early: 1, late: 1 });
+    assert.deepEqual(report.context.authority.beforeLate, { early: 1, late: 1 });
+    assert.equal(report.context.authority.duringHeld, true);
+    assert.deepEqual(report.context.authority.duringEarly, { early: 1, late: 1 });
+    assert.deepEqual(report.context.authority.duringLate, { early: 1, late: 1 });
+    assert.equal(report.context.authority.readDuring, 1);
+    assert.deepEqual(report.context.authority.afterEarly, { early: 2, late: 2 });
+    assert.deepEqual(report.context.authority.afterLate, { early: 2, late: 2 });
+    assert.deepEqual(report.context.authority.nestedEarly, { early: 1, late: 0 });
+    assert.deepEqual(report.context.authority.nestedLate, { early: 1, late: 7 });
+    assert.deepEqual(report.context.authority.calls, [1, 2]);
+    assert.deepEqual(report.context.authority.concurrentFirstCount, { n: 1 });
+    assert.deepEqual(report.context.authority.concurrentFirstOther, { n: 1 });
+    assert.deepEqual(report.context.authority.concurrentSecondCount, { n: 2 });
+    assert.deepEqual(report.context.authority.concurrentSecondOther, { n: 2 });
+    assert.deepEqual(report.context.authority.nestedCall, { n: 5 });
+    assert.equal(report.context.authority.stepHeld, true);
+    assert.equal(report.context.authority.stepReadTick, 0);
+    assert.deepEqual(report.context.authority.stepLedger, { tick: 1, entities: at(1) });
+    assert.deepEqual(report.context.authority.stepBump, { n: 1 });
     assert.equal(report.context.subscriberOwn, "save.reentrant");
     assert.deepEqual(report.context.subscriberLedger, { tick: 1, entities: at(1) });
     assert.deepEqual(report.context.subscriberLate, { heard: [1] });
@@ -1101,6 +1181,47 @@ function gatingSave(mark: () => void, gate: Promise<void>): ModulePackage {
         return gate.then(() => {
           if (state && typeof n === "number") state.n = n;
         });
+      },
+    },
+  };
+}
+
+function bumpDesk(): ModulePackage {
+  return {
+    manifest: manifest("org.example.bump-desk", {
+      exposesSlots: [
+        {
+          slotId: "example.bump",
+          contract: "example.bump",
+          contractVersion: "1.0.0",
+          kind: "service",
+          required: false,
+        },
+      ],
+    }),
+  };
+}
+
+function directBump(state: { n: number }, mark: () => void, gate: Promise<void>): ModulePackage {
+  return {
+    manifest: manifest("org.example.sim-bump", {
+      save: { version: "1.0.0" },
+      connectsTo: [{ slot: "example.bump", contract: "example.bump/1" }],
+    }),
+    implementation: {
+      register(ctx) {
+        ctx.keep(state);
+        ctx.contribute("example.bump", {
+          id: "bump",
+          async payload() {
+            mark();
+            await gate;
+            state.n += 1;
+          },
+        });
+      },
+      exportState() {
+        return { n: state.n };
       },
     },
   };

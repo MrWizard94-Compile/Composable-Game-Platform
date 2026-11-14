@@ -37,7 +37,8 @@
       "contractVersion": "1.0.0",
       "kind": "service",
       "description": "Returns a copy of the ledger.",
-      "required": false
+      "required": false,
+      "mutates": false
     },
     {
       "slotId": "sim.commit",

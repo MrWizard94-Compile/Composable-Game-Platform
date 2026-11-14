@@ -1,5 +1,5 @@
 import { createBrowserWasmBackend } from "../src/foundations/wasm-browser.ts";
-import { compose, type CompositionResult } from "../src/foundations/host.ts";
+import { compose, runExclusive, type CompositionResult } from "../src/foundations/host.ts";
 import { isAbiHandle } from "../src/foundations/abi.ts";
 import { captureSave, restoreSave, type SaveDocument } from "../src/foundations/save.ts";
 import { callService } from "../src/foundations/dispatch.ts";
@@ -99,8 +99,7 @@ export async function runBrowserSimulation(): Promise<{
     pairHeld: boolean;
     pairA: unknown;
     pairB: unknown;
-    serviceEarly: unknown;
-    serviceLate: unknown;
+    authority: BrowserServiceAuthority;
     subscriberOwn: string;
     subscriberLedger: unknown;
     subscriberLate: unknown;
@@ -274,8 +273,7 @@ export async function runBrowserSimulation(): Promise<{
         pairHeld: context.pairHeld,
         pairA: context.pairA,
         pairB: context.pairB,
-        serviceEarly: context.serviceEarly,
-        serviceLate: context.serviceLate,
+        authority: context.authority,
         subscriberOwn: asyncSubscriber.own,
         subscriberLedger: asyncSubscriber.ledger,
         subscriberLate: asyncSubscriber.late,
@@ -756,6 +754,127 @@ async function browserContextProof(backend: Parameters<typeof createCrossBackend
   await first.shutdown();
   await second.shutdown();
 
+  const authority = await browserServiceAuthority(backend, openJs);
+
+  return {
+    importOwn,
+    foreignOk,
+    exportOwn,
+    exportRestore,
+    pairHeld: true,
+    pairA: sliceOf(shotA.document, "org.example.held"),
+    pairB: sliceOf(capturedB.document, "org.example.held"),
+    authority,
+  };
+}
+
+export type BrowserServiceAuthority = {
+  beforeEarly: unknown;
+  beforeLate: unknown;
+  duringHeld: boolean;
+  duringEarly: unknown;
+  duringLate: unknown;
+  readDuring: unknown;
+  afterEarly: unknown;
+  afterLate: unknown;
+  nestedEarly: unknown;
+  nestedLate: unknown;
+  calls: number[];
+  concurrentFirstCount: unknown;
+  concurrentFirstOther: unknown;
+  concurrentSecondCount: unknown;
+  concurrentSecondOther: unknown;
+  nestedCall: unknown;
+  stepHeld: boolean;
+  stepReadTick: number;
+  stepLedger: unknown;
+  stepBump: unknown;
+};
+
+async function browserServiceAuthority(
+  backend: Parameters<typeof createCrossBackend>[0],
+  openJs: (packages: readonly unknown[], profileName: string) => Promise<CompositionResult>,
+): Promise<BrowserServiceAuthority> {
+  const finish = async (result: CompositionResult | undefined) => {
+    if (result && result.runtimeActive && !result.quiesced) await result.shutdown();
+  };
+  const ordered = await browserOrderedServices(openJs, finish);
+  const concurrent = await browserConcurrentServices(openJs, finish);
+  const nested = await browserNestedExportService(openJs, finish);
+  const nestedCall = await browserNestedDirectCall(openJs, finish);
+  const step = await browserStepService(backend, finish);
+  return {
+    beforeEarly: ordered.beforeEarly,
+    beforeLate: ordered.beforeLate,
+    duringHeld: ordered.duringHeld,
+    duringEarly: ordered.duringEarly,
+    duringLate: ordered.duringLate,
+    readDuring: ordered.readDuring,
+    afterEarly: ordered.afterEarly,
+    afterLate: ordered.afterLate,
+    nestedEarly: nested.early,
+    nestedLate: nested.late,
+    calls: concurrent.calls,
+    concurrentFirstCount: concurrent.firstCount,
+    concurrentFirstOther: concurrent.firstOther,
+    concurrentSecondCount: concurrent.secondCount,
+    concurrentSecondOther: concurrent.secondOther,
+    nestedCall: nestedCall.payload,
+    stepHeld: step.held,
+    stepReadTick: step.readTick,
+    stepLedger: step.ledger,
+    stepBump: step.bump,
+  };
+}
+
+function serviceDesk(slots: ReadonlyArray<{ slotId: string; contract: string; mutates?: false }>) {
+  return {
+    manifest: {
+      moduleId: "org.example.desk",
+      name: "desk",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      exposesSlots: slots.map((slot) => ({
+        slotId: slot.slotId,
+        contract: slot.contract,
+        contractVersion: "1.0.0",
+        kind: "service" as const,
+        required: false,
+        ...(slot.mutates === undefined ? {} : { mutates: slot.mutates }),
+      })),
+    },
+    implementation: {},
+  };
+}
+
+function connectSaved<T extends { manifest: object }>(
+  module: T,
+  slots: ReadonlyArray<{ slot: string; contract: string }>,
+) {
+  return {
+    ...module,
+    manifest: {
+      ...(module.manifest as Record<string, unknown>),
+      connectsTo: [...slots],
+    },
+  };
+}
+
+const LISTENER_SLOT = [{ slot: "example.listeners", contract: "example.listener/1" }];
+
+async function browserOrderedServices(
+  openJs: (packages: readonly unknown[], profileName: string) => Promise<CompositionResult>,
+  finish: (result: CompositionResult | undefined) => Promise<void>,
+) {
+  const state = { early: 0, late: 0 };
+  let releaseExport = () => {};
+  const exportGate = new Promise<void>((resolve) => {
+    releaseExport = resolve;
+  });
+  let markExport = () => {};
+  const exportEntered = new Promise<void>((resolve) => {
+    markExport = resolve;
+  });
   let releaseService = () => {};
   const serviceGate = new Promise<void>((resolve) => {
     releaseService = resolve;
@@ -764,45 +883,343 @@ async function browserContextProof(backend: Parameters<typeof createCrossBackend
   const serviceEntered = new Promise<void>((resolve) => {
     markService = resolve;
   });
-  const late = { n: 0 };
-  const serviceEarly = savedModule("org.example.early", {
-    register(ctx: { keep: (value: unknown) => void }) {
-      ctx.keep({ n: 1 });
+  let holdExport = false;
+  const early = savedModule("org.example.early", {
+    register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.keep(state);
+      ctx.contribute("example.listeners", { id: "early", payload() {} });
     },
-    async exportState(ctx: { kept: () => unknown }) {
-      const state = ctx.kept() as { n?: unknown } | undefined;
-      const n = typeof state?.n === "number" ? state.n : 0;
-      markService();
-      await serviceGate;
-      return { n };
+    async exportState() {
+      const snapshot = { early: state.early, late: state.late };
+      if (holdExport) {
+        markExport();
+        await exportGate;
+      }
+      return snapshot;
     },
   });
-  const serviceLate = savedModule("org.example.late", {
-    register(ctx: { keep: (value: unknown) => void }) {
-      ctx.keep(late);
+  const late = savedModule("org.example.late", {
+    register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.contribute("example.listeners", { id: "late", payload() {} });
     },
     exportState() {
-      return { n: late.n };
+      return { early: state.early, late: state.late };
     },
   });
-  const desk = {
+  const listeners = {
     manifest: {
-      moduleId: "org.example.desk",
-      name: "desk",
+      moduleId: "org.example.owner",
+      name: "owner",
       version: "1.0.0",
       moduleApi: ">=1.0.0 <2.0.0",
       exposesSlots: [
         {
-          slotId: "example.ask",
-          contract: "example.answer",
+          slotId: "example.listeners",
+          contract: "example.listener",
           contractVersion: "1.0.0",
-          kind: "service",
+          kind: "subscriber",
           required: false,
         },
       ],
     },
     implementation: {},
   };
+  const ask = serviceDesk([
+    { slotId: "example.ask", contract: "example.answer" },
+    { slotId: "example.look", contract: "example.look", mutates: false },
+  ]);
+  const bump = {
+    manifest: {
+      moduleId: "org.example.bump",
+      name: "bump",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      connectsTo: [
+        { slot: "example.ask", contract: "example.answer/1" },
+        { slot: "example.look", contract: "example.look/1" },
+      ],
+    },
+    implementation: {
+      register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => unknown }) => void }) {
+        ctx.contribute("example.ask", {
+          id: "bump",
+          async payload() {
+            markService();
+            await serviceGate;
+            state.early += 1;
+            state.late += 1;
+          },
+        });
+        ctx.contribute("example.look", {
+          id: "look",
+          payload() {
+            return state.early;
+          },
+        });
+      },
+    },
+  };
+  let first: CompositionResult | undefined;
+  let second: CompositionResult | undefined;
+  try {
+    first = await openJs([listeners, ask, bump, connectSaved(early, LISTENER_SLOT), connectSaved(late, LISTENER_SLOT)], "sim-browser-service-before");
+    const before = callService(first, "example.ask", undefined);
+    await serviceEntered;
+    let beforeDone = false;
+    const beforeCapture = captureSave(first).then((report) => {
+      beforeDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (beforeDone) throw new Error("A capture finished while a service ahead of it was still running.");
+    releaseService();
+    const beforeReport = await before;
+    if (!beforeReport.ok) throw new Error(beforeReport.reason ?? "before service failed");
+    const beforeSaved = await beforeCapture;
+    if (!beforeSaved.ok) throw new Error(beforeSaved.notices.map((item) => item.message).join("\n"));
+
+    let releaseDuring = () => {};
+    const duringGate = new Promise<void>((resolve) => {
+      releaseDuring = resolve;
+    });
+    let markDuring = () => {};
+    const duringEntered = new Promise<void>((resolve) => {
+      markDuring = resolve;
+    });
+    holdExport = true;
+    const duringBump = {
+      manifest: bump.manifest,
+      implementation: {
+        register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => unknown }) => void }) {
+          ctx.contribute("example.ask", {
+            id: "bump",
+            async payload() {
+              markDuring();
+              await duringGate;
+              state.early += 1;
+              state.late += 1;
+            },
+          });
+          ctx.contribute("example.look", {
+            id: "look",
+            payload() {
+              return state.early;
+            },
+          });
+        },
+      },
+    };
+    second = await openJs(
+      [listeners, ask, duringBump, connectSaved(early, LISTENER_SLOT), connectSaved(late, LISTENER_SLOT)],
+      "sim-browser-service-during",
+    );
+    const walking = captureSave(second);
+    await exportEntered;
+    const seen = await callService(second, "example.look", undefined);
+    if (!seen.ok) throw new Error(seen.reason ?? "read failed");
+    let duringDone = false;
+    const during = callService(second, "example.ask", undefined).then((report) => {
+      duringDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (duringDone || state.early !== 1 || state.late !== 1) {
+      throw new Error("A mutating service ran while a capture was still exporting.");
+    }
+    releaseExport();
+    const walked = await walking;
+    await duringEntered;
+    if (!walked.ok) throw new Error(walked.notices.map((item) => item.message).join("\n"));
+    if (duringDone) throw new Error("The service finished before the capture released it.");
+    releaseDuring();
+    const duringReport = await during;
+    if (!duringReport.ok) throw new Error(duringReport.reason ?? "during service failed");
+    const after = await captureSave(second);
+    if (!after.ok) throw new Error(after.notices.map((item) => item.message).join("\n"));
+    return {
+      beforeEarly: sliceOf(beforeSaved.document, "org.example.early"),
+      beforeLate: sliceOf(beforeSaved.document, "org.example.late"),
+      duringHeld: true,
+      duringEarly: sliceOf(walked.document, "org.example.early"),
+      duringLate: sliceOf(walked.document, "org.example.late"),
+      readDuring: seen.output,
+      afterEarly: sliceOf(after.document, "org.example.early"),
+      afterLate: sliceOf(after.document, "org.example.late"),
+    };
+  } finally {
+    await finish(first);
+    await finish(second);
+  }
+}
+
+async function browserConcurrentServices(
+  openJs: (packages: readonly unknown[], profileName: string) => Promise<CompositionResult>,
+  finish: (result: CompositionResult | undefined) => Promise<void>,
+) {
+  const state = { n: 0 };
+  let releaseFirst = () => {};
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let markFirst = () => {};
+  const firstEntered = new Promise<void>((resolve) => {
+    markFirst = resolve;
+  });
+  const calls: number[] = [];
+  const counterModule = savedModule("org.example.count", {
+    register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.keep(state);
+      ctx.contribute("example.listeners", { id: "count", payload() {} });
+    },
+    exportState() {
+      return { n: state.n };
+    },
+  });
+  const other = savedModule("org.example.other", {
+    register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.contribute("example.listeners", { id: "other", payload() {} });
+    },
+    exportState() {
+      return { n: state.n };
+    },
+  });
+  const listeners = {
+    manifest: {
+      moduleId: "org.example.owner",
+      name: "owner",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      exposesSlots: [
+        {
+          slotId: "example.listeners",
+          contract: "example.listener",
+          contractVersion: "1.0.0",
+          kind: "subscriber",
+          required: false,
+        },
+      ],
+    },
+    implementation: {},
+  };
+  const desk = serviceDesk([{ slotId: "example.ask", contract: "example.answer" }]);
+  const bump = {
+    manifest: {
+      moduleId: "org.example.bump",
+      name: "bump",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      connectsTo: [{ slot: "example.ask", contract: "example.answer/1" }],
+    },
+    implementation: {
+      register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: (input: unknown) => Promise<void> }) => void }) {
+        ctx.contribute("example.ask", {
+          id: "bump",
+          async payload(input: unknown) {
+            const amount = typeof input === "number" ? input : 0;
+            if (amount === 1) {
+              markFirst();
+              await firstGate;
+            }
+            state.n = amount;
+            calls.push(amount);
+          },
+        });
+      },
+    },
+  };
+  let result: CompositionResult | undefined;
+  try {
+    result = await openJs(
+      [listeners, desk, bump, connectSaved(counterModule, LISTENER_SLOT), connectSaved(other, LISTENER_SLOT)],
+      "sim-browser-service-concurrent",
+    );
+    const firstService = callService(result, "example.ask", 1);
+    await firstEntered;
+    let firstCaptureDone = false;
+    let secondServiceDone = false;
+    let secondCaptureDone = false;
+    const firstCapture = captureSave(result).then((report) => {
+      firstCaptureDone = true;
+      return report;
+    });
+    const secondService = callService(result, "example.ask", 2).then((report) => {
+      secondServiceDone = true;
+      return report;
+    });
+    const secondCapture = captureSave(result).then((report) => {
+      secondCaptureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (firstCaptureDone || secondServiceDone || secondCaptureDone) {
+      throw new Error("A later service or capture ran before the first service.");
+    }
+    releaseFirst();
+    const savedFirst = await firstCapture;
+    const savedSecond = await secondCapture;
+    const firstReport = await firstService;
+    const secondReport = await secondService;
+    if (!firstReport.ok || !secondReport.ok || !savedFirst.ok || !savedSecond.ok) {
+      throw new Error("Concurrent services and captures did not finish.");
+    }
+    return {
+      calls,
+      firstCount: sliceOf(savedFirst.document, "org.example.count"),
+      firstOther: sliceOf(savedFirst.document, "org.example.other"),
+      secondCount: sliceOf(savedSecond.document, "org.example.count"),
+      secondOther: sliceOf(savedSecond.document, "org.example.other"),
+    };
+  } finally {
+    await finish(result);
+  }
+}
+
+async function browserNestedExportService(
+  openJs: (packages: readonly unknown[], profileName: string) => Promise<CompositionResult>,
+  finish: (result: CompositionResult | undefined) => Promise<void>,
+) {
+  const state = { early: 1, late: 0 };
+  let live: CompositionResult | undefined;
+  const early = savedModule("org.example.early", {
+    register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.keep(state);
+      ctx.contribute("example.listeners", { id: "early", payload() {} });
+    },
+    async exportState() {
+      const host = live;
+      if (!host) throw new Error("missing composition");
+      const bumped = await callService(host, "example.ask", undefined);
+      if (!bumped.ok) throw new Error(bumped.reason ?? "bump failed");
+      return { early: 1, late: 0 };
+    },
+  });
+  const late = savedModule("org.example.late", {
+    register(ctx: { contribute: (slotId: string, contribution: { id: string; payload: () => void }) => void }) {
+      ctx.contribute("example.listeners", { id: "late", payload() {} });
+    },
+    exportState() {
+      return { early: state.early, late: state.late };
+    },
+  });
+  const listeners = {
+    manifest: {
+      moduleId: "org.example.owner",
+      name: "owner",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      exposesSlots: [
+        {
+          slotId: "example.listeners",
+          contract: "example.listener",
+          contractVersion: "1.0.0",
+          kind: "subscriber",
+          required: false,
+        },
+      ],
+    },
+    implementation: {},
+  };
+  const desk = serviceDesk([{ slotId: "example.ask", contract: "example.answer" }]);
   const bump = {
     manifest: {
       moduleId: "org.example.bump",
@@ -816,31 +1233,258 @@ async function browserContextProof(backend: Parameters<typeof createCrossBackend
         ctx.contribute("example.ask", {
           id: "bump",
           payload() {
-            late.n += 7;
+            state.late = 7;
           },
         });
       },
     },
   };
-  const serving = await openJs([desk, bump, serviceEarly, serviceLate], "sim-browser-service");
-  const pendingService = captureSave(serving);
-  await serviceEntered;
-  const bumped = await callService(serving, "example.ask", undefined);
-  if (!bumped.ok) throw new Error(bumped.reason ?? "bump failed");
-  releaseService();
-  const served = await pendingService;
-  if (!served.ok) throw new Error(served.notices.map((item) => item.message).join("\n"));
-  await serving.shutdown();
+  let result: CompositionResult | undefined;
+  try {
+    result = await openJs(
+      [listeners, desk, bump, connectSaved(early, LISTENER_SLOT), connectSaved(late, LISTENER_SLOT)],
+      "sim-browser-service-nested",
+    );
+    live = result;
+    const captured = await captureSave(result);
+    if (!captured.ok) throw new Error(captured.notices.map((item) => item.message).join("\n"));
+    return {
+      early: sliceOf(captured.document, "org.example.early"),
+      late: sliceOf(captured.document, "org.example.late"),
+    };
+  } finally {
+    await finish(result);
+  }
+}
 
-  return {
-    importOwn,
-    foreignOk,
-    exportOwn,
-    exportRestore,
-    pairHeld: true,
-    pairA: sliceOf(shotA.document, "org.example.held"),
-    pairB: sliceOf(capturedB.document, "org.example.held"),
-    serviceEarly: sliceOf(served.document, "org.example.early"),
-    serviceLate: sliceOf(served.document, "org.example.late"),
+async function browserNestedDirectCall(
+  openJs: (packages: readonly unknown[], profileName: string) => Promise<CompositionResult>,
+  finish: (result: CompositionResult | undefined) => Promise<void>,
+) {
+  const state = { n: 0 };
+  let releaseStep = () => {};
+  const stepGate = new Promise<void>((resolve) => {
+    releaseStep = resolve;
+  });
+  let markStep = () => {};
+  const stepEntered = new Promise<void>((resolve) => {
+    markStep = resolve;
+  });
+  let releaseOuter = () => {};
+  const outerGate = new Promise<void>((resolve) => {
+    releaseOuter = resolve;
+  });
+  let markOuter = () => {};
+  const outerEntered = new Promise<void>((resolve) => {
+    markOuter = resolve;
+  });
+  let live: CompositionResult | undefined;
+  const desk = serviceDesk([
+    { slotId: "example.ask", contract: "example.ask" },
+    { slotId: "example.more", contract: "example.more" },
+  ]);
+  const box = savedModule("org.example.box", {
+    register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; payload: () => unknown }) => void }) {
+      ctx.keep(state);
+      ctx.contribute("example.ask", {
+        id: "ask",
+        async payload() {
+          markOuter();
+          await outerGate;
+          const host = live;
+          if (!host) throw new Error("missing composition");
+          const inner = await callService(host, "example.more", undefined);
+          if (!inner.ok) throw new Error(inner.reason ?? "inner failed");
+        },
+      });
+      ctx.contribute("example.more", {
+        id: "more",
+        payload() {
+          state.n = 5;
+        },
+      });
+    },
+    exportState() {
+      return { n: state.n };
+    },
+  });
+  const withSave = {
+    ...box,
+    manifest: { ...(box.manifest as Record<string, unknown>), save: { version: "1.0.0" }, connectsTo: [
+      { slot: "example.ask", contract: "example.ask/1" },
+      { slot: "example.more", contract: "example.more/1" },
+    ] },
   };
+  let result: CompositionResult | undefined;
+  try {
+    result = await openJs([desk, withSave], "sim-browser-service-direct");
+    live = result;
+    const stepping = runExclusive(
+      result,
+      async () => {
+        markStep();
+        await stepGate;
+      },
+      "step",
+    );
+    await stepEntered;
+    const outer = callService(result, "example.ask", undefined);
+    await outerEntered;
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone) throw new Error("Capture ran during the step and its service.");
+    releaseStep();
+    await stepping;
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone || state.n !== 0) throw new Error("Capture did not wait for the step-time service.");
+    releaseOuter();
+    const outerReport = await outer;
+    if (!outerReport.ok) throw new Error(outerReport.reason ?? "outer service failed");
+    const saved = await shot;
+    if (!saved.ok) throw new Error(saved.notices.map((item) => item.message).join("\n"));
+    return { payload: sliceOf(saved.document, "org.example.box") };
+  } finally {
+    await finish(result);
+  }
+}
+
+async function browserStepService(
+  backend: Parameters<typeof createCrossBackend>[0],
+  finish: (result: CompositionResult | undefined) => Promise<void>,
+) {
+  const state = { n: 0 };
+  let releaseStall = () => {};
+  const stallGate = new Promise<void>((resolve) => {
+    releaseStall = resolve;
+  });
+  let markStall = () => {};
+  const stallEntered = new Promise<void>((resolve) => {
+    markStall = resolve;
+  });
+  let releaseBump = () => {};
+  const bumpGate = new Promise<void>((resolve) => {
+    releaseBump = resolve;
+  });
+  let markBump = () => {};
+  const bumpEntered = new Promise<void>((resolve) => {
+    markBump = resolve;
+  });
+  const stall = {
+    manifest: {
+      moduleId: "org.example.sim-stall",
+      name: "stall",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      requires: [{ capability: "sim.core", version: "^1.0.0" }],
+      connectsTo: [{ slot: "sim.systems", contract: "sim.systems/1" }],
+    },
+    implementation: {
+      register(ctx: { contribute: (slotId: string, contribution: { id: string; order?: number; payload: (input: unknown) => unknown }) => void }) {
+        ctx.contribute("sim.systems", {
+          id: "stall",
+          order: 25,
+          payload(input: unknown) {
+            markStall();
+            return stallGate.then(() => input);
+          },
+        });
+      },
+    },
+  };
+  const desk = {
+    manifest: {
+      moduleId: "org.example.bump-desk",
+      name: "bump-desk",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      exposesSlots: [
+        {
+          slotId: "example.bump",
+          contract: "example.bump",
+          contractVersion: "1.0.0",
+          kind: "service",
+          required: false,
+        },
+      ],
+    },
+    implementation: {},
+  };
+  const bump = {
+    manifest: {
+      moduleId: "org.example.sim-bump",
+      name: "bump",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      save: { version: "1.0.0" },
+      connectsTo: [{ slot: "example.bump", contract: "example.bump/1" }],
+    },
+    implementation: {
+      register(ctx: { keep: (value: unknown) => void; contribute: (slotId: string, contribution: { id: string; payload: () => Promise<void> }) => void }) {
+        ctx.keep(state);
+        ctx.contribute("example.bump", {
+          id: "bump",
+          async payload() {
+            markBump();
+            await bumpGate;
+            state.n += 1;
+          },
+        });
+      },
+      exportState() {
+        return { n: state.n };
+      },
+    },
+  };
+  let result: CompositionResult | undefined;
+  try {
+    result = await compose([...packagesFor([...SIM_IDS]), stall, desk, bump], {
+      backend: createCrossBackend(backend),
+      policy: CROSS_POLICY,
+      profileName: "sim-browser-direct",
+    });
+    if (!result.runtimeActive) throw new Error(result.diagnostics.map((item) => item.message).join("\n"));
+    const planted = await seedSimulation(result, { id: "e1", x: 0, y: 0 });
+    if (!planted.ok) throw new Error(planted.reason);
+    const plantedNext = await seedSimulation(result, { id: "e2", x: 10, y: 0 });
+    if (!plantedNext.ok) throw new Error(plantedNext.reason);
+    const pending = advanceSimulation(result, { tick: 1, delta: 1, inputs: PROOF_DRIVES });
+    await stallEntered;
+    const bumping = callService(result, "example.bump", undefined);
+    await bumpEntered;
+    const reading = await callService(result, "sim.read", null);
+    if (!reading.ok) throw new Error(reading.reason ?? "read failed");
+    const readTick = reading.output && typeof reading.output === "object" && "tick" in reading.output
+      ? (reading.output as { tick?: unknown }).tick
+      : undefined;
+    if (typeof readTick !== "number") throw new Error("Simulation read did not return a tick.");
+    let captureDone = false;
+    const shot = captureSave(result).then((report) => {
+      captureDone = true;
+      return report;
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone) throw new Error("Capture ran during the open step.");
+    releaseStall();
+    const step = await pending;
+    if (!step.ok) throw new Error(step.reason);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (captureDone || state.n !== 0) throw new Error("Capture did not wait for the service that started during the step.");
+    releaseBump();
+    const bumped = await bumping;
+    if (!bumped.ok) throw new Error(bumped.reason ?? bumped.message ?? "bump failed");
+    const saved = await shot;
+    if (!saved.ok) throw new Error(saved.notices.map((item) => item.message).join("\n"));
+    return {
+      held: true,
+      readTick,
+      ledger: sliceOf(saved.document, "org.cgp.sim-ledger"),
+      bump: sliceOf(saved.document, "org.example.sim-bump"),
+    };
+  } finally {
+    await finish(result);
+  }
 }

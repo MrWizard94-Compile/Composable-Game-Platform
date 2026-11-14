@@ -37,6 +37,11 @@ export type SlotExposeDecl = {
   kind: SlotKind;
   description?: string;
   required: boolean;
+  /**
+   * Service slots only. False means the provider does not change exported state.
+   * Omitted means the service may change it. Other kinds cannot set it.
+   */
+  mutates?: boolean;
 };
 
 export type SaveDecl = {
@@ -457,7 +462,7 @@ function readSlots(
       continue;
     }
     for (const key of Object.keys(item)) {
-      if (!["slotId", "contract", "contractVersion", "kind", "description", "required"].includes(key)) {
+      if (!["slotId", "contract", "contractVersion", "kind", "description", "required", "mutates"].includes(key)) {
         errors.push(fieldError(`${path}.${key}`, `Unknown slot field "${key}".`, moduleId));
       }
     }
@@ -487,6 +492,16 @@ function readSlots(
         required = item.required;
       }
     }
+    let mutates: boolean | undefined;
+    if (item.mutates !== undefined) {
+      if (item.kind !== "service") {
+        errors.push(fieldError(`${path}.mutates`, "mutates is only valid on a service slot.", moduleId));
+      } else if (typeof item.mutates !== "boolean") {
+        errors.push(fieldError(`${path}.mutates`, "mutates must be a boolean.", moduleId));
+      } else {
+        mutates = item.mutates;
+      }
+    }
     if (slotId && contract && contractVersion && isSlotKind(item.kind)) {
       out.push({
         slotId,
@@ -495,6 +510,7 @@ function readSlots(
         kind: item.kind,
         description,
         required,
+        mutates,
       });
     }
   }

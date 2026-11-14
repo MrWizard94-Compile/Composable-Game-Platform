@@ -1,6 +1,6 @@
 import type { CompositionResult, ContributionRecord } from "./host.ts";
-import { contributionsFor, sessionOf } from "./host.ts";
-import { runInSaveZone } from "./save-zone.ts";
+import { contributionsFor, laneKindOf, noteDirectMutation, runExclusive, sessionOf } from "./host.ts";
+import { runInSaveZone, inDirectMutation, inLane, runInDirectMutation } from "./save-zone.ts";
 
 /**
  * Caller-initiated execution for three slot kinds.
@@ -17,6 +17,12 @@ import { runInSaveZone } from "./save-zone.ts";
  * `callService` calls the one provider of a service slot and returns its value,
  * including `undefined`. It does not pick among several providers.
  * A promise returned by a handler is awaited. A rejection is a throw.
+ * A service may change exported state unless the slot sets `mutates: false`.
+ * A mutating call joins the composition lane, except when the caller is already
+ * on that lane, and except when a step holds the lane. That second call runs
+ * now, and the next lane operation waits until it settles. A declared
+ * non-mutating call does not take the lane. The host does not prove the provider
+ * actually refrained from writing.
  *
  * None of these start a tick, and none of them change the composition.
  */
@@ -189,7 +195,19 @@ export async function runPipeline(result: CompositionResult, slotId: string, inp
   return { ok: true, slotId, output: value, stages };
 }
 
-export async function callService(result: CompositionResult, slotId: string, input: unknown): Promise<ServiceReport> {
+export function callService(result: CompositionResult, slotId: string, input: unknown): Promise<ServiceReport> {
+  const slot = result.slots.find((item) => item.slotId === slotId);
+  const mutates = slot?.kind === "service" && slot.mutates;
+  if (!mutates || inLane(result) || inDirectMutation(result)) return callServiceNow(result, slotId, input);
+  if (laneKindOf(result) === "step") {
+    const pending = runInDirectMutation(result, () => callServiceNow(result, slotId, input));
+    noteDirectMutation(result, pending);
+    return pending;
+  }
+  return runExclusive(result, () => callServiceNow(result, slotId, input), "service");
+}
+
+async function callServiceNow(result: CompositionResult, slotId: string, input: unknown): Promise<ServiceReport> {
   const reason = refuse(slotId, result, "service");
   if (reason) return { ok: false, slotId, reason };
 

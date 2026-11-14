@@ -6,6 +6,7 @@ import { contractRefMatches, parseContractRef, satisfies } from "./semver.ts";
 import { isExclusiveSlot, slotRequiresCallable } from "./slots.ts";
 import type { SlotKind } from "./slots.ts";
 import type { ExecutionBackend, ExecutionPolicy, ExecutionSession, HostGrant } from "./backend.ts";
+import { inLane, runInLane } from "./save-zone.ts";
 export type { ExecutionSession };
 import {
   CLOSED_POLICY,
@@ -134,6 +135,8 @@ export type ResolvedSlot = {
   contract: string;
   contractVersion: string;
   required: boolean;
+  /** Services only. True when a call may change exported state. */
+  mutates: boolean;
   description?: string;
   status: SlotStatus;
   /** Proposed providers, in deterministic order. Empty when the slot itself is in conflict. */
@@ -780,6 +783,7 @@ export async function compose(packages: readonly ModulePackage[], options: Compo
       contract: decl.contract,
       contractVersion: decl.contractVersion,
       required: decl.required,
+      mutates: decl.kind === "service" && decl.mutates !== false,
       description: decl.description,
       status,
       contributors,
@@ -1389,14 +1393,28 @@ export function sessionOf(result: CompositionResult): ExecutionSession {
 }
 
 const exclusiveLanes = new WeakMap<CompositionResult, Promise<unknown>>();
+const laneKinds = new WeakMap<CompositionResult, LaneKind>();
+const directMutations = new WeakMap<CompositionResult, Promise<void>>();
+
+export type LaneKind = "capture" | "restore" | "step" | "service";
 
 /**
  * One lane for a composition. Calls run in the order they were made.
  * A later call waits until the earlier one settles, including when it fails.
+ * A body that is already inside this composition's lane runs immediately.
+ * The next body also waits for a direct mutation that began during a step.
  */
-export function runExclusive<T>(result: CompositionResult, body: () => Promise<T>): Promise<T> {
+export function runExclusive<T>(
+  result: CompositionResult,
+  body: () => Promise<T>,
+  kind: LaneKind = "step",
+): Promise<T> {
+  if (inLane(result)) return body();
   const previous = exclusiveLanes.get(result) ?? Promise.resolve();
-  const run = previous.then(body, body);
+  const run = previous.then(
+    () => enterLane(result, kind, body),
+    () => enterLane(result, kind, body),
+  );
   exclusiveLanes.set(
     result,
     run.then(
@@ -1405,6 +1423,33 @@ export function runExclusive<T>(result: CompositionResult, body: () => Promise<T
     ),
   );
   return run;
+}
+
+async function enterLane<T>(result: CompositionResult, kind: LaneKind, body: () => Promise<T>): Promise<T> {
+  const pending = directMutations.get(result);
+  if (pending) await pending;
+  laneKinds.set(result, kind);
+  try {
+    return await runInLane(result, body);
+  } finally {
+    if (laneKinds.get(result) === kind) laneKinds.delete(result);
+  }
+}
+
+export function laneKindOf(result: CompositionResult): LaneKind | undefined {
+  return laneKinds.get(result);
+}
+
+/** A mutating service that ran during a step, outside the lane body. Capture waits for it. */
+export function noteDirectMutation(result: CompositionResult, pending: Promise<unknown>): void {
+  const previous = directMutations.get(result) ?? Promise.resolve();
+  const settled = previous.then(
+    () => pending.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  directMutations.set(result, settled);
 }
 
 export function backendOf(result: CompositionResult): ExecutionBackend {

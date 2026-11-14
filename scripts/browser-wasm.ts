@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 import { chromium } from "playwright";
 import { templateGuest, wasiGuest } from "../src/foundations/wasm-build.ts";
+import type { BrowserServiceAuthority } from "./browser-compose-entry.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -234,8 +235,7 @@ export type BrowserSimReport = {
     pairHeld: boolean;
     pairA: unknown;
     pairB: unknown;
-    serviceEarly: unknown;
-    serviceLate: unknown;
+    authority: BrowserServiceAuthority;
     subscriberOwn: string;
     subscriberLedger: unknown;
     subscriberLate: unknown;

@@ -14,6 +14,8 @@ Zero providers is a refusal: "no provider." Two or more providers are already an
 
 The same gates as `publish` and `runPipeline` apply: inactive runtime, quiesced runtime, missing slot, wrong kind, or a slot that is not `ok`.
 
+A service slot may declare `mutates: false`. The host then does not place that call on the composition's operation lane. Omitted, the service may change exported state, and `callService` uses that lane except in two cases. The caller is already on the lane, including the simulation runner and a save hook. Or a step currently holds the lane: the call runs immediately, a service it awaits is part of that same call, and the next lane operation waits for it. `sim.read` declares `mutates: false`. What a successful capture includes is [ADR 0005](0005-module-owned-saves.md).
+
 ## Consequences
 
 Query Core can own `queries.ask` without a host change. Name Index is the provider. Alias Index beside it makes the slot ambiguous and neither implementation is called.

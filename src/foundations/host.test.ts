@@ -67,6 +67,105 @@ describe("manifest validation", () => {
     assert.ok(result.errors.some((error) => error.message.includes("extra")));
   });
 
+  it("accepts mutates only as a boolean on a service", async () => {
+    const wrongKind = validateManifest(
+      moduleManifest("org.example.box", {
+        exposesSlots: [
+          {
+            slotId: "example.box",
+            contract: "example.box",
+            contractVersion: "1.0.0",
+            kind: "registry",
+            mutates: false,
+          },
+        ],
+      }),
+    );
+    assert.equal(wrongKind.ok, false);
+    if (wrongKind.ok) return;
+    assert.ok(wrongKind.errors.some((error) => error.message.includes("mutates is only valid on a service slot.")));
+
+    const wrongType = validateManifest(
+      moduleManifest("org.example.ask", {
+        exposesSlots: [
+          {
+            slotId: "example.ask",
+            contract: "example.ask",
+            contractVersion: "1.0.0",
+            kind: "service",
+            mutates: "no",
+          },
+        ],
+      }),
+    );
+    assert.equal(wrongType.ok, false);
+    if (wrongType.ok) return;
+    assert.ok(wrongType.errors.some((error) => error.message.includes("mutates must be a boolean.")));
+
+    const read = validateManifest(
+      moduleManifest("org.example.look", {
+        exposesSlots: [
+          {
+            slotId: "example.look",
+            contract: "example.look",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+            mutates: false,
+          },
+        ],
+      }),
+    );
+    assert.equal(read.ok, true);
+    if (!read.ok) return;
+    assert.equal(read.manifest.exposesSlots[0]?.mutates, false);
+
+    const implied = validateManifest(
+      moduleManifest("org.example.write", {
+        exposesSlots: [
+          {
+            slotId: "example.write",
+            contract: "example.write",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    );
+    assert.equal(implied.ok, true);
+    if (!implied.ok) return;
+    assert.equal(implied.manifest.exposesSlots[0]?.mutates, undefined);
+
+    const result = await compose([
+      pkg(
+        moduleManifest("org.example.desk", {
+          exposesSlots: [
+            {
+              slotId: "example.look",
+              contract: "example.look",
+              contractVersion: "1.0.0",
+              kind: "service",
+              required: false,
+              mutates: false,
+            },
+            {
+              slotId: "example.ask",
+              contract: "example.ask",
+              contractVersion: "1.0.0",
+              kind: "service",
+              required: false,
+            },
+          ],
+        }),
+      ),
+    ]);
+    assert.equal(result.runtimeActive, true, result.diagnostics.map((item) => item.message).join("\n"));
+    assert.equal(result.slots.find((item) => item.slotId === "example.look")?.mutates, false);
+    assert.equal(result.slots.find((item) => item.slotId === "example.ask")?.mutates, true);
+    assert.equal(result.slots.find((item) => item.slotId === "platform.systems")?.mutates, false);
+  });
+
   it("rejects a self-owned slot connection", async () => {
     const result = validateManifest(
       moduleManifest("org.example.loop", {
