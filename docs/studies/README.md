@@ -31,6 +31,11 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | Study | Subject | Status |
 |---|---|---|
 | [001 — Component host and capability model](wasmcloud/001-component-host-and-capability-model.md) | v2 host architecture, WIT contracts, host plugins, services, workload boundaries, and security model | Complete |
+| [002 — Component Model and WIT](wasmcloud/002-component-model-and-wit.md) | Typed interfaces, worlds, Canonical ABI, versioning, resources, async/cancellation, Node/browser portability, and CGP mapping | Complete |
+
+### Current ABI research direction
+
+The wasmCloud studies support a WIT compatibility prototype before finalizing M4. This is not an ABI migration decision. CGP's manifests, nested Slot graph, profile resolution, authorization, deterministic mutation authority, and persistence remain CGP-owned. The prototype must compare the current core-module ABI with WIT/Component Model execution in Wasmtime, Node, and browser-transpiled environments.
 
 ### Explicitly requested future studies
 
