@@ -26,6 +26,12 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | [002 — ModuleManager and native module lifecycle](o3de/002-module-manager-and-native-lifecycle.md) | Native library loading, staged initialization, ownership, component activation, and shutdown | Complete |
 | [003 — System Component services and dependency ordering](o3de/003-system-component-services-and-dependency-ordering.md) | Provided, required, optional-dependent, and incompatible services; entity and system-component activation order | Complete |
 
+### Bevy
+
+| Study | Subject | Status |
+|---|---|---|
+| [001 — Plugin architecture and application composition](bevy/001-plugin-architecture-and-application-composition.md) | Plugin lifecycle, plugin groups, compile-time feature modularity, App/SubApp composition, scheduling, and developer experience | Complete |
+
 ### wasmCloud
 
 | Study | Subject | Status |
