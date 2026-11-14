@@ -31,6 +31,7 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | Study | Subject | Status |
 |---|---|---|
 | [001 — Plugin architecture and application composition](bevy/001-plugin-architecture-and-application-composition.md) | Plugin lifecycle, plugin groups, compile-time feature modularity, App/SubApp composition, scheduling, and developer experience | Complete |
+| [002 — Plugin dependencies, SubApps, and dynamic extensibility](bevy/002-plugin-dependencies-subapps-and-dynamic-extensibility.md) | Plugin dependency limits, ECS schedule graphs, SubApp world boundaries and extraction, removal semantics, and function hotpatching | Complete |
 
 ### wasmCloud
 
@@ -49,7 +50,6 @@ These projects are queued for later comparative research:
 
 | Project | Planned focus |
 |---|---|
-| **Bevy** | Plugin architecture, modular engine features, application composition, and developer experience |
 | **Extism** | Embedded WebAssembly plugin hosting, host/guest SDKs, and plugin lifecycle |
 | **OSGi** | Bundle lifecycle, service registry, dependency resolution, versioning, and dynamic modularity |
 
