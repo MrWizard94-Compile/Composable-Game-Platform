@@ -31,7 +31,7 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | Study | Subject | Status |
 |---|---|---|
 | [001 — Plugin architecture and application composition](bevy/001-plugin-architecture-and-application-composition.md) | Plugin lifecycle, plugin groups, compile-time feature modularity, App/SubApp composition, scheduling, and developer experience | Complete |
-| [002 — Plugin dependencies, SubApps, and dynamic extensibility](bevy/002-plugin-dependencies-subapps-and-dynamic-extensibility.md) | Plugin dependency limits, ECS schedule graphs, SubApp world boundaries and extraction, removal semantics, and function hotpatching | Complete |
+| [002 — Plugin dependencies, SubApps, and dynamic extensibility](bevy/002-plugin-dependencies-subapps-and-dynamic-extensibility.md) | Plugin dependency limits, ECS schedule graphs, SubApp world boundaries and extraction, removal semantics, and function hotpatching | Complete |\n| [003 — ECS data ownership, scheduling guarantees, and state boundaries](bevy/003-ecs-data-ownership-scheduling-and-state-boundaries.md) | Typed access declarations, conflict detection, parallel execution, deferred commands, change detection, and deterministic-state implications | Complete |
 
 ### wasmCloud
 
