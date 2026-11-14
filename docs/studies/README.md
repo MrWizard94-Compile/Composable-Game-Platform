@@ -31,7 +31,14 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | Study | Subject | Status |
 |---|---|---|
 | [001 — Plugin architecture and application composition](bevy/001-plugin-architecture-and-application-composition.md) | Plugin lifecycle, plugin groups, compile-time feature modularity, App/SubApp composition, scheduling, and developer experience | Complete |
-| [002 — Plugin dependencies, SubApps, and dynamic extensibility](bevy/002-plugin-dependencies-subapps-and-dynamic-extensibility.md) | Plugin dependency limits, ECS schedule graphs, SubApp world boundaries and extraction, removal semantics, and function hotpatching | Complete |\n| [003 — ECS data ownership, scheduling guarantees, and state boundaries](bevy/003-ecs-data-ownership-scheduling-and-state-boundaries.md) | Typed access declarations, conflict detection, parallel execution, deferred commands, change detection, and deterministic-state implications | Complete |
+| [002 — Plugin dependencies, SubApps, and dynamic extensibility](bevy/002-plugin-dependencies-subapps-and-dynamic-extensibility.md) | Plugin dependency limits, ECS schedule graphs, SubApp world boundaries and extraction, removal semantics, and function hotpatching | Complete |
+| [003 — ECS data ownership, scheduling guarantees, and state boundaries](bevy/003-ecs-data-ownership-scheduling-and-state-boundaries.md) | Typed access declarations, conflict detection, parallel execution, deferred commands, change detection, and deterministic-state implications | Complete |
+
+### Extism
+
+| Study | Subject | Status |
+|---|---|---|
+| [001 — Plugin host architecture, guest SDKs, and lifecycle](extism/001-plugin-host-architecture-and-lifecycle.md) | Embedded Wasm runtime, Host SDK/PDK split, byte ABI, host functions, manifests, state, limits, pools, and failure behavior | Complete |
 
 ### wasmCloud
 
@@ -50,7 +57,7 @@ These projects are queued for later comparative research:
 
 | Project | Planned focus |
 |---|---|
-| **Extism** | Embedded WebAssembly plugin hosting, host/guest SDKs, and plugin lifecycle |
+| **Extism 002** | Guest state/reset semantics, host capability security, failure recovery, browser/runtime parity, and resource enforcement |
 | **OSGi** | Bundle lifecycle, service registry, dependency resolution, versioning, and dynamic modularity |
 
 ### Additional comparative subject
@@ -64,3 +71,5 @@ These projects are queued for later comparative research:
 - wasmCloud study 001 uses CGP commit **e6128a26ea41d09dbabb64bb7f48a1eb127e274e** as its implementation comparison baseline.
 
 Update baselines in later studies when the CGP architecture changes materially.
+
+- Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.
