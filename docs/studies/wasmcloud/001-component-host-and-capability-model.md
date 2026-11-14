@@ -128,6 +128,8 @@ Host plugins implement interfaces which workload components import. The current 
 
 That last point is especially important: sandboxing a shared plugin does not automatically stop it from leaking one workload's data to another. The plugin serves multiple callers, so its own authorization and state-partitioning logic matter.
 
+The source also defines a staged plugin lifecycle: host-level start; workload-level bind; per-component/service interface binding; a post-resolution callback; per-workload unbind; and host-level stop. Cleanup must be idempotent and tolerate partially completed binding, because a bind failure is rolled back through the unbind path. Plugins that push work into a workload resolve and retain dispatch targets after workload resolution. This is a useful example of lifecycle callbacks being aligned with actual binding phases rather than collapsed into a single initialize/shutdown pair.
+
 ### 4.3 Long-running service components
 
 A workload may contain at most one long-running service component in addition to its invocation-oriented components.
