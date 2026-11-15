@@ -69,6 +69,9 @@ Rules:
 - Empty directories are not package content.
 - The package root directory name is not part of package identity.
 - A release does not require source code, tests, build scripts, generated compiler inputs, node_modules, or a package manager installation step.
+- Format-v1 packages must not contain package.json or any node_modules directory. CGP package loading does not use npm package metadata or dependency resolution.
+- module.ts is reserved as authoring source and must not be present in a format-v1 release.
+- guest.json has no runtime meaning. An authoring tool may use it as a build input; the release builder should omit it unless the author deliberately includes it as an ordinary data file.
 - A release packer must construct a clean release directory. It must not copy an author's whole workspace by default.
 - Runtime package acquisition never executes install scripts, post-install hooks, or build commands.
 - A local package directory is the normative representation for format v1. This ADR does not select a ZIP, TAR, or other archive format.
@@ -213,6 +216,7 @@ For each path component:
 - Leading periods are allowed.
 - Backslash, colon, NUL, control characters, whitespace, Unicode, drive designators, and network/UNC path syntax are not permitted.
 - Windows device names are rejected case-insensitively, including CON, PRN, AUX, NUL, COM1 through COM9, and LPT1 through LPT9, including names followed by an extension.
+- A path component equal to node_modules, using ASCII case-insensitive comparison, is forbidden.
 - The ASCII-only rule also excludes the superscript-digit variants Windows recognizes for COM and LPT device names.
 - Paths that collide under ASCII case folding are rejected. For example, README.md and readme.md cannot coexist.
 - A file/directory path collision is rejected. A path cannot be both a regular file and an ancestor directory of another package file.
@@ -462,6 +466,7 @@ A format-v1 implementation must eventually demonstrate:
 19. Package-tree test vectors match independently implemented hashers.
 20. Re-registering a coordinate with the same packageTreeProfile/digest is idempotent, while a different digest is an immutable-release conflict.
 21. A JavaScript and Wasm package cannot both occupy the same moduleId/version coordinate with different package digests.
+22. A package containing package.json, a node_modules directory, or module.ts is refused.
 
 ## Deferred decisions
 
