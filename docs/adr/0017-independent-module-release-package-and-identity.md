@@ -1,11 +1,11 @@
 # ADR 0017 — Independent Module Release Package and Identity
 
-**Status:** Proposed — pending review and explicit acceptance. This proposal does not authorize implementation.  
+**Status:** Accepted — 2026-11-15.  
 **Date:** 2026-11-15  
 **Decision owners:** CGP maintainers  
 **Related accepted ADRs:** 0001, 0007, 0008, 0010, 0011, 0013  
 **Related research:** CGP Studies 001–003; Package Architecture Review 001  
-**Proposed implementation dependency:** None until this ADR is accepted.
+**Implementation status:** Not yet implemented.
 
 ## Context
 
@@ -32,7 +32,7 @@ The package contract must preserve these existing boundaries:
 - Foundations remains unaware of catalog URLs, content-store paths, archive formats, and package installation.
 - One moduleId plus exact semantic version must not silently identify different released bytes.
 
-## Decision proposed
+## Decision
 
 Adopt the following version-1 independent module release contract.
 
@@ -495,9 +495,9 @@ The following are explicitly outside this ADR:
 - [WebAssembly Core Specification 3.0, Candidate Recommendation Draft](https://www.w3.org/TR/wasm-core/) — current WebAssembly Core module standard; distinct from the CGP-specific cgp.abi/1 contract.
 - [SPDX Specification 3.0.1 — License expressions](https://spdx.github.io/spdx-spec/v3.0.1/annexes/spdx-license-expressions/) — normative license expression syntax. This ADR preserves the current ADR 0013 validation behavior.
 
-## Acceptance criteria for this ADR
+## Accepted decision scope
 
-This proposal is ready to be accepted when maintainers agree that:
+The maintainers accepted the following decisions:
 
 - manifest.json remains unchanged;
 - cgp-package.json formatVersion 1 and the two runtime descriptor shapes are sufficiently precise;
@@ -507,4 +507,4 @@ This proposal is ready to be accepted when maintainers agree that:
 - the immutable moduleId/version mapping is acceptable, including its multi-target limitation;
 - the stated compatibility and non-goals match the intended CGP boundaries.
 
-Until acceptance, this file is a decision proposal only. No source implementation, test, profile, lock, or existing ADR is changed by this document.
+This ADR records an accepted package contract. Acceptance does not mean implementation or conformance tests are complete. It does not authorize the deferred capabilities listed above, and it does not change existing accepted ADRs.
