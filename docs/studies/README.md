@@ -58,7 +58,6 @@ These projects are queued for later comparative research:
 
 | Project | Planned focus |
 |---|---|
-| **Extism 002** | Guest state/reset semantics, host capability security, failure recovery, browser/runtime parity, and resource enforcement |
 | **OSGi** | Bundle lifecycle, service registry, dependency resolution, versioning, and dynamic modularity |
 
 ### Additional comparative subject
