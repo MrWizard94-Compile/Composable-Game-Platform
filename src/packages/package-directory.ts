@@ -1,5 +1,5 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { inspectWasm } from "../foundations/wasm-backend.ts";
 import { validateManifest, type ModuleManifest } from "../foundations/manifest.ts";
@@ -150,7 +150,7 @@ function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string
 
 async function validateJavaScriptEntry(path: string): Promise<string[]> {
   try {
-    await build({
+    const result = await build({
       entryPoints: [path],
       absWorkingDir: resolve(path, ".."),
       bundle: true,
@@ -158,6 +158,7 @@ async function validateJavaScriptEntry(path: string): Promise<string[]> {
       platform: "node",
       format: "esm",
       logLevel: "silent",
+      metafile: true,
       plugins: [{
         name: "cgp-v1-static-import-policy",
         setup(builder) {
@@ -176,6 +177,10 @@ async function validateJavaScriptEntry(path: string): Promise<string[]> {
         },
       }],
     });
+    const entryOutput = Object.values(result.metafile?.outputs ?? {}).find((item) => item.entryPoint !== undefined);
+    if (!entryOutput?.exports.includes("implementation")) {
+      return ["module.mjs must provide the named export implementation."];
+    }
     return [];
   } catch (error) {
     if (error && typeof error === "object" && "errors" in error && Array.isArray(error.errors)) {
@@ -254,7 +259,3 @@ export async function validateReleasePackageDirectory(directory: string): Promis
   };
 }
 
-export function packagePathFromRoot(root: string, path: string): string {
-  const result = relative(resolve(root), resolve(root, path));
-  return result.split(sep).join("/");
-}
