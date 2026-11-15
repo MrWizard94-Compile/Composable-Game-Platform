@@ -37,21 +37,11 @@ npm ci
 npx playwright install chromium
 node --experimental-strip-types scripts/build-wasm-module.ts
 node --experimental-strip-types scripts/verify-wasm.ts
-node --experimental-strip-types --test \
-  src/foundations/semver.test.ts \
-  src/foundations/host.test.ts \
-  src/foundations/dispatch.test.ts \
-  src/foundations/save.test.ts \
-  src/foundations/authoring.test.ts \
-  src/foundations/profile.test.ts \
-  src/foundations/isolation.test.ts \
-  src/foundations/browser-isolation.test.ts \
-  src/foundations/browser-wasm.test.ts \
-  src/foundations/stress.test.ts \
-  src/modules/composition.test.ts \
-  src/modules/sim.test.ts
+npm test
 npx tsc -p tsconfig.foundations.json --noEmit
 node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
+node --experimental-strip-types scripts/check-module-package.ts examples/third-party-module
+node --experimental-strip-types scripts/check-module-package.ts examples/javascript-module
 node --experimental-strip-types scripts/browser-wasm.ts
 ```
 
@@ -66,10 +56,12 @@ node --experimental-strip-types src/modules/headless-demo.ts
 ## Layout
 
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
+- `src/packages` — Node-side release package validation and content identity tooling. It is not part of the Foundations runtime.
 - `src/modules/*` — packaged proofs. One folder per module.
 - `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
 - `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.
-- `examples/third-party-module` — a guest authored as `guest.json`. Another toolchain can omit that file and still be checked.
+- `examples/third-party-module` — a Wasm guest authored as `guest.json` and carrying a v1 release descriptor. Another toolchain can omit `guest.json` and still be checked.
+- `examples/javascript-module` — a self-contained JavaScript ESM v1 release example.
 - `profiles/*.json` — composition pins. A different packaged version refuses the chip. The host does not upgrade.
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.
