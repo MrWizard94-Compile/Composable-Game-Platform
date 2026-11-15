@@ -126,8 +126,11 @@ export function validatePackageDescriptor(input: unknown): DescriptorValidation 
 
 class StrictJsonParser {
   private index = 0;
+  private readonly source: string;
 
-  constructor(private readonly source: string) {}
+  constructor(source: string) {
+    this.source = source;
+  }
 
   parse(): unknown {
     this.skipWhitespace();
