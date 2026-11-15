@@ -274,7 +274,7 @@ function copyValidatedFiles(source: string, destination: string): void {
       count += 1;
       total += bytes.byteLength;
       const target = join(destination, ...path.split("/"));
-      ensureStoreDirectory(root, "objects/cgp.package-tree/1/sha256");
+      mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, bytes, { flag: "wx" });
     }
   }
