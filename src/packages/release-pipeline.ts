@@ -24,6 +24,16 @@ import { validateReleasePackageDirectory } from "./package-directory.ts";
 
 export type ReleaseRuntimeKind = "wasm-core" | "javascript-esm";
 
+export const RELEASE_RESOURCE_LIMITS = {
+  maxFiles: 4096,
+  maxFileBytes: 64 * 1024 * 1024,
+  maxTotalBytes: 128 * 1024 * 1024,
+  maxPathBytes: 240,
+  maxPathDepth: 16,
+} as const;
+
+type ResourceBudget = { files: number; totalBytes: number };
+
 export type BuildReleasePackageOptions = {
   sourceDirectory: string;
   releaseDirectory: string;
@@ -46,6 +56,7 @@ export type ReleaseSummary = {
   releaseDirectory: string;
   stagingDirectory: string;
   summaryFile: string;
+  resourceLimits: typeof RELEASE_RESOURCE_LIMITS;
 };
 
 export type ReleaseBuildResult = {
@@ -53,7 +64,7 @@ export type ReleaseBuildResult = {
   summaryPath: string;
 };
 
-const DEFAULT_INCLUDE = ["README.md", "LICENSE", "NOTICE", "docs", "assets", "data"];
+const DEFAULT_INCLUDE = ["README.md", "LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md", "COPYING", "docs", "assets", "data"];
 const BUILTIN_NODE_SPECIFIERS = new Set(
   builtinModules.flatMap((item) => [item, item.startsWith("node:") ? item : "node:" + item]),
 );
@@ -87,7 +98,36 @@ function assertPortableRelativePath(path: string): string {
   return normalized;
 }
 
-function copyAuthoringEntry(sourceRoot: string, relativePath: string, destinationRoot: string): string[] {
+function checkPathBudget(path: string): void {
+  if (Buffer.byteLength(path, "utf8") > RELEASE_RESOURCE_LIMITS.maxPathBytes) {
+    throw new Error("Package path exceeds the " + RELEASE_RESOURCE_LIMITS.maxPathBytes + "-byte path limit: " + path);
+  }
+  if (path.split("/").length > RELEASE_RESOURCE_LIMITS.maxPathDepth) {
+    throw new Error("Package path exceeds the " + RELEASE_RESOURCE_LIMITS.maxPathDepth + "-component depth limit: " + path);
+  }
+}
+
+function chargeFile(path: string, size: number, budget: ResourceBudget): void {
+  checkPathBudget(path);
+  if (size > RELEASE_RESOURCE_LIMITS.maxFileBytes) {
+    throw new Error("Package file exceeds the " + RELEASE_RESOURCE_LIMITS.maxFileBytes + "-byte file limit: " + path);
+  }
+  if (budget.files + 1 > RELEASE_RESOURCE_LIMITS.maxFiles) {
+    throw new Error("Package exceeds the " + RELEASE_RESOURCE_LIMITS.maxFiles + "-file limit.");
+  }
+  if (budget.totalBytes + size > RELEASE_RESOURCE_LIMITS.maxTotalBytes) {
+    throw new Error("Package exceeds the " + RELEASE_RESOURCE_LIMITS.maxTotalBytes + "-byte total content limit.");
+  }
+  budget.files += 1;
+  budget.totalBytes += size;
+}
+
+function copyAuthoringEntry(
+  sourceRoot: string,
+  relativePath: string,
+  destinationRoot: string,
+  budget: ResourceBudget,
+): string[] {
   const path = assertPortableRelativePath(relativePath);
   const sourcePath = join(sourceRoot, ...path.split("/"));
   const destinationPath = join(destinationRoot, ...path.split("/"));
@@ -101,12 +141,13 @@ function copyAuthoringEntry(sourceRoot: string, relativePath: string, destinatio
   if (info.isDirectory()) {
     const copied: string[] = [];
     for (const entry of readdirSync(sourcePath).sort()) {
-      copied.push(...copyAuthoringEntry(sourceRoot, path + "/" + entry, destinationRoot));
+      copied.push(...copyAuthoringEntry(sourceRoot, path + "/" + entry, destinationRoot, budget));
     }
     return copied;
   }
   if (!info.isFile()) throw new Error("Authoring input is not a regular file: " + path);
 
+  chargeFile(path, info.size, budget);
   const bytes = readFileSync(sourcePath);
   const afterRead = lstatSync(sourcePath);
   if (afterRead.isSymbolicLink() || !afterRead.isFile() ||
@@ -124,6 +165,7 @@ function copyAuthoringEntry(sourceRoot: string, relativePath: string, destinatio
 
 function collectPackageFiles(directory: string): PackageFile[] {
   const files: PackageFile[] = [];
+  const budget: ResourceBudget = { files: 0, totalBytes: 0 };
   function visit(current: string, prefix: string): void {
     for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
@@ -132,7 +174,10 @@ function collectPackageFiles(directory: string): PackageFile[] {
       const info = lstatSync(absolute);
       if (info.isSymbolicLink()) throw new Error("Staging snapshot contains a symbolic link: " + path);
       if (info.isDirectory()) visit(absolute, path);
-      else if (info.isFile()) files.push({ path, bytes: new Uint8Array(readFileSync(absolute)) });
+      else if (info.isFile()) {
+        chargeFile(path, info.size, budget);
+        files.push({ path, bytes: new Uint8Array(readFileSync(absolute)) });
+      }
       else throw new Error("Staging snapshot contains a special filesystem entry: " + path);
     }
   }
@@ -227,6 +272,9 @@ function validateAuthoringManifest(source: string): { moduleId: string; version:
   if (manifestInfo.isSymbolicLink() || !manifestInfo.isFile()) {
     throw new Error("manifest.json must be a regular file, not a symbolic link.");
   }
+  if (manifestInfo.size > RELEASE_RESOURCE_LIMITS.maxFileBytes) {
+    throw new Error("manifest.json exceeds the configured per-file size limit.");
+  }
   const parsed = parseStrictJson(new Uint8Array(readFileSync(manifestPath)), "manifest.json");
   if (!parsed.ok) throw new Error(parsed.error);
   const checked = validateManifest(parsed.value);
@@ -245,6 +293,9 @@ function validateRuntimeInputs(source: string, runtime?: ReleaseRuntimeKind): Re
     if (info.isSymbolicLink() || !info.isFile()) {
       throw new Error("Runtime authoring input must be a regular file, not a symbolic link: " + path);
     }
+    if (info.size > RELEASE_RESOURCE_LIMITS.maxFileBytes) {
+      throw new Error("Runtime authoring input exceeds the configured per-file size limit: " + path);
+    }
   }
   if (runtime) {
     if (runtime === "javascript-esm" && !hasTs) throw new Error("javascript-esm requires an authoring module.ts.");
@@ -257,8 +308,8 @@ function validateRuntimeInputs(source: string, runtime?: ReleaseRuntimeKind): Re
   return hasWasm ? "wasm-core" : "javascript-esm";
 }
 
-function copySnapshot(source: string, destination: string): void {
-  for (const file of collectPackageFiles(source)) {
+function copySnapshot(files: readonly PackageFile[], destination: string): void {
+  for (const file of files) {
     const target = join(destination, ...file.path.split("/"));
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, file.bytes, { flag: "wx" });
@@ -300,13 +351,16 @@ export async function buildReleasePackage(
 
   try {
     const manifestBytes = readFileSync(join(source, "manifest.json"));
+    const budget: ResourceBudget = { files: 0, totalBytes: 0 };
+    chargeFile("manifest.json", manifestBytes.byteLength, budget);
     writeFileSync(join(releaseTemp, "manifest.json"), manifestBytes, { flag: "wx" });
 
     if (runtime === "wasm-core") {
-      const copied = copyAuthoringEntry(source, "module.wasm", releaseTemp);
+      const copied = copyAuthoringEntry(source, "module.wasm", releaseTemp, budget);
       if (copied.length !== 1) throw new Error("Could not copy module.wasm.");
     } else {
       await buildJavaScriptArtifact(join(source, "module.ts"), join(releaseTemp, "module.mjs"));
+      chargeFile("module.mjs", lstatSync(join(releaseTemp, "module.mjs")).size, budget);
     }
 
     const requestedInclude = [...new Set([...DEFAULT_INCLUDE, ...(options.include ?? [])])]
@@ -320,11 +374,12 @@ export async function buildReleasePackage(
           item === "package.json" || item === "node_modules") {
         throw new Error("Reserved paths cannot be added with --include: " + item);
       }
-      copyAuthoringEntry(source, item, releaseTemp);
+      copyAuthoringEntry(source, item, releaseTemp, budget);
     }
 
     writeDescriptor(releaseTemp, runtime);
 
+    const releaseFiles = collectPackageFiles(releaseTemp);
     const releaseValidation = await validateReleasePackageDirectory(releaseTemp);
     if (!releaseValidation.ok) {
       throw new Error("Release directory validation failed:\n" + releaseValidation.errors.join("\n"));
@@ -334,14 +389,13 @@ export async function buildReleasePackage(
       throw new Error("Release identity changed during packaging.");
     }
 
-    copySnapshot(releaseTemp, stagingTemp);
+    copySnapshot(releaseFiles, stagingTemp);
     freezeSnapshot(stagingTemp);
 
     const stagedValidation = await validateReleasePackageDirectory(stagingTemp);
     if (!stagedValidation.ok) {
       throw new Error("Staging snapshot validation failed:\n" + stagedValidation.errors.join("\n"));
     }
-    const releaseFiles = collectPackageFiles(releaseTemp);
     const stagedFiles = collectPackageFiles(stagingTemp);
     const releaseTreeDigest = computePackageTreeDigest(releaseFiles);
     const stagedTreeDigest = computePackageTreeDigest(stagedFiles);
@@ -363,6 +417,7 @@ export async function buildReleasePackage(
       releaseDirectory: release,
       stagingDirectory: staging,
       summaryFile: summaryPath,
+      resourceLimits: RELEASE_RESOURCE_LIMITS,
     };
 
     if (existsSync(release) || existsSync(staging) || existsSync(summaryPath)) {

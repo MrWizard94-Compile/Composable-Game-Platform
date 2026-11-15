@@ -122,7 +122,7 @@ The packer selects exactly one authoring entrypoint (`module.ts` or `module.wasm
 
 The release directory is copied to a separate staging directory. The staged tree is made read-only, validated using the package validator, and re-hashed. The staged and release tree/artifact digests must agree before publication. The machine-readable `cgp.release-summary/1` JSON file is written beside the staging directory by default, never inside the package. Existing output paths are refused rather than overwritten. Read-only permissions prevent accidental edits; they are not a security boundary against the directory owner or a privileged process.
 
-The staging directory is the handoff candidate for a future catalog/store registration step. This command does not register, publish, install, archive, sign, or authenticate a release.
+The staging directory is the handoff candidate for a future catalog/store registration step. The local packer currently enforces these documented resource ceilings: 4,096 regular files, 64 MiB per file, 128 MiB total file content, 240 UTF-8 bytes per relative path, and 16 path components. Exceeding any limit refuses the build without truncation. These are local tool limits, not new normative package-format limits. This command does not register, publish, install, archive, sign, or authenticate a release.
 
 ## Example packages
 

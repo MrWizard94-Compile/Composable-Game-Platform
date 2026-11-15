@@ -59,6 +59,11 @@ if (invoked) {
     console.log("Package tree: " + summary.packageTreeProfile + " " + summary.packageTreeDigest);
     console.log("Artifact: " + summary.artifactDigest);
     console.log("Files (" + summary.files.length + "): " + summary.files.join(", "));
+    console.log("Limits: " + summary.resourceLimits.maxFiles + " files, " +
+      summary.resourceLimits.maxFileBytes + " bytes/file, " +
+      summary.resourceLimits.maxTotalBytes + " bytes total, " +
+      summary.resourceLimits.maxPathBytes + " path bytes, " +
+      summary.resourceLimits.maxPathDepth + " path components.");
     console.log("Release: " + summary.releaseDirectory);
     console.log("Immutable staging snapshot: " + summary.stagingDirectory);
     console.log("Release summary: " + result.summaryPath);
