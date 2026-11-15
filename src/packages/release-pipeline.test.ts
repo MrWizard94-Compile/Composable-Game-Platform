@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -49,6 +50,8 @@ test("JavaScript authoring project builds a clean release and immutable validate
   assert.equal(result.summary.moduleId, "org.example.starter");
   assert.equal(result.summary.version, "1.0.0");
   assert.equal(result.summary.runtime, "javascript-esm");
+  assert.equal(result.summary.resourceLimits.maxFiles, 4096);
+  assert.equal(result.summary.resourceLimits.maxFileBytes, 64 * 1024 * 1024);
   assert.match(result.summary.packageTreeDigest, /^sha256:[0-9a-f]{64}$/);
   assert.match(result.summary.artifactDigest, /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(result.summary.files, ["cgp-package.json", "manifest.json", "module.mjs"]);
@@ -84,7 +87,7 @@ test("WebAssembly authoring project is staged without executing the guest", asyn
   assert.match(result.summary.packageTreeDigest, /^sha256:[0-9a-f]{64}$/);
 });
 
-test("runtime ambiguity and unsafe explicit include paths are refused", async (t) => {
+test("unsafe include paths and resource-limit violations are refused", async (t) => {
   const root = fixture(t);
   const source = join(repositoryRoot, "examples/starter-module");
   await assert.rejects(
@@ -95,5 +98,23 @@ test("runtime ambiguity and unsafe explicit include paths are refused", async (t
       include: ["../outside"],
     }),
     /relative paths|parent component/,
+  );
+
+  const oversizedPathSource = join(root, "long-path-source");
+  mkdirSync(oversizedPathSource);
+  writeFileSync(join(oversizedPathSource, "manifest.json"),
+    readFileSync(join(source, "manifest.json")));
+  writeFileSync(join(oversizedPathSource, "module.ts"),
+    "export const implementation = Object.freeze({});\n");
+  const longName = "x".repeat(241);
+  writeFileSync(join(oversizedPathSource, longName), "x");
+  await assert.rejects(
+    buildReleasePackage({
+      sourceDirectory: oversizedPathSource,
+      releaseDirectory: join(root, "long-release"),
+      stagingDirectory: join(root, "long-staging"),
+      include: [longName],
+    }),
+    /240-byte path limit/,
   );
 });
