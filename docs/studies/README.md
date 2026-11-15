@@ -75,7 +75,7 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 
 | ADR | Subject | Status |
 |---|---|---|
-| [0017 — Independent module release package and identity](../adr/0017-independent-module-release-package-and-identity.md) | Proposed package descriptor, JavaScript/Wasm release artifacts, portable path profile, canonical package-tree digest, and immutable module release coordinates | Accepted — implementation pending |
+| [0017 — Independent module release package and identity](../adr/0017-independent-module-release-package-and-identity.md) | Accepted v1 package descriptor, JavaScript/Wasm release artifacts, portable path profile, canonical package-tree digest, and immutable module release coordinates | Accepted — implementation pending |
 
 This table tracks both proposals and accepted decisions. Acceptance records the architecture contract; it does not imply that implementation or conformance tests are complete.
 
