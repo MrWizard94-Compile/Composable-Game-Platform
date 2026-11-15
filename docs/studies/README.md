@@ -72,6 +72,14 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 
 The synthesis recommends **CGP Study 001 — Independent Module Package, Artifact, and SDK Contract** as the next focused research slice. This is a research priority, not an approved implementation change.
 
+### CGP package and SDK design
+
+| Study | Subject | Status |
+|---|---|---|
+| [001 — Independent module package, artifact, and SDK contract](cgp/001-independent-module-package-artifact-and-sdk-contract.md) | Proposed package format, JavaScript/Wasm artifacts, SDK boundaries, artifact digests, profile locks, local catalog, provenance, and validation security | Complete (proposed contract; ADR review pending) |
+
+This study recommends a local package/lock workflow before a public registry. It does not change accepted ADRs or implementation.
+
 ## CGP baselines
 
 - O3DE studies 001 and 002 used CGP commit **37739db60e77e69369e002bfa5d54ce4159c2438** as their implementation comparison baseline.
