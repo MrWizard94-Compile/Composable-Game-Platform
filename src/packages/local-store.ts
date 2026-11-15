@@ -423,6 +423,25 @@ export function readLocalCatalog(storeDirectory: string): LocalCatalog {
   return readCatalog(root);
 }
 
+/** Resolves an exact immutable coordinate and verifies its stored bytes before returning the object path. */
+export async function resolveLocalPackage(
+  storeDirectory: string,
+  moduleId: string,
+  version: string,
+): Promise<{ entry: LocalCatalogEntry; objectDirectory: string } | undefined> {
+  const root = storeRoot(storeDirectory);
+  const catalog = readCatalog(root);
+  const entry = catalog.entries.find((item) => item.moduleId === moduleId && item.version === version);
+  if (!entry) return undefined;
+  const path = assertStoreObjectParents(root, entry.packageTreeDigest);
+  const result = await validateReleasePackageDirectory(path);
+  if (!result.ok) throw new Error("Stored package failed validation: " + result.errors.join("; "));
+  if (JSON.stringify(toCatalogEntry(result.package)) !== JSON.stringify(entry)) {
+    throw new Error("Stored object metadata or digests disagree with the catalog record.");
+  }
+  return { entry, objectDirectory: path };
+}
+
 /** Revalidates every catalog-referenced object and compares it to its catalog record. */
 export async function verifyLocalStore(storeDirectory: string): Promise<StoreVerification> {
   const root = storeRoot(storeDirectory);

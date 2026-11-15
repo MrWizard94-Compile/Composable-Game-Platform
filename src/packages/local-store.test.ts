@@ -18,6 +18,7 @@ import { buildReleasePackage } from "./release-pipeline.ts";
 import {
   readLocalCatalog,
   registerStagedPackage,
+  resolveLocalPackage,
   verifyLocalStore,
 } from "./local-store.ts";
 
@@ -76,6 +77,9 @@ test("registers a staged package as a read-only content object and catalog recor
   assert.equal(catalog.schema, "cgp.local-catalog/1");
   assert.equal(catalog.entries.length, 1);
   assert.equal(catalog.entries[0]!.packageTreeDigest, result.entry.packageTreeDigest);
+  const resolved = await resolveLocalPackage(store, "org.example.starter", "1.0.0");
+  assert.equal(resolved?.objectDirectory, result.objectDirectory);
+  assert.equal(await resolveLocalPackage(store, "org.example.missing", "1.0.0"), undefined);
   const verification = await verifyLocalStore(store);
   assert.deepEqual(verification, { checked: 1, valid: 1, errors: [] });
 });

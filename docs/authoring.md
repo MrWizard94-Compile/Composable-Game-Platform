@@ -41,6 +41,8 @@ node --experimental-strip-types scripts/check-module-store.ts --store ./out/cgp-
 
 One exclusive store lock serializes writers. A pre-existing lock causes a fail-closed error. If a process crashes and leaves a stale lock, first verify no store operation is active, then manually remove `.cgp-store.lock`. The tool will not guess whether a writer is dead. An interrupted operation may leave an unreferenced object; it will never intentionally add a catalog record before the object is complete and verified. Automatic garbage collection is not implemented.
 
+Package tooling can read the catalog with `readLocalCatalog(storeDirectory)`, or resolve and verify one exact coordinate with `resolveLocalPackage(storeDirectory, moduleId, version)` from `src/packages/local-store.ts`. This does not load or execute the module; it returns the verified object directory for a later installation/runtime layer.
+
 Stored package files are read-only to prevent accidental edits. This is not a security boundary against the store owner or an administrator. Verification detects changed bytes but does not authenticate publishers or make JavaScript safe.
 
 The packer, validator, catalog, and content store are local Node-side package tooling, not an installer, archive importer, remote registry, publisher, signature verifier, or runtime loader. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.

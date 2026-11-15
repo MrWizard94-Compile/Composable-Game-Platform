@@ -77,7 +77,7 @@ Atomic rename is used only within the same store filesystem. Temporary objects a
 
 Stored objects are revalidated from disk when registered as existing content and when explicitly verified. Read-only permissions prevent accidental mutation but are not a security boundary against the store owner, administrator, or privileged process. A digest detects changed bytes; it does not authenticate a publisher or make JavaScript safe.
 
-A catalog record is not proof that the current object still matches. Consumers that need integrity assurance must verify the object before use. The initial implementation provides explicit store verification; automatic verification on every lookup is deferred until a consumer/installer contract exists.
+A catalog record is not proof that the current object still matches. Consumers that need integrity assurance must verify the object before use. The initial implementation provides explicit whole-store verification and exact-coordinate resolution that verifies the selected object before returning its path. A future consumer may use that verified path, but resolution does not load or execute module code.
 
 ### Resource limits
 
