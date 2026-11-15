@@ -22,9 +22,11 @@
     "src/foundations/wasm-worker-browser.mjs",
     "src/modules/**/*.ts",
     "src/packages/**/*.ts",
+    "src/packages/**/*.ts",
     "scripts/verify-wasm.ts",
     "scripts/build-wasm-module.ts",
     "scripts/check-wasm-module.ts",
+    "scripts/check-module-package.ts",
     "scripts/check-module-package.ts",
     "scripts/browser-wasm.ts",
     "scripts/browser-compose-entry.ts"
