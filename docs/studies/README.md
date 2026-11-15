@@ -70,4 +70,5 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 
 Update baselines in later studies when the CGP architecture changes materially.
 
-- Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.\n- OSGi study 001 uses CGP commit **37e3191f268d281a4163107f5e5d2498d4a77fa8** as its implementation comparison baseline.
+- Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.
+- OSGi study 001 uses CGP commit **37e3191f268d281a4163107f5e5d2498d4a77fa8** as its implementation comparison baseline.
