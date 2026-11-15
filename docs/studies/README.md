@@ -31,6 +31,7 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | Study | Subject | Status |
 |---|---|---|
 | [001 — Bundle lifecycle, service registry, and dynamic modularity](osgi/001-bundle-lifecycle-services-and-dynamic-modularity.md) | Bundle identity and lifecycle, requirement-capability resolution, package wiring, dynamic services, Declarative Services, update/refresh, and isolation boundaries | Complete |
+| [002 — Declarative Services, dynamic binding, and concurrency](osgi/002-declarative-services-dynamic-binding-and-concurrency.md) | Reference cardinality and policies, service scopes, component activation, concurrent rebinding, Felix SCR scheduling, and churn tests | Complete |
 
 ### Bevy
 
