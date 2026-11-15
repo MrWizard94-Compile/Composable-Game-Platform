@@ -38,7 +38,7 @@ For source-level studies, prefer immutable commit links over links to a moving d
 
 | Study | Subject | Status |
 |---|---|---|
-| [001 — Plugin host architecture, guest SDKs, and lifecycle](extism/001-plugin-host-architecture-and-lifecycle.md) | Embedded Wasm runtime, Host SDK/PDK split, byte ABI, host functions, manifests, state, limits, pools, and failure behavior | Complete |
+| [001 — Plugin host architecture, guest SDKs, and lifecycle](extism/001-plugin-host-architecture-and-lifecycle.md) | Embedded Wasm runtime, Host SDK/PDK split, byte ABI, host functions, manifests, state, limits, pools, and failure behavior | Complete |\n| [002 — State persistence, failure recovery, and runtime security](extism/002-state-persistence-failure-recovery-and-runtime-security.md) | Reset semantics, guest state lifetime, unhealthy pool instances, HTTP allowlists and redirects, timeout boundaries, and CGP conformance tests | Complete |
 
 ### wasmCloud
 
