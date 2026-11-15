@@ -248,6 +248,22 @@ function objectDirectory(root: string, digest: string): string {
 }
 
 
+function removeTemporaryDirectory(directory: string): void {
+  if (!existsByLstat(directory)) return;
+  function thaw(current: string): void {
+    for (const child of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, child.name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) thaw(path);
+      try { chmodSync(path, info.isDirectory() ? 0o755 : 0o644); } catch {}
+    }
+    try { chmodSync(current, 0o755); } catch {}
+  }
+  thaw(directory);
+  rmSync(directory, { recursive: true, force: true });
+}
+
 function copyValidatedFiles(source: string, destination: string): void {
   let count = 0;
   let total = 0;
@@ -395,10 +411,7 @@ export async function registerStagedPackage(
         freeze(temporary);
         renameSync(temporary, target);
       } catch (error) {
-        try {
-          chmodSync(temporary, 0o755);
-        } catch {}
-        rmSync(temporary, { recursive: true, force: true });
+        removeTemporaryDirectory(temporary);
         throw error;
       }
     }
