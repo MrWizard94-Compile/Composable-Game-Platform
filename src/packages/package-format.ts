@@ -4,6 +4,14 @@ export const PACKAGE_FORMAT_VERSION = 1 as const;
 export const PACKAGE_PATH_PROFILE = "cgp.package-path/1" as const;
 export const PACKAGE_TREE_PROFILE = "cgp.package-tree/1" as const;
 
+export const PACKAGE_RESOURCE_LIMITS = {
+  maxFiles: 4096,
+  maxFileBytes: 64 * 1024 * 1024,
+  maxTotalBytes: 128 * 1024 * 1024,
+  maxPathBytes: 240,
+  maxPathDepth: 16,
+} as const;
+
 export type WasmCorePackageDescriptor = {
   formatVersion: 1;
   runtime: {

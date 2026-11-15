@@ -21,7 +21,29 @@ The starter folder above is an in-repository authoring example; it is not a publ
 - Existing release, staging, and summary paths are never overwritten. Choose new paths for every build. The release directory remains editable; the staging snapshot is the frozen handoff artifact.
 - Check a release directory or staging snapshot with `node --experimental-strip-types scripts/check-module-package.ts <package-dir>`.
 
-The packer and validator are local Node-side tooling, not an installer, catalog, archive importer, registry, or publisher. Read-only filesystem permissions are a guard against accidental edits, not cryptographic immutability against an owner or privileged process. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.
+## Local content store
+
+Register a validated staging snapshot in a local content-addressed store:
+
+~~~sh
+node --experimental-strip-types scripts/register-module-package.ts \\
+  --staging ./out/staging/starter-1.0.0 \\
+  --store ./out/cgp-store
+~~~
+
+The store keeps exact package files under `objects/cgp.package-tree/1/sha256/<digest>/` and records immutable release coordinates in `catalog.json`. The package-tree profile is part of the object key. Re-registering identical content is idempotent; a different package digest for the same `moduleId@version` is rejected. The catalog is strict JSON and does not contain source URLs, timestamps, publisher claims, or trust decisions.
+
+Verify all catalog-referenced objects:
+
+~~~sh
+node --experimental-strip-types scripts/check-module-store.ts --store ./out/cgp-store
+~~~
+
+One exclusive store lock serializes writers. A pre-existing lock causes a fail-closed error. If a process crashes and leaves a stale lock, first verify no store operation is active, then manually remove `.cgp-store.lock`. The tool will not guess whether a writer is dead. An interrupted operation may leave an unreferenced object; it will never intentionally add a catalog record before the object is complete and verified. Automatic garbage collection is not implemented.
+
+Stored package files are read-only to prevent accidental edits. This is not a security boundary against the store owner or an administrator. Verification detects changed bytes but does not authenticate publishers or make JavaScript safe.
+
+The packer, validator, catalog, and content store are local Node-side package tooling, not an installer, archive importer, remote registry, publisher, signature verifier, or runtime loader. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.
 
 ## Public entry
 

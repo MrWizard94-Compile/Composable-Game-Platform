@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { build } from "esbuild";
 import { validateManifest } from "../foundations/manifest.ts";
 import {
+  PACKAGE_RESOURCE_LIMITS,
   computeArtifactDigest,
   computePackageTreeDigest,
   parseStrictJson,
@@ -25,15 +26,7 @@ import { validateReleasePackageDirectory } from "./package-directory.ts";
 
 export type ReleaseRuntimeKind = "wasm-core" | "javascript-esm";
 
-export const RELEASE_RESOURCE_LIMITS = {
-  maxFiles: 4096,
-  maxFileBytes: 64 * 1024 * 1024,
-  maxTotalBytes: 128 * 1024 * 1024,
-  maxPathBytes: 240,
-  maxPathDepth: 16,
-} as const;
-
-type ResourceBudget = { files: number; totalBytes: number };
+export const RELEASE_RESOURCE_LIMITS = PACKAGE_RESOURCE_LIMITS;
 
 export type BuildReleasePackageOptions = {
   sourceDirectory: string;
