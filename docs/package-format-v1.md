@@ -55,7 +55,7 @@ The validator does not rewrite either JSON file. Its exact original bytes remain
 
 The initial path profile is `cgp.package-path/1`.
 
-Paths are relative, use `/`, and contain only ASCII letters, digits, `.`, `_`, and `-` in each component. Empty components, `.` and `..`, trailing periods, reserved Windows device names, `node_modules`, `package.json`, and `module.ts` are forbidden. Paths that collide after ASCII case folding or that imply a file is also a parent directory are rejected.
+Paths are relative, use `/`, and contain only ASCII letters, digits, `.`, `_`, and `-` in each component. Empty components, `.` and `..`, trailing periods, reserved Windows device names, `node_modules`, `package.json`, and `module.ts` are forbidden. Paths that collide after ASCII case folding, use inconsistent casing for the same directory/component prefix, or imply a file is also a parent directory are rejected.
 
 A local package tree contains regular files only. Symbolic links and special filesystem entries are rejected. Empty directories are ignored. A hard link is represented only by the bytes read from the file; link identity is not included in the digest.
 
