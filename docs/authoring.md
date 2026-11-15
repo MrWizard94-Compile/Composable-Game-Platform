@@ -39,7 +39,7 @@ Verify all catalog-referenced objects:
 node --experimental-strip-types scripts/check-module-store.ts --store ./out/cgp-store
 ~~~
 
-One exclusive store lock serializes writers. A pre-existing lock causes a fail-closed error. If a process crashes and leaves a stale lock, first verify no store operation is active, then manually remove `.cgp-store.lock`. The tool will not guess whether a writer is dead. An interrupted operation may leave an unreferenced object; it will never intentionally add a catalog record before the object is complete and verified. Automatic garbage collection is not implemented.
+One exclusive store lock serializes writers. A pre-existing lock causes a fail-closed error. If a process crashes and leaves a stale lock, first verify no store operation is active, then manually remove `.cgp-store.lock`. The tool will not guess whether a writer is dead. An interrupted operation may leave an unreferenced object or a `.cgp-object-*` temporary directory. Neither is catalog-visible. Verify no writer is active before manually inspecting/removing stale temporary directories. The tool never intentionally adds a catalog record before the object is complete and verified. Automatic garbage collection and temp recovery are not implemented.
 
 Package tooling can read the catalog with `readLocalCatalog(storeDirectory)`, or resolve and verify one exact coordinate with `resolveLocalPackage(storeDirectory, moduleId, version)` from `src/packages/local-store.ts`. This does not load or execute the module; it returns the verified object directory for a later installation/runtime layer.
 

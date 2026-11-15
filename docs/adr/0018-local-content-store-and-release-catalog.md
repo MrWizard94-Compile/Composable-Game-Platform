@@ -65,7 +65,7 @@ Entries are sorted by moduleId then exact version using ordinal string ordering.
 7. Write a complete new catalog to a unique temporary file, flush it, and atomically rename it over `catalog.json`.
 8. Release the lock.
 
-If a process stops after object publication but before catalog replacement, an unreferenced object may remain. This is safe: no catalog entry points to partial content, and a later registration of the same release can verify and reuse it. Automatic garbage collection is deliberately deferred.
+If a process stops while copying, an unreferenced `.cgp-object-*` temporary directory may remain. If it stops after object publication but before catalog replacement, an unreferenced content object may remain. Neither is catalog-visible. A later registration of the same release can verify and reuse a completed object; incomplete temporary directories require manual inspection/removal after confirming no writer is active. Automatic garbage collection and temp recovery are deliberately deferred.
 
 ### Locking and crash behavior
 
