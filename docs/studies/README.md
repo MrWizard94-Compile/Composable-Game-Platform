@@ -78,8 +78,9 @@ The synthesis recommends **CGP Study 001 — Independent Module Package, Artifac
 |---|---|---|
 | [001 — Independent module package, artifact, and SDK contract](cgp/001-independent-module-package-artifact-and-sdk-contract.md) | Proposed package format, JavaScript/Wasm artifacts, SDK boundaries, artifact digests, profile locks, local catalog, provenance, and validation security | Complete (proposed contract; ADR review pending) |
 | [002 — Package identity, reproducible archives, and lock semantics](cgp/002-package-identity-reproducible-archives-and-lock-semantics.md) | Artifact, package-tree, and archive digests; deterministic package identity; lock semantics; immutable releases; and safe archive acquisition | Complete (proposed contract; ADR review pending) |
+| [003 — Local catalog, content store, leases, and garbage collection](cgp/003-local-catalog-content-store-leases-and-garbage-collection.md) | Content-addressed local storage, transactional registration, concurrent access, project pins, active composition leases, recoverable GC, offline operation, and future mirror trust | Complete (proposed contract; ADR review pending) |
 
-Study 001 recommends a local package/lock workflow before a public registry. Study 002 recommends defining a canonical package directory and package-tree digest before selecting an archive transport. Neither study changes accepted ADRs or implementation.
+Study 001 recommends a local package/lock workflow before a public registry. Study 002 defines a proposed canonical package-tree identity independent of archive transport. Study 003 defines a proposed local catalog and content lifecycle outside Foundations. None of these studies changes accepted ADRs or implementation.
 
 ## CGP baselines
 
