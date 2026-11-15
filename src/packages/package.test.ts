@@ -136,7 +136,15 @@ describe("CGP module package format v1", () => {
 
   it("rejects case-fold collisions and file/directory prefix collisions", () => {
     assert.ok(validatePackagePaths(["README.md", "readme.md"]).length > 0);
+    assert.ok(validatePackagePaths(["Assets/a.txt", "assets/b.txt"]).some((item) => item.includes("case collision")));
     assert.ok(validatePackagePaths(["docs", "docs/readme.md"]).some((item) => item.includes("parent directory")));
+  });
+
+  it("matches the standard raw artifact SHA-256 vector", () => {
+    assert.equal(
+      computeArtifactDigest(utf8("abc")),
+      "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
   });
 
   it("matches the published empty, single-file, and multiple-file package-tree vectors", () => {
