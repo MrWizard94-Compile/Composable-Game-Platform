@@ -28,6 +28,8 @@ export type ReleaseRuntimeKind = "wasm-core" | "javascript-esm";
 
 export const RELEASE_RESOURCE_LIMITS = PACKAGE_RESOURCE_LIMITS;
 
+type ResourceBudget = { files: number; totalBytes: number };
+
 export type BuildReleasePackageOptions = {
   sourceDirectory: string;
   releaseDirectory: string;
