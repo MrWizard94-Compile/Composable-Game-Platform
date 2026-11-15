@@ -175,6 +175,7 @@ describe("CGP module package format v1", () => {
 
   it("changes the package-tree digest for documentation while preserving the artifact digest", () => {
     const artifact = utf8("export const implementation = {};\n");
+    const artifactDigestBefore = computeArtifactDigest(artifact);
     const before = computePackageTreeDigest([
       { path: "module.mjs", bytes: artifact },
       { path: "README.md", bytes: utf8("before\n") },
@@ -183,8 +184,9 @@ describe("CGP module package format v1", () => {
       { path: "module.mjs", bytes: artifact },
       { path: "README.md", bytes: utf8("after\n") },
     ]);
+    const artifactDigestAfter = computeArtifactDigest(artifact);
     assert.notEqual(before, after);
-    assert.equal(computeArtifactDigest(artifact), computeArtifactDigest(artifact));
+    assert.equal(artifactDigestBefore, artifactDigestAfter);
   });
 
   it("refuses invalid path sets and non-byte file bodies before hashing", () => {
