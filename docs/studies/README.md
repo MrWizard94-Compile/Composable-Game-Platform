@@ -64,6 +64,14 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 
 - **WebAssembly Component Model:** typed interfaces, component composition, and cross-language interoperability. The wasmCloud study identifies this as the next focused ABI investigation for CGP.
 
+### Cross-architecture synthesis
+
+| Synthesis | Subject | Status |
+|---|---|---|
+| [001 — Cross-architecture findings and design boundaries](synthesis/001-cross-architecture-synthesis.md) | Comparative findings across O3DE, Bevy, wasmCloud, Extism, and OSGi; CGP invariants, gaps, and research priorities | Complete |
+
+The synthesis recommends **CGP Study 001 — Independent Module Package, Artifact, and SDK Contract** as the next focused research slice. This is a research priority, not an approved implementation change.
+
 ## CGP baselines
 
 - O3DE studies 001 and 002 used CGP commit **37739db60e77e69369e002bfa5d54ce4159c2438** as their implementation comparison baseline.
@@ -75,3 +83,4 @@ Update baselines in later studies when the CGP architecture changes materially.
 - Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.
 - OSGi study 001 uses CGP commit **37e3191f268d281a4163107f5e5d2498d4a77fa8** as its implementation comparison baseline.
 - OSGi study 003 uses CGP commit **d24266e79a91036f0e08b66c2a3040f0326d6dbb** as its implementation comparison baseline. The commits since OSGi study 001 changed research documentation only; no CGP implementation code changed.
+- Cross-architecture synthesis 001 uses CGP commit **4b87d37084a7c5b30fa642763edc5e497452d6d3** as its repository baseline. It synthesizes the 13 completed comparative studies and does not change CGP implementation or ADRs.
