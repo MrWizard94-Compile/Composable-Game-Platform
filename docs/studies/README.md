@@ -71,13 +71,13 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 | [001 — Cross-architecture findings and design boundaries](synthesis/001-cross-architecture-synthesis.md) | Comparative findings across O3DE, Bevy, wasmCloud, Extism, and OSGi; CGP invariants, gaps, and research priorities | Complete |
 | [002 — CGP package architecture review and implementation boundary](synthesis/002-cgp-package-architecture-review-and-implementation-boundary.md) | Cross-study reconciliation of CGP package Studies 001–003; ADR compatibility; package, save, and runtime identities; storage/lease/GC refinements; and first implementation milestone | Complete (proposed decisions; ADR review pending) |
 
-### ADR proposals
+### ADR proposals and decisions
 
 | ADR | Subject | Status |
 |---|---|---|
-| [0017 — Independent module release package and identity](../adr/0017-independent-module-release-package-and-identity.md) | Proposed package descriptor, JavaScript/Wasm release artifacts, portable path profile, canonical package-tree digest, and immutable module release coordinates | Proposed — pending review; not accepted |
+| [0017 — Independent module release package and identity](../adr/0017-independent-module-release-package-and-identity.md) | Proposed package descriptor, JavaScript/Wasm release artifacts, portable path profile, canonical package-tree digest, and immutable module release coordinates | Accepted — implementation pending |
 
-ADR proposals are decision drafts, not accepted architecture or implementation authorization.
+This table tracks both proposals and accepted decisions. Acceptance records the architecture contract; it does not imply that implementation or conformance tests are complete.
 
 ### CGP package and SDK design
 
