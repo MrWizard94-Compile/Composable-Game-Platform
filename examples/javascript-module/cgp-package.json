@@ -1,0 +1,9 @@
+{
+  "formatVersion": 1,
+  "runtime": {
+    "kind": "javascript-esm",
+    "entry": "module.mjs",
+    "export": "implementation",
+    "executionTrust": "trusted-in-process"
+  }
+}
