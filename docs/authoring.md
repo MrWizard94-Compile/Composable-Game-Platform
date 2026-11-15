@@ -4,6 +4,17 @@ Copy [examples/starter-module](../examples/starter-module) for JavaScript, or [e
 
 The browser console can check a manifest. It does not load an implementation by importing it. Loading code is `compose()`.
 
+## Independent release packages
+
+The starter folder above is an in-repository authoring example; it is not a publishable format-v1 release. A released module has a built runtime artifact and a separate `cgp-package.json` descriptor. The accepted contract and digest rules are documented in [Package Format v1](package-format-v1.md) and [ADR 0017](adr/0017-independent-module-release-package-and-identity.md).
+
+- A WebAssembly release contains `manifest.json`, `cgp-package.json`, and `module.wasm`.
+- A JavaScript release contains `manifest.json`, `cgp-package.json`, and a self-contained `module.mjs` exporting `implementation`.
+- A release contains one runtime artifact. The format-v1 package validator never imports JavaScript or instantiates WebAssembly.
+- Check a release directory with `node --experimental-strip-types scripts/check-module-package.ts <package-dir>`. The checker reports the immutable package-tree digest and the selected artifact digest.
+
+The current checker validates an existing directory. It is not yet a staging/packaging tool, installer, catalog, or package publisher. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.
+
 ## Public entry
 
 Import from `src/foundations/index.ts` only. That file is also the package export `"."`. Other files under `src/foundations` are internal and can change. `compose` does not run module code under the default policy. The in-process backend grants filesystem, network, and os, and it cannot enforce limits. Pass `trust: "trusted-in-process"` or `policy: IN_PROCESS_POLICY` to opt in. Pass `backend` to replace it. `createWasmBackend()` is the Node isolate. `createCrossBackend(isolate)` sends WebAssembly bytes to that isolate and JavaScript hooks to the in-process backend. `CROSS_POLICY` allows the in-process grants and sets a time and memory limit the isolate actually enforces. JavaScript on that same composition is still not limited.
