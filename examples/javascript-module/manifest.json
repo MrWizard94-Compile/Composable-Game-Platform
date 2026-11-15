@@ -1,0 +1,7 @@
+{
+  "moduleId": "org.example.javascript-starter",
+  "name": "JavaScript Starter",
+  "version": "1.0.0",
+  "moduleApi": ">=1.0.0 <2.0.0",
+  "permissions": []
+}
