@@ -241,6 +241,8 @@ describe("CGP module package format v1", () => {
       'import "some-package"; export const implementation = {};',
       'export const result = import("node:fs"); export const implementation = {};',
       'const fs = require("node:fs"); export const implementation = {};',
+      'import "node:not-a-real-builtin"; export const implementation = {};',
+      'export const other = {};',
     ];
     for (const source of cases) {
       const temp = tempPackage({
