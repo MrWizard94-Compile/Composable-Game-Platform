@@ -182,8 +182,8 @@ For profile version 1:
 - Windows reserved device names are rejected, including CON, PRN, AUX, NUL, COM1 through COM9, and LPT1 through LPT9, including names with extensions.
 - Two paths that collide under ASCII case folding are rejected. For example, README.md and readme.md cannot coexist.
 - Duplicate archive entries and duplicate normalized paths are rejected. No parser-specific “first entry wins” or “last entry wins” behavior is allowed.
-- All package entries are regular files. Symbolic links, hard links, devices, FIFOs, sockets, and other special entries are rejected.
-- Directory structure is implied by file paths. Empty directories are not package content.
+- All package leaf entries are regular files. Symbolic links, hard links, devices, FIFOs, sockets, and other special entries are rejected.
+- Directory structure is implied by file paths. Empty directories are not package content. If a selected archive format permits explicit directory records, those records are structural markers only: their paths must be valid and implied by file entries, and they do not contribute to the digest.
 - No path is silently repaired or normalized. An invalid path is rejected rather than rewritten.
 
 This profile is intentionally restrictive. The current release package shape uses simple names such as manifest.json, cgp-package.json, module.wasm, module.mjs, README.md, and LICENSE. Restricting paths does not restrict Unicode text inside the files. A later profile can widen filename support with a carefully specified Unicode normalization and collision policy.
@@ -204,7 +204,7 @@ One candidate encoding is:
 
 ~~~text
 SHA256(
-  UTF8("CGP-PACKAGE-TREE\\0v1")
+  UTF8("CGP-PACKAGE-TREE" || NUL || "v1")
   || UINT64_BE(fileCount)
   || for each regular file sorted by path bytes:
        UINT64_BE(pathByteLength)
@@ -493,14 +493,16 @@ The lock should contain:
 - the exact Foundations API version used for resolution;
 - every selected moduleId and exact module version;
 - packageTreeDigest for every released package;
-- runtime kind, entrypoint, ABI, and artifactDigest;
+- every execution-selecting field from the package descriptor, including runtime kind, entrypoint, Wasm ABI or JavaScript named export and trust classification, plus artifactDigest;
 - any additional host/backend compatibility data that is part of package selection rather than runtime execution policy.
+
+The lock's runtime summary must be derived from cgp-package.json and checked against it. It must not create a second independently editable runtime declaration.
 
 The lock should not require a single permanent archive URL. Retrieval location belongs to the catalog. A lock may optionally contain a preferred catalog identifier or locator hint, but it must not treat that location as the content identity.
 
 ### 6.3 Why pin both package tree and artifact?
 
-The packageTreeDigest proves the complete release package is identical. The artifactDigest explicitly identifies the executable bytes selected by the package descriptor.
+The packageTreeDigest proves the complete release package is identical. The artifactDigest explicitly identifies the executable bytes selected by the package descriptor. For JavaScript, the runtime summary must also preserve the named export and trusted-in-process classification; for WebAssembly, it must preserve the ABI identifier.
 
 Because the executable is inside the package tree, the artifact digest is technically redundant as a check against package alteration. It remains useful as a named runtime identity and makes it possible to:
 
@@ -647,6 +649,8 @@ Where an archive descriptor exists:
 This follows the useful OCI descriptor sequence: verify expected size and byte digest before trusting content from an untrusted source, and avoid heavy processing before digest verification.
 
 ### 7.3 Validate archive entries before extraction
+
+The archive format profile must define entries relative to the package root, with no variable enclosing directory name. The archive parser may accept explicit directory records only as structural markers; it must validate them against the same path rules and must not preserve empty directories.
 
 The archive parser and extractor must reject:
 
