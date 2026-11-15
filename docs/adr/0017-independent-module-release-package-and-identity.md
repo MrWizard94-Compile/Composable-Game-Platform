@@ -137,8 +137,9 @@ Rules:
 - entry is exactly the root-relative filename module.mjs in format v1.
 - export is exactly the named export implementation.
 - executionTrust is exactly trusted-in-process.
-- The entrypoint is a self-contained ESM artifact. Relative imports of other package files and undeclared third-party package imports are not part of format v1.
-- Runtime dependencies from third parties must be bundled into module.mjs. Node built-in modules may be imported explicitly; doing so does not reduce the trusted-in-process grants.
+- The entrypoint is a self-contained ESM artifact. Relative imports, bare third-party package imports, and dynamic import() are not part of format v1.
+- Static imports may target Node built-in modules using explicit node: specifiers. Doing so does not reduce the trusted-in-process grants.
+- Runtime dependencies from third parties must be bundled into module.mjs.
 - The CGP loader does not resolve packages from an ambient application node_modules tree.
 - The module is loaded only after the caller has selected the trusted-in-process execution path.
 - The package format is not a JavaScript sandbox and does not make filesystem, network, or operating-system access enforceable.
@@ -445,7 +446,7 @@ A format-v1 implementation must eventually demonstrate:
 3. Unknown descriptor fields and unknown runtime kinds are refused.
 4. Wrong entrypoint names, wrong export names, wrong trust strings, and unsupported Wasm ABI identifiers are refused.
 5. manifest.moduleId and manifest.version are the release coordinate and are not duplicated in the package descriptor.
-6. A JavaScript package with relative imports or undeclared third-party imports fails static package validation.
+6. A JavaScript package with relative imports, bare third-party imports, or dynamic import() fails static package validation.
 7. A JavaScript static validator does not dynamically import or evaluate module.mjs.
 8. A Wasm static validator checks the binary and import/export declarations without instantiating a guest.
 9. A runtime smoke test is a separate deliberate operation and uses the selected backend/policy.
