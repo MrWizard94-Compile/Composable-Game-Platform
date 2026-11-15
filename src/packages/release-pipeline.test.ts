@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -116,5 +117,16 @@ test("unsafe include paths and resource-limit violations are refused", async (t)
       include: [longName],
     }),
     /240-byte path limit/,
+  );
+
+  const sourceAlias = join(root, "source-alias");
+  symlinkSync(source, sourceAlias, "dir");
+  await assert.rejects(
+    buildReleasePackage({
+      sourceDirectory: source,
+      releaseDirectory: join(sourceAlias, "release-inside-source"),
+      stagingDirectory: join(root, "symlink-stage"),
+    }),
+    /overlap/,
   );
 });

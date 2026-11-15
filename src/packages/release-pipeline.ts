@@ -6,12 +6,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { builtinModules, isBuiltin } from "node:module";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { build } from "esbuild";
 import { validateManifest } from "../foundations/manifest.ts";
 import {
@@ -343,6 +344,19 @@ export async function buildReleasePackage(
   mkdirSync(dirname(release), { recursive: true });
   mkdirSync(dirname(staging), { recursive: true });
   mkdirSync(dirname(summaryPath), { recursive: true });
+
+  // Resolve existing parent-directory symlinks before creating any output.
+  const sourceCanonical = realpathSync(source);
+  const releaseCanonical = resolve(realpathSync(dirname(release)), basename(release));
+  const stagingCanonical = resolve(realpathSync(dirname(staging)), basename(staging));
+  const summaryCanonical = resolve(realpathSync(dirname(summaryPath)), basename(summaryPath));
+  assertDisjointDirectories(sourceCanonical, releaseCanonical, stagingCanonical);
+  if (isWithin(sourceCanonical, summaryCanonical) || isWithin(summaryCanonical, sourceCanonical) ||
+      isWithin(releaseCanonical, summaryCanonical) || isWithin(summaryCanonical, releaseCanonical) ||
+      isWithin(stagingCanonical, summaryCanonical) || isWithin(summaryCanonical, stagingCanonical)) {
+    throw new Error("Resolved release, staging, summary, and source paths must not overlap.");
+  }
+
   const releaseTemp = mkdtempSync(join(dirname(release), ".cgp-release-"));
   const stagingTemp = mkdtempSync(join(dirname(staging), ".cgp-stage-"));
   let releasePublished = false;
