@@ -299,6 +299,7 @@ export function validatePackagePaths(paths: readonly string[]): string[] {
   const errors: string[] = [];
   const exact = new Set<string>();
   const folded = new Set<string>();
+  const componentSpellings = new Map<string, string>();
 
   for (const path of paths) {
     if (typeof path !== "string" || path.length === 0) {
