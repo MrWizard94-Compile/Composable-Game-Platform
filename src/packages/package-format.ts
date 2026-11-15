@@ -341,6 +341,20 @@ export function validatePackagePaths(paths: readonly string[]): string[] {
       errors.push("Package path \"" + path + "\" collides with another path.");
       continue;
     }
+    let prefix = "";
+    let componentCollision = false;
+    for (const part of components) {
+      prefix = prefix ? prefix + "/" + part : part;
+      const foldedPrefix = prefix.toLowerCase();
+      const previousSpelling = componentSpellings.get(foldedPrefix);
+      if (previousSpelling !== undefined && previousSpelling !== prefix) {
+        errors.push("Package path \"" + path + "\" has a directory or component case collision with \"" + previousSpelling + "\".");
+        componentCollision = true;
+        break;
+      }
+      componentSpellings.set(foldedPrefix, prefix);
+    }
+    if (componentCollision) continue;
     exact.add(path);
     folded.add(key);
   }
