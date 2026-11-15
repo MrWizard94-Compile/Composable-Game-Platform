@@ -32,6 +32,7 @@ For source-level studies, prefer immutable commit links over links to a moving d
 |---|---|---|
 | [001 — Bundle lifecycle, service registry, and dynamic modularity](osgi/001-bundle-lifecycle-services-and-dynamic-modularity.md) | Bundle identity and lifecycle, requirement-capability resolution, package wiring, dynamic services, Declarative Services, update/refresh, and isolation boundaries | Complete |
 | [002 — Declarative Services, dynamic binding, and concurrency](osgi/002-declarative-services-dynamic-binding-and-concurrency.md) | Reference cardinality and policies, service scopes, component activation, concurrent rebinding, Felix SCR scheduling, and churn tests | Complete |
+| [003 — Constraint resolution, class-space consistency, and revision refresh](osgi/003-constraint-resolution-class-space-consistency-and-revision-refresh.md) | Requirement/capability constraint solving, Java package uses constraints, resolver diagnostics, old revisions, removal-pending wiring, and dependent-closure refresh | Complete |
 
 ### Bevy
 
@@ -73,3 +74,4 @@ Update baselines in later studies when the CGP architecture changes materially.
 
 - Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.
 - OSGi study 001 uses CGP commit **37e3191f268d281a4163107f5e5d2498d4a77fa8** as its implementation comparison baseline.
+- OSGi study 003 uses CGP commit **d24266e79a91036f0e08b66c2a3040f0326d6dbb** as its implementation comparison baseline. The commits since OSGi study 001 changed research documentation only; no CGP implementation code changed.
