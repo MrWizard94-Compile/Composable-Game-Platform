@@ -1,4 +1,5 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { isBuiltin } from "node:module";
 import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { inspectWasm } from "../foundations/wasm-backend.ts";
@@ -164,7 +165,7 @@ async function validateJavaScriptEntry(path: string): Promise<string[]> {
         setup(builder) {
           builder.onResolve({ filter: /.*/ }, (args) => {
             if (args.kind === "entry-point") return undefined;
-            if (args.kind === "import-statement" && args.path.startsWith("node:")) {
+            if (args.kind === "import-statement" && args.path.startsWith("node:") && isBuiltin(args.path)) {
               return { path: args.path, external: true };
             }
             return {
