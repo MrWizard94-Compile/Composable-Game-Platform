@@ -23,6 +23,8 @@ import {
 } from "./local-store.ts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const starterManifestBytes = readFileSync(join(repositoryRoot, "examples/starter-module/manifest.json"));
+const starterModuleBytes = readFileSync(join(repositoryRoot, "examples/starter-module/module.ts"));
 
 function makeWritable(directory: string): void {
   if (!existsSync(directory)) return;
@@ -46,10 +48,8 @@ function fixture(t: { after(callback: () => void): void }): string {
 async function buildStarter(root: string, suffix: string, readme?: string): Promise<string> {
   const source = join(root, "source-" + suffix);
   mkdirSync(source);
-  writeFileSync(join(source, "manifest.json"),
-    readFileSync(join(repositoryRoot, "examples/starter-module/manifest.json")));
-  writeFileSync(join(source, "module.ts"),
-    readFileSync(join(repositoryRoot, "examples/starter-module/module.ts")));
+  writeFileSync(join(source, "manifest.json"), starterManifestBytes);
+  writeFileSync(join(source, "module.ts"), starterModuleBytes);
   if (readme !== undefined) writeFileSync(join(source, "README.md"), readme);
   const staging = join(root, "stage-" + suffix);
   await buildReleasePackage({
