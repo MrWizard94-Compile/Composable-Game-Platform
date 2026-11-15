@@ -26,6 +26,12 @@ For source-level studies, prefer immutable commit links over links to a moving d
 | [002 — ModuleManager and native module lifecycle](o3de/002-module-manager-and-native-lifecycle.md) | Native library loading, staged initialization, ownership, component activation, and shutdown | Complete |
 | [003 — System Component services and dependency ordering](o3de/003-system-component-services-and-dependency-ordering.md) | Provided, required, optional-dependent, and incompatible services; entity and system-component activation order | Complete |
 
+### OSGi
+
+| Study | Subject | Status |
+|---|---|---|
+| [001 — Bundle lifecycle, service registry, and dynamic modularity](osgi/001-bundle-lifecycle-services-and-dynamic-modularity.md) | Bundle identity and lifecycle, requirement-capability resolution, package wiring, dynamic services, Declarative Services, update/refresh, and isolation boundaries | Complete |
+
 ### Bevy
 
 | Study | Subject | Status |
@@ -52,14 +58,6 @@ For source-level studies, prefer immutable commit links over links to a moving d
 
 The wasmCloud studies support a WIT compatibility prototype before finalizing M4. This is not an ABI migration decision. CGP's manifests, nested Slot graph, profile resolution, authorization, deterministic mutation authority, and persistence remain CGP-owned. The prototype must compare the current core-module ABI with WIT/Component Model execution in Wasmtime, Node, and browser-transpiled environments.
 
-### Explicitly requested future studies
-
-These projects are queued for later comparative research:
-
-| Project | Planned focus |
-|---|---|
-| **OSGi** | Bundle lifecycle, service registry, dependency resolution, versioning, and dynamic modularity |
-
 ### Additional comparative subject
 
 - **WebAssembly Component Model:** typed interfaces, component composition, and cross-language interoperability. The wasmCloud study identifies this as the next focused ABI investigation for CGP.
@@ -72,4 +70,4 @@ These projects are queued for later comparative research:
 
 Update baselines in later studies when the CGP architecture changes materially.
 
-- Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.
+- Extism study 001 uses CGP commit **2777971d99b5dfaa26f2e7898ba6b11f471c99de** as its implementation comparison baseline.\n- OSGi study 001 uses CGP commit **37e3191f268d281a4163107f5e5d2498d4a77fa8** as its implementation comparison baseline.
