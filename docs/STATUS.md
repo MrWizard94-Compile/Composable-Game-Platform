@@ -39,7 +39,9 @@ Milestone 1 through an isolated WebAssembly guest. Working, not a game.
 - Hot module reloading.
 - Enforced permissions for in-process JavaScript. A declared permission is still not a boundary there. The WASM backend does enforce its import allow-list. A cross composition does not make the JavaScript half limited.
 - Save migrations beyond a major-version refusal. No disk format beyond the JSON document.
-- Runtime installation or execution of releases resolved from the local content store. The project lock resolver verifies immutable package identities and returns local paths only; the console Composition view still composes bundled proof packages.
+- Persistent project installation/retention pins, package-store garbage collection, reader leases, archive acquisition/import, remote registries, publisher signatures, and provenance verification.
+- JavaScript ESM and mixed-runtime project activation. JavaScript remains trusted-in-process code and is not sandboxed.
+- Browser-console activation of stored packages. The console Composition view still composes bundled proof packages. The separate Node API `src/packages/wasm-activation.ts` provides one-shot activation of exact Wasm-only project locks after complete package snapshot verification; it uses the existing `wasm-isolate` backend and caller-owned shutdown.
 
 ## Provisional
 
