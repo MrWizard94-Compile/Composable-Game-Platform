@@ -1,7 +1,7 @@
 {
   "profileId": "org.example.local-project",
   "name": "Local Store Example",
-  "description": "A small project profile that pins one WebAssembly package and one trusted JavaScript package from the local content store.",
+  "description": "Example project pins one Wasm package and one trusted JavaScript package.",
   "modules": [
     {
       "moduleId": "org.example.beacon",
