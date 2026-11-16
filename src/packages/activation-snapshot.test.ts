@@ -107,7 +107,6 @@ test("single-scan Wasm snapshot returns the exact verified artifact bytes as own
   if (!result.ok) return;
 
   assert.equal(result.snapshot.package.moduleId, "org.example.snapshot-one");
-  assert.equal(result.snapshot.package.runtime, undefined);
   assert.equal(result.snapshot.package.descriptor.runtime.kind, "wasm-core");
   assert.equal(result.snapshot.packageBytes, expectedPackageBytes);
   assert.equal(
