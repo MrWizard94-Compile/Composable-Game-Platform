@@ -36,7 +36,7 @@ Module, Slot, Capability, Composition, Lifecycle, Package, Registry, Storage, Wa
 ## Interface components
 - `tokens.css` contains framework-independent color, spacing, radius, shadow, and focus tokens.
 - `components.css` contains an optional baseline for panels, buttons, controls, badges, and navigation states.
-- `ui-preview.svg` is a static reference composition, not a screenshot of an implemented CGP application.
+- `ui-preview.svg` is a static reference composition, not a screenshot of an implemented CGP application. Counts and activity rows shown in it are illustrative placeholders, not live platform data.
 
 Import `tokens.css` alone when an application already has its own components. Import `components.css` only when its baseline controls are useful. No JavaScript framework is required.
 
