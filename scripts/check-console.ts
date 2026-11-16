@@ -98,9 +98,10 @@ try {
   await page.getByRole("heading", { name: "Local package store" }).waitFor();
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').waitFor();
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').click();
+  await page.getByText("org.example.beacon", { exact: true }).waitFor();
   await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').waitFor();
   await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').click();
-  await page.locator(".data-table tbody tr").nth(1).waitFor();
+  await page.getByText("org.example.starter", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Verify all objects" }).click();
   await page.getByText("All catalog-referenced package objects passed verification.").waitFor();
   assert.equal(await page.locator(".data-table tbody tr").count(), 2);
