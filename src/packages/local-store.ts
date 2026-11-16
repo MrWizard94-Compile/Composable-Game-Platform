@@ -1026,9 +1026,13 @@ export async function addLocalRetentionPin(storeDirectory:string,digest:string):
   return withLocalStoreWriteLock(storeDirectory,async root=>{
     const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
     assertObjectReady(lifecycle,digest);
+    const objectPath=assertStoreObjectParents(root,digest),info=lstatSync(objectPath);
+    const now=new Date().toISOString(),existing=lifecycleObject(lifecycle,digest);
+    const createdAt=existing?.createdAt??new Date(info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs).toISOString();
+    if(!existing)setObjectReady(lifecycle,digest,now,createdAt);
     await verifyPackageObjectForDigest(root,digest,catalog);
-    const added=setLocalPin(lifecycle,digest,new Date().toISOString());
-    if(added)writeStoreLifecycleAtomically(root,lifecycle);
+    const added=setLocalPin(lifecycle,digest,now);
+    if(added||!existing)writeStoreLifecycleAtomically(root,lifecycle);
     return {digest,added};
   });
 }

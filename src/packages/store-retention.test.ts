@@ -116,3 +116,25 @@ test("corrupt content is invalid and never appears in dry-run candidates",async 
  assert.equal(preview.candidates.some(x=>x.digest===registered.entry.packageTreeDigest),false);
  assert.equal(existsSync(registered.objectDirectory),true);
 });
+
+test("a valid orphan object receives an object state before a new local pin is persisted",async t=>{
+ const root=fixture(t),staging=await buildStarter(root),store=join(root,"store");
+ const registered=await registerStagedPackage(staging,store),digest=registered.entry.packageTreeDigest;
+ const catalog=JSON.parse(readFileSync(join(store,"catalog.json"),"utf8")) as {schema:string;entries:unknown[]};
+ catalog.entries=[];
+ writeFileSync(join(store,"catalog.json"),JSON.stringify(catalog,null,2)+"\n");
+ const lifecycle=JSON.parse(readFileSync(lifecyclePath(store),"utf8")) as {
+  objects:Array<{digest:string}>;localPins:Array<{digest:string}>;projectPins:unknown[];schema:string
+ };
+ lifecycle.objects=lifecycle.objects.filter(x=>x.digest!==digest);
+ lifecycle.localPins=lifecycle.localPins.filter(x=>x.digest!==digest);
+ writeFileSync(lifecyclePath(store),JSON.stringify(lifecycle,null,2)+"\n");
+
+ const pinned=await addLocalRetentionPin(store,digest);
+ assert.equal(pinned.added,true);
+ const preview=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:new Date(Date.now()+5000)});
+ const object=preview.objects.find(x=>x.digest===digest);
+ assert.equal(object?.state,"ready");
+ assert.equal(object?.status,"retained");
+ assert.deepEqual(object?.retentionRoots,["local-retention"]);
+});
