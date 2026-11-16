@@ -1,0 +1,35 @@
+/* CGP visual foundations — framework-independent design tokens. */
+:root {
+  color-scheme: dark;
+  --cgp-bg: #0B1220;
+  --cgp-surface: #111C2E;
+  --cgp-surface-raised: #17263D;
+  --cgp-surface-hover: #1D304C;
+  --cgp-border: #2A405F;
+  --cgp-border-strong: #456487;
+  --cgp-text: #EDF5FF;
+  --cgp-text-muted: #A9BCD6;
+  --cgp-text-subtle: #7F94B1;
+  --cgp-blue: #20B7F4;
+  --cgp-blue-strong: #078EE4;
+  --cgp-cyan: #55D9FF;
+  --cgp-violet: #8B72F5;
+  --cgp-green: #2BC77A;
+  --cgp-amber: #F2B84B;
+  --cgp-red: #F16C75;
+  --cgp-info: #55B8F5;
+  --cgp-radius-sm: 6px;
+  --cgp-radius-md: 10px;
+  --cgp-radius-lg: 16px;
+  --cgp-shadow-panel: 0 12px 32px rgb(0 0 0 / 24%);
+  --cgp-focus: 0 0 0 3px rgb(32 183 244 / 32%);
+  --cgp-space-1: 4px;
+  --cgp-space-2: 8px;
+  --cgp-space-3: 12px;
+  --cgp-space-4: 16px;
+  --cgp-space-6: 24px;
+  --cgp-space-8: 32px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--cgp-bg);
+  color: var(--cgp-text);
+}
