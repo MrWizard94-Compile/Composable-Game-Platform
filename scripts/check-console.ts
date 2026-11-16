@@ -97,7 +97,11 @@ try {
   await page.locator('.nav-button[data-view="store"]').click();
   await page.getByRole("heading", { name: "Local package store" }).waitFor();
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').waitFor();
+  const beaconResponsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/api/store/register") && response.request().method() === "POST");
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').click();
+  const beaconResponse = await beaconResponsePromise;
+  assert.equal(beaconResponse.status(), 200, "Beacon registration API failed: " + await beaconResponse.text());
   await page.getByText("org.example.beacon", { exact: true }).waitFor();
   await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').waitFor();
   await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').click();
