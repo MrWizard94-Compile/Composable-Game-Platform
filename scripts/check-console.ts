@@ -113,7 +113,11 @@ try {
   // Generate the lock from exact profile pins, then resolve it against catalog + actual bytes.
   await page.locator('.nav-button[data-view="project"]').click();
   await page.getByRole("heading", { name: "Console Integration Project" }).waitFor();
+  const lockResponsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/api/project/lock") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Generate lockfile" }).click();
+  const lockResponse = await lockResponsePromise;
+  assert.equal(lockResponse.status(), 200, "Project lock API failed: " + await lockResponse.text());
   await page.getByText("Created lockfile for org.example.console-project (2 packages).").waitFor();
   assert.equal(existsSync(lockPath), true);
 
