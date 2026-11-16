@@ -147,6 +147,58 @@ function scanDirectory(root: string, maxTotalBytes?: number): ScanResult {
   return { files, errors, totalBytes };
 }
 
+function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string[] {
+  const errors: string[] = [];
+  let module: WebAssembly.Module;
+  let inspected: ReturnType<typeof inspectWasm>;
+  try {
+    module = new WebAssembly.Module(bytes);
+    inspected = inspectWasm(bytes);
+  } catch (error) {
+    return [error instanceof Error ? error.message : "module.wasm is not a valid WebAssembly Core module."];
+  }
+
+  const exports = WebAssembly.Module.exports(module);
+  const requiredExports = new Map<string, "function" | "memory">([
+    ["memory", "memory"],
+    ["cg_alloc", "function"],
+    ["cg_hook", "function"],
+    ["cg_out_ptr", "function"],
+    ["cg_out_len", "function"],
+  ]);
+  for (const [name, kind] of requiredExports) {
+    const found = exports.find((item) => item.name === name);
+    if (!found) errors.push("module.wasm does not export the ABI member \"" + name + "\".");
+    else if (found.kind !== kind) errors.push("module.wasm ABI export \"" + name + "\" must be a " + kind + ".");
+  }
+
+  for (const item of inspected.imports) {
+    if (item.module !== "cgp.abi" || item.name !== "log" || item.kind !== "func") {
+      errors.push("module.wasm has unauthorized import " + item.module + "." + item.name + ".");
+    } else if (!permissions.includes("cgp.log")) {
+      errors.push("module.wasm imports cgp.abi.log but manifest.json does not declare cgp.log.");
+    }
+  }
+
+  if ("missing" in inspected.memory) errors.push("module.wasm must define and export one bounded memory.");
+  else if ("imported" in inspected.memory) errors.push("module.wasm must not import memory.");
+  else if ("shared" in inspected.memory) errors.push("module.wasm must not use shared memory.");
+  else if ("memory64" in inspected.memory) errors.push("module.wasm must not use memory64.");
+  else if ("count" in inspected.memory) errors.push("module.wasm must declare exactly one memory.");
+  else if (inspected.memory.max === null) errors.push("module.wasm memory must declare a maximum.");
+
+  if (inspected.tables.length > 1) errors.push("module.wasm must declare at most one table.");
+  const table = inspected.tables[0];
+  if (table && "count" in table) errors.push("module.wasm must declare at most one table.");
+  else if (table && "shared" in table && table.shared) errors.push("module.wasm must not use a shared table.");
+  else if (table && "max" in table && table.max === null) errors.push("module.wasm table must declare a maximum.");
+  else if (table && "max" in table && table.max !== null && table.max > 256) {
+    errors.push("module.wasm table maximum must not exceed 256 entries.");
+  }
+  return errors;
+}
+
+
 async function validateJavaScriptEntry(path: string): Promise<string[]> {
   try {
     const result = await build({
