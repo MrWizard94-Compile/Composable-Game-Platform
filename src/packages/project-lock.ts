@@ -1,0 +1,262 @@
+import { createHash } from "node:crypto";
+import { isModuleId } from "../foundations/manifest.ts";
+import { formatSemVer, parseSemVer } from "../foundations/semver.ts";
+import { validateProfile, type CompositionProfile } from "../foundations/profile.ts";
+import {
+  validatePackagePaths,
+} from "./package-format.ts";
+import {
+  readLocalCatalog,
+  resolveLocalPackage,
+  type LocalCatalogEntry,
+} from "./local-store.ts";
+
+export type ProjectLock = {
+  schema: "cgp.project-lock/1";
+  profileId: string;
+  profileDigest: string;
+  /** Kept in profile order because composition input order is meaningful. */
+  modules: LocalCatalogEntry[];
+};
+
+export type ResolvedProjectModule = {
+  entry: LocalCatalogEntry;
+  objectDirectory: string;
+};
+
+export type ResolvedProjectLock = {
+  lock: ProjectLock;
+  modules: ResolvedProjectModule[];
+};
+
+export type ProjectLockValidation =
+  | { ok: true; lock: ProjectLock }
+  | { ok: false; errors: string[] };
+
+const LOCK_SCHEMA = "cgp.project-lock/1";
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const LOCK_KEYS = ["modules", "profileDigest", "profileId", "schema"];
+const ENTRY_KEYS = [
+  "artifactDigest",
+  "files",
+  "moduleId",
+  "packageTreeDigest",
+  "packageTreeProfile",
+  "runtime",
+  "version",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (isRecord(value)) {
+    return "{" + Object.keys(value).sort().map((key) =>
+      JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The project identity covers only the profile id and ordered exact module pins.
+ * Display name and description can change without invalidating package resolution.
+ */
+export function computeProjectProfileDigest(profile: CompositionProfile): string {
+  const identity = {
+    profileId: profile.profileId,
+    modules: profile.modules.map(({ moduleId, version }) => ({ moduleId, version })),
+  };
+  return "sha256:" + createHash("sha256")
+    .update("CGP-PROJECT-PROFILE\0v1", "utf8")
+    .update(canonicalJson(identity), "utf8")
+    .digest("hex");
+}
+
+function checkedProfile(input: unknown): CompositionProfile {
+  const checked = validateProfile(input);
+  if (!checked.ok) {
+    throw new Error("Project profile validation failed: " +
+      checked.errors.map((item) => item.message).join("; "));
+  }
+  return checked.profile;
+}
+
+function copyEntry(entry: LocalCatalogEntry): LocalCatalogEntry {
+  return {
+    moduleId: entry.moduleId,
+    version: entry.version,
+    packageTreeProfile: entry.packageTreeProfile,
+    packageTreeDigest: entry.packageTreeDigest,
+    artifactDigest: entry.artifactDigest,
+    runtime: entry.runtime,
+    files: [...entry.files],
+  };
+}
+
+function sameEntry(a: LocalCatalogEntry, b: LocalCatalogEntry): boolean {
+  return a.moduleId === b.moduleId &&
+    a.version === b.version &&
+    a.packageTreeProfile === b.packageTreeProfile &&
+    a.packageTreeDigest === b.packageTreeDigest &&
+    a.artifactDigest === b.artifactDigest &&
+    a.runtime === b.runtime &&
+    a.files.length === b.files.length &&
+    a.files.every((path, index) => path === b.files[index]);
+}
+
+/** Validates the closed cgp.project-lock/1 schema without consulting a store. */
+export function validateProjectLock(input: unknown): ProjectLockValidation {
+  const errors: string[] = [];
+  if (!isRecord(input) || !hasExactKeys(input, LOCK_KEYS) ||
+      input.schema !== LOCK_SCHEMA || typeof input.profileId !== "string" ||
+      !isModuleId(input.profileId) || typeof input.profileDigest !== "string" ||
+      !DIGEST_RE.test(input.profileDigest) || !Array.isArray(input.modules)) {
+    return {
+      ok: false,
+      errors: ["Lockfile must use the closed cgp.project-lock/1 schema."],
+    };
+  }
+
+  const modules: LocalCatalogEntry[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < input.modules.length; index += 1) {
+    const raw = input.modules[index];
+    const label = "modules[" + index + "]";
+    if (!isRecord(raw) || !hasExactKeys(raw, ENTRY_KEYS)) {
+      errors.push(label + " has unknown or missing fields.");
+      continue;
+    }
+    const parsedVersion = typeof raw.version === "string" ? parseSemVer(raw.version) : null;
+    if (typeof raw.moduleId !== "string" || !isModuleId(raw.moduleId) ||
+        !parsedVersion || formatSemVer(parsedVersion) !== raw.version ||
+        raw.packageTreeProfile !== "cgp.package-tree/1" ||
+        typeof raw.packageTreeDigest !== "string" || !DIGEST_RE.test(raw.packageTreeDigest) ||
+        typeof raw.artifactDigest !== "string" || !DIGEST_RE.test(raw.artifactDigest) ||
+        (raw.runtime !== "wasm-core" && raw.runtime !== "javascript-esm") ||
+        !Array.isArray(raw.files) || raw.files.some((path) => typeof path !== "string")) {
+      errors.push(label + " contains an invalid release identity.");
+      continue;
+    }
+    const files = raw.files as string[];
+    if (files.length === 0 || validatePackagePaths(files).length > 0 ||
+        files.some((path, fileIndex) => fileIndex > 0 && files[fileIndex - 1]! >= path)) {
+      errors.push(label + ".files must be non-empty, valid, unique, and ordinally sorted.");
+      continue;
+    }
+    if (seen.has(raw.moduleId)) {
+      errors.push("Lockfile contains more than one version of module " + raw.moduleId + ".");
+      continue;
+    }
+    seen.add(raw.moduleId);
+    modules.push({
+      moduleId: raw.moduleId,
+      version: raw.version as string,
+      packageTreeProfile: "cgp.package-tree/1",
+      packageTreeDigest: raw.packageTreeDigest as string,
+      artifactDigest: raw.artifactDigest as string,
+      runtime: raw.runtime,
+      files: [...files],
+    });
+  }
+
+  if (errors.length > 0 || modules.length !== input.modules.length) {
+    return { ok: false, errors };
+  }
+  return {
+    ok: true,
+    lock: {
+      schema: LOCK_SCHEMA,
+      profileId: input.profileId,
+      profileDigest: input.profileDigest,
+      modules,
+    },
+  };
+}
+
+/**
+ * Creates a reproducible lock from exact profile pins and verified local objects.
+ * This function never chooses a version or searches for a capability provider.
+ */
+export async function createProjectLock(
+  storeDirectory: string,
+  profileInput: unknown,
+): Promise<ProjectLock> {
+  const profile = checkedProfile(profileInput);
+  const modules: LocalCatalogEntry[] = [];
+  for (const pin of profile.modules) {
+    const resolved = await resolveLocalPackage(storeDirectory, pin.moduleId, pin.version);
+    if (!resolved) {
+      throw new Error("Project profile requires " + pin.moduleId + "@" + pin.version +
+        ", but that exact release is not registered in the local store.");
+    }
+    modules.push(copyEntry(resolved.entry));
+  }
+  return {
+    schema: LOCK_SCHEMA,
+    profileId: profile.profileId,
+    profileDigest: computeProjectProfileDigest(profile),
+    modules,
+  };
+}
+
+/**
+ * Resolves a lock only when the supplied profile, catalog entries, and stored bytes
+ * all agree exactly. The returned paths are verified package directories, not loaded code.
+ */
+export async function resolveProjectLock(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+): Promise<ResolvedProjectLock> {
+  const profile = checkedProfile(profileInput);
+  const checkedLock = validateProjectLock(lockInput);
+  if (!checkedLock.ok) {
+    throw new Error("Project lock validation failed: " + checkedLock.errors.join("; "));
+  }
+  const lock = checkedLock.lock;
+  const expectedProfileDigest = computeProjectProfileDigest(profile);
+  if (lock.profileId !== profile.profileId || lock.profileDigest !== expectedProfileDigest) {
+    throw new Error("Project profile does not match the profile identity recorded in the lockfile.");
+  }
+  if (lock.modules.length !== profile.modules.length) {
+    throw new Error("Lockfile module set does not match the project profile.");
+  }
+
+  const catalog = readLocalCatalog(storeDirectory);
+  const resolvedModules: ResolvedProjectModule[] = [];
+  for (let index = 0; index < profile.modules.length; index += 1) {
+    const pin = profile.modules[index]!;
+    const locked = lock.modules[index]!;
+    if (locked.moduleId !== pin.moduleId || locked.version !== pin.version) {
+      throw new Error("Lockfile module order or exact version differs from the project profile at index " + index + ".");
+    }
+    const catalogEntry = catalog.entries.find((entry) =>
+      entry.moduleId === locked.moduleId && entry.version === locked.version);
+    if (!catalogEntry) {
+      throw new Error("Locked release " + locked.moduleId + "@" + locked.version +
+        " is not registered in the local catalog.");
+    }
+    if (!sameEntry(catalogEntry, locked)) {
+      throw new Error("Local catalog identity differs from the lockfile for " +
+        locked.moduleId + "@" + locked.version + ".");
+    }
+    const resolved = await resolveLocalPackage(storeDirectory, locked.moduleId, locked.version);
+    if (!resolved) {
+      throw new Error("Locked release disappeared while resolving: " + locked.moduleId + "@" + locked.version + ".");
+    }
+    if (!sameEntry(resolved.entry, locked)) {
+      throw new Error("Verified stored package differs from the lockfile for " +
+        locked.moduleId + "@" + locked.version + ".");
+    }
+    resolvedModules.push({ entry: copyEntry(resolved.entry), objectDirectory: resolved.objectDirectory });
+  }
+  return { lock, modules: resolvedModules };
+}
