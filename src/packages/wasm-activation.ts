@@ -33,16 +33,22 @@ export type WasmProjectActivationOptions = {
   backendOptions?: WasmActivationBackendOptions;
 };
 
-export type WasmActivationModuleIdentity = Pick<
-  LocalCatalogEntry,
-  | "moduleId"
-  | "version"
-  | "packageTreeProfile"
-  | "packageTreeDigest"
-  | "artifactDigest"
-  | "runtime"
-  | "files"
->;
+export type WasmActivationModuleIdentity =
+  Omit<
+    Pick<
+      LocalCatalogEntry,
+      | "moduleId"
+      | "version"
+      | "packageTreeProfile"
+      | "packageTreeDigest"
+      | "artifactDigest"
+      | "runtime"
+      | "files"
+    >,
+    "files"
+  > & {
+    readonly files: readonly string[];
+  };
 
 export type WasmProjectActivation = {
   ok: boolean;
