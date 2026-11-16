@@ -2,7 +2,8 @@ import { compose, type CompositionResult } from "../../src/foundations/host.ts";
 import { CROSS_POLICY, createCrossBackend } from "../../src/foundations/cross-backend.ts";
 import { resolveProfile, validateProfile } from "../../src/foundations/profile.ts";
 import { createBrowserWasmBackend } from "../../src/foundations/wasm-browser.ts";
-import { CATALOG, PROFILES, moduleIdOf, toPackage, type CatalogEntry } from "../../src/modules/registry.ts";
+import { CATALOG, moduleIdOf, toPackage, type CatalogEntry } from "../../src/modules/registry.ts";
+import { PROFILES } from "../../src/modules/profiles.ts";
 
 type View = "overview" | "profiles" | "modules" | "composition" | "catalog" | "diagnostics" | "settings";
 type ModuleFilter = "all" | "baseline" | "javascript" | "wasm" | "manifest-only";
