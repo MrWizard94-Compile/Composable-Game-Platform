@@ -133,3 +133,27 @@ test("reader marker is released when its callback throws", async (t) => {
   });
   assert.equal(writerRan, true);
 });
+
+
+test("multiple readers can acquire the first store reader directory concurrently", async (t) => {
+  const store = fixture(t);
+  const bothEntered = deferred();
+  const releaseReaders = deferred();
+  let entered = 0;
+
+  const makeReader = () => withLocalStoreReadLock(store, async () => {
+    entered += 1;
+    if (entered === 2) bothEntered.resolve();
+    await releaseReaders.promise;
+  });
+
+  const first = makeReader();
+  const second = makeReader();
+  try {
+    await bothEntered.promise;
+    assert.equal(entered, 2);
+  } finally {
+    releaseReaders.resolve();
+  }
+  await Promise.all([first, second]);
+});

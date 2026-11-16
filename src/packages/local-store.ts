@@ -267,16 +267,26 @@ function readerMarkerPaths(root: string): string[] {
   if (info.isSymbolicLink() || !info.isDirectory()) {
     throw new Error("Store reader-marker path must be a real directory: " + directory);
   }
-  return readdirSync(directory).sort().map((name) => {
+  const paths: string[] = [];
+  for (const name of readdirSync(directory).sort()) {
     const path = join(directory, name);
-    const marker = lstatSync(path);
+    let marker;
+    try {
+      marker = lstatSync(path);
+    } catch (error) {
+      // A reader may finish after readdirSync but before lstatSync. That marker
+      // is already gone, so it no longer blocks the writer.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
     // Unknown entries and malformed markers count as readers. A writer must fail
     // closed rather than infer that an unrecognized marker is safe to ignore.
     if (marker.isSymbolicLink() || !marker.isFile()) {
       throw new Error("Store reader-marker directory contains a non-regular entry: " + path);
     }
-    return path;
-  });
+    paths.push(path);
+  }
+  return paths;
 }
 
 async function waitForReadersToDrain(
@@ -303,9 +313,9 @@ async function waitForReadersToDrain(
 async function waitForWriterToClear(
   root: string,
   options: CheckedStoreCoordinationOptions,
+  deadline: number,
 ): Promise<void> {
   const writerPath = join(root, STORE_WRITER_LOCK);
-  const deadline = performance.now() + options.waitTimeoutMs;
   while (existsByLstat(writerPath)) {
     const remaining = deadline - performance.now();
     if (remaining <= 0) {
@@ -321,7 +331,14 @@ async function waitForWriterToClear(
 
 function ensureReaderMarkerDirectory(root: string): string {
   const directory = join(root, STORE_READER_DIRECTORY);
-  if (!existsByLstat(directory)) mkdirSync(directory, { mode: 0o700 });
+  if (!existsByLstat(directory)) {
+    try {
+      mkdirSync(directory, { mode: 0o700 });
+    } catch (error) {
+      // Another first reader may have created the directory after our existence check.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
   const info = lstatSync(directory);
   if (info.isSymbolicLink() || !info.isDirectory()) {
     throw new Error("Store reader-marker path must be a real directory: " + directory);
@@ -345,9 +362,10 @@ async function acquireReadLock(
   const release = () => releaseOwnedMarker(
     markerPath, token, STORE_READER_SCHEMA, "package-store reader",
   );
+  const deadline = performance.now() + options.waitTimeoutMs;
 
   while (true) {
-    await waitForWriterToClear(root, options);
+    await waitForWriterToClear(root, options, deadline);
     createOwnedMarker(markerPath, marker, "package-store reader");
     // This second check closes the race with a writer that claimed the store
     // after the first check but before this reader published its marker.
