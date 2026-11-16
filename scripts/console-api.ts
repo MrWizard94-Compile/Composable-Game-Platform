@@ -202,7 +202,7 @@ export function createConsoleApiHandler(options: ConsoleApiOptions = {}) {
           if (body.mode !== "create" && body.mode !== "update") throw new Error("Lockfile mode must be create or update.");
           if (!config.lockPath) throw new Error("Project lockfile path is not configured. Start with --lock <cgp.lock.json>.");
           const lock = await createProjectLock(config.storeDirectory, projectProfile(config));
-          writeLock(config.lockPath, JSON.stringify(lock, null, 2) + "\\n", body.mode);
+          writeLock(config.lockPath, JSON.stringify(lock, null, 2) + "\n", body.mode);
           json(response, 200, { ok: true, mode: body.mode, profileId: lock.profileId, moduleCount: lock.modules.length, modules: lock.modules });
           return;
         }
