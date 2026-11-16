@@ -266,6 +266,14 @@ export async function resolveProjectLock(
 }
 
 
+function freezeSnapshotMetadata<T>(value: T): T {
+  if (value === null || typeof value !== "object" ||
+      ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  const record = value as unknown as Record<string, unknown>;
+  for (const key of Object.keys(record)) freezeSnapshotMetadata(record[key]);
+  return Object.freeze(value);
+}
+
 export type WasmProjectModuleSnapshot = {
   entry: LocalCatalogEntry;
   manifest: ModuleManifest;
@@ -382,5 +390,11 @@ export async function snapshotWasmProjectLock(
     totalBytes += result.snapshot.packageBytes;
   }
 
-  return { lock, modules, totalBytes };
+  freezeSnapshotMetadata(lock);
+  for (const module of modules) {
+    freezeSnapshotMetadata(module.entry);
+    Object.freeze(module);
+  }
+  Object.freeze(modules);
+  return Object.freeze({ lock, modules, totalBytes });
 }
