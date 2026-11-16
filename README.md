@@ -66,6 +66,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 - `examples/third-party-module` — a Wasm guest authored as `guest.json` and carrying a v1 release descriptor. Another toolchain can omit `guest.json` and still be checked.
 - `examples/javascript-module` — a self-contained JavaScript ESM v1 release example.
 - `profiles/*.json` — composition pins. A different packaged version refuses the chip. The host does not upgrade.
+- `assets/brand` — CGP logo, platform mark, app icon, favicon, reusable concept icons, design tokens, and UI reference. See [the visual identity guide](assets/brand/README.md).
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.
 
