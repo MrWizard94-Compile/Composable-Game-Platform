@@ -48,6 +48,35 @@ npm run project:lock -- --profile examples/project.json --store ./out/cgp-store 
 npm run project:check -- --profile examples/project.json --lock ./out/local-project.cgp.lock.json --store ./out/cgp-store
 ```
 
+## Local retention and garbage-collection preview
+
+Registering a validated staging package creates a persistent local-import pin by default. Removing that pin does not remove catalog metadata or package bytes; it only makes the object eligible for consideration once every other retention root is gone.
+
+Pin the exact packages in a project lock:
+
+```sh
+npm run store:retention -- --store ./out/cgp-store --action pin-project --project-id my-game --lock ./out/local-project.cgp.lock.json
+```
+
+Remove a project pin or local-import pin explicitly:
+
+```sh
+npm run store:retention -- --store ./out/cgp-store --action unpin-project --project-id my-game
+npm run store:retention -- --store ./out/cgp-store --action unpin-local --digest sha256:<package-tree-digest>
+```
+
+A local pin can be restored with `--action pin-local`. Project IDs are stable operator-chosen identifiers; the store does not scan arbitrary project directories or infer pins from lockfiles it cannot see.
+
+Preview verified, unreferenced package objects without changing lifecycle state or deleting them:
+
+```sh
+npm run store:gc-preview -- --store ./out/cgp-store --dry-run --grace-hours 24
+```
+
+The preview verifies package-tree digests, reports byte sizes, age and release associations, checks local/project pins, and applies the configured grace period. Catalog release metadata is not itself a retention root: an explicitly unpinned release may remain known in the catalog after its content is eventually collected. A dry run creates only its temporary reader-coordination marker; it does not write lifecycle metadata, create deletion claims, or delete package objects. The CLI has no apply mode.
+
+A guarded deletion-claim primitive can mark an unpinned, verified, old object as `deleting`, preventing new readers and pins. It does not remove bytes; a matching token can release an unapplied claim. Actual deletion, tombstones, interruption recovery, and automatic stale-claim reconciliation remain future work.
+
 See [the CGP visual identity guide](assets/brand/README.md) for marks, icons, palette, and component usage.
 
 ## Proof
