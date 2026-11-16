@@ -165,7 +165,7 @@ export function createConsoleApiHandler(options: ConsoleApiOptions = {}) {
       }
       if (method === "GET" && pathname === "/api/store/verify") {
         const report = await verifyLocalStore(config.storeDirectory);
-        json(response, 200, { ok: report.errors.length === 0, ...report });
+        json(response, 200, { ok: true, integrityOk: report.errors.length === 0, ...report });
         return;
       }
       if (method === "GET" && pathname === "/api/store/staging") {
