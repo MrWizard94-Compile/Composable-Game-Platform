@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -11,7 +15,9 @@
     "checkJs": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "moduleDetection": "force"
   },
   "include": [
@@ -34,6 +40,9 @@
     "scripts/check-module-store.ts",
     "scripts/build-console.ts",
     "scripts/serve-console.ts",
-    "scripts/check-console.ts"
+    "scripts/check-console.ts",
+    "scripts/console-api.ts",
+    "scripts/create-project-lock.ts",
+    "scripts/check-project-lock.ts"
   ]
 }
