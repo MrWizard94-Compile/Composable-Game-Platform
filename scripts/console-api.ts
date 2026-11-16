@@ -115,7 +115,7 @@ function requireLocalSameOrigin(request: IncomingMessage): void {
   const host = request.headers.host;
   const origin = request.headers.origin;
   if (!host || !origin) throw new Error("Mutating API calls require a same-origin browser request.");
-  const hostname = host.replace(/:\\d+$/, "").replace(/^\\[(.*)\\]$/, "$1").toLowerCase();
+  const hostname = host.replace(/:\d+$/, "").replace(/^\[(.*)\]$/, "$1").toLowerCase();
   if (!["127.0.0.1", "localhost", "::1"].includes(hostname)) throw new Error("API only accepts loopback requests.");
   let parsed: URL;
   try { parsed = new URL(origin); } catch { throw new Error("Invalid request origin."); }
