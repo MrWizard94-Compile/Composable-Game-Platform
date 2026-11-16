@@ -41,9 +41,9 @@ try {
     stagingDirectory: join(stagingDirectory, "beacon-1.0.0"),
   });
   await buildReleasePackage({
-    sourceDirectory: join(repositoryRoot, "examples/javascript-module"),
-    releaseDirectory: join(temporaryRoot, "releases/javascript-starter-1.0.0"),
-    stagingDirectory: join(stagingDirectory, "javascript-starter-1.0.0"),
+    sourceDirectory: join(repositoryRoot, "examples/starter-module"),
+    releaseDirectory: join(temporaryRoot, "releases/starter-1.0.0"),
+    stagingDirectory: join(stagingDirectory, "starter-1.0.0"),
   });
   writeFileSync(projectPath, JSON.stringify({
     profileId: "org.example.console-project",
@@ -98,8 +98,8 @@ try {
   await page.getByRole("heading", { name: "Local package store" }).waitFor();
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').waitFor();
   await page.locator('[data-action="register-staged"][data-name="beacon-1.0.0"]').click();
-  await page.locator('[data-action="register-staged"][data-name="javascript-starter-1.0.0"]').waitFor();
-  await page.locator('[data-action="register-staged"][data-name="javascript-starter-1.0.0"]').click();
+  await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').waitFor();
+  await page.locator('[data-action="register-staged"][data-name="starter-1.0.0"]').click();
   await page.locator(".data-table tbody tr").nth(1).waitFor();
   await page.getByRole("button", { name: "Verify all objects" }).click();
   await page.getByText("All catalog-referenced package objects passed verification.").waitFor();
