@@ -18,12 +18,6 @@ const contentTypes: Record<string, string> = {
 export function createConsoleServer(options: ConsoleApiOptions = {}): Server {
   const api = createConsoleApiHandler(options);
   return createServer(async (request, response) => {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      response.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow: "GET, HEAD" });
-      response.end("Method not allowed");
-      return;
-    }
-
     let pathname: string;
     try {
       pathname = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname);
@@ -40,6 +34,12 @@ export function createConsoleServer(options: ConsoleApiOptions = {}): Server {
     }
     if (pathname.startsWith("/api/")) {
       await api(request, response, pathname);
+      return;
+    }
+
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      response.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow: "GET, HEAD" });
+      response.end("Method not allowed");
       return;
     }
 
