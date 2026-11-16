@@ -293,10 +293,18 @@ export async function validateReleasePackageDirectory(directory: string): Promis
   return { ok: true, package: checked.package, manifest: checked.manifest };
 }
 
+function freezeSnapshotMetadata<T>(value: T): T {
+  if (value === null || typeof value !== "object" ||
+      ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  const record = value as unknown as Record<string, unknown>;
+  for (const key of Object.keys(record)) freezeSnapshotMetadata(record[key]);
+  return Object.freeze(value);
+}
+
 export type WasmReleasePackageSnapshot = {
   package: ReleasePackageSummary;
   manifest: ModuleManifest;
-  /** Private, owned copy of the exact Wasm bytes included in both checked digests. */
+  /** Private, owned buffer containing the exact Wasm bytes included in both checked digests. */
   wasmBytes: Uint8Array;
   /** Total size of every file in the verified package tree, not just the Wasm artifact. */
   packageBytes: number;
@@ -308,7 +316,7 @@ export type WasmReleasePackageSnapshotValidation =
 
 /**
  * Produces a Wasm-only runtime snapshot from one bounded directory scan.
- * The returned bytes are copied from the same scanned file set used for package-tree
+ * The returned owned buffer is retained from the same scanned file set used for package-tree
  * and artifact digest verification. This function does not import, instantiate, or execute code.
  */
 export async function snapshotWasmReleasePackageDirectory(
@@ -321,13 +329,15 @@ export async function snapshotWasmReleasePackageDirectory(
   const scanned = scanDirectory(directory, maxPackageBytes);
   const checked = await validateScannedPackageDirectory(directory, scanned, "wasm-core");
   if (!checked.ok) return { ok: false, errors: checked.errors };
+  freezeSnapshotMetadata(checked.package);
+  freezeSnapshotMetadata(checked.manifest);
   return {
     ok: true,
-    snapshot: {
+    snapshot: Object.freeze({
       package: checked.package,
       manifest: checked.manifest,
       wasmBytes: checked.artifactBytes,
       packageBytes: checked.packageBytes,
-    },
+    }),
   };
 }
