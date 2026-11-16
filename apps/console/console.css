@@ -124,3 +124,14 @@ button:disabled{opacity:.55;cursor:not-allowed}
 @media(max-width:760px){.topbar{height:64px;padding:0 16px}.brand-lockup img{width:210px;max-width:58vw}.topbar-right .version-chip{display:none}.workspace{display:block;min-height:calc(100vh - 64px)}.sidebar{position:sticky;top:64px;z-index:15;width:100%;height:auto;display:block;padding:8px 10px;border-right:0;border-bottom:1px solid var(--cgp-border);overflow-x:auto}.sidebar .nav-section-label,.sidebar-foot{display:none}.nav-list{display:flex;width:max-content;gap:5px}.nav-button{width:auto;white-space:nowrap;padding:9px 11px}.nav-button .icon{width:16px;height:16px}.main-content{padding:24px 15px 36px}.page-heading{display:block}.heading-actions{margin-top:15px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.summary-card:last-child{grid-column:1/-1}.catalog-toolbar{display:grid}.search-control{width:100%}}
 @media(max-width:460px){.summary-value{font-size:25px}.summary-card{min-height:100px;padding:14px}.module-grid,.profile-grid{grid-template-columns:1fr}.phase-row{grid-template-columns:78px minmax(0,1fr) auto}.environment-chip{font-size:9px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+
+.store-actions{display:flex;gap:9px;flex-wrap:wrap;margin:2px 0 14px}
+.api-notice{margin:14px 0;color:var(--cgp-cyan);border-color:#285B7A;background:#10283B;font-size:11px}
+.api-error{margin:10px 0 0;color:#FF9EA4;font-size:11px;line-height:1.5}
+.digest-text{display:block;max-width:390px;color:#A9C9E5;font:10px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+.staged-entry{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.staged-entry p{margin:5px 0 0;color:var(--cgp-text-muted);font-size:11px;line-height:1.5}
+.profile-pin-list{display:grid;gap:0;margin-top:14px}
+.lock-actions{display:grid;justify-items:start;gap:12px}
+.lock-actions .cgp-button{min-width:190px}
+@media(max-width:520px){.staged-entry{align-items:flex-start;flex-direction:column}.digest-text{max-width:230px}}
