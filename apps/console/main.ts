@@ -56,7 +56,6 @@ async function refreshStoreData(): Promise<void> {
     apiStatus = status!;
     storeEntries = catalog.entries;
     stagedEntries = staging.packages;
-    apiNotice = "";
   } catch (error) {
     apiNotice = error instanceof Error ? error.message : String(error);
   }
@@ -65,7 +64,6 @@ async function refreshStoreData(): Promise<void> {
 async function refreshProjectData(): Promise<void> {
   try {
     projectInfo = await apiRequest<ProjectInfo & { ok: boolean }>("/api/project");
-    apiNotice = "";
   } catch (error) {
     projectInfo = undefined;
     apiNotice = error instanceof Error ? error.message : String(error);
