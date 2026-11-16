@@ -247,6 +247,16 @@ function objectDirectory(root: string, digest: string): string {
   return join(root, "objects", "cgp.package-tree", "1", "sha256", digest.slice("sha256:".length));
 }
 
+/**
+ * Returns the validated content-object directory for a package-tree digest.
+ * This checks the store path itself but deliberately does not scan package files.
+ */
+export function localPackageObjectDirectory(storeDirectory: string, digest: string): string {
+  if (!isDigest(digest)) throw new Error("Invalid package-tree SHA-256 digest.");
+  const root = storeRoot(storeDirectory);
+  return assertStoreObjectParents(root, digest);
+}
+
 
 function removeTemporaryDirectory(directory: string): void {
   if (!existsByLstat(directory)) return;
