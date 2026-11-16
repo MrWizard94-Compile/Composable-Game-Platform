@@ -50,7 +50,7 @@ try {
     name: "Console Integration Project",
     modules: [
       { moduleId: "org.example.beacon", version: "1.0.0" },
-      { moduleId: "org.example.javascript-starter", version: "1.0.0" },
+      { moduleId: "org.example.starter", version: "1.0.0" },
     ],
   }, null, 2) + "\n");
 
