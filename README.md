@@ -22,7 +22,7 @@ The sample project pins one Wasm package and one JavaScript ESM package. Build t
 
 ```sh
 node --experimental-strip-types scripts/build-module-package.ts --source examples/third-party-module --release ./out/releases/beacon-1.0.0 --stage ./out/staging/beacon-1.0.0
-node --experimental-strip-types scripts/build-module-package.ts --source examples/javascript-module --release ./out/releases/javascript-starter-1.0.0 --stage ./out/staging/javascript-starter-1.0.0
+node --experimental-strip-types scripts/build-module-package.ts --source examples/starter-module --release ./out/releases/starter-1.0.0 --stage ./out/staging/starter-1.0.0
 ```
 
 Then start the console using the command above. In **Package Store**, register the two validated staging snapshots. Run **Verify all objects** to revalidate the bytes. In **Project**, generate the project lockfile, then use **Verify & resolve lock** to check each exact pin against the catalog and the content-addressed object.
