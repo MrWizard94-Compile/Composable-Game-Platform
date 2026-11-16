@@ -16,7 +16,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   PACKAGE_RESOURCE_LIMITS,
   parseStrictJson,
@@ -187,12 +188,188 @@ function storeRoot(path: string): string {
   return realpathSync(absolute);
 }
 
-function acquireLock(root: string): { release(): void } {
-  const lockPath = join(root, ".cgp-store.lock");
-  const token = randomUUID();
-  let descriptor: number;
+
+export type StoreCoordinationOptions = {
+  /** Maximum time to wait for a conflicting store operation. Defaults to 30 seconds. */
+  waitTimeoutMs?: number;
+  /** Poll interval while waiting for another operation. Defaults to 10 milliseconds. */
+  pollIntervalMs?: number;
+};
+
+const STORE_READER_DIRECTORY = ".cgp-store.readers";
+const STORE_WRITER_LOCK = ".cgp-store.lock";
+const STORE_READER_SCHEMA = "cgp.local-store-reader/1";
+const DEFAULT_STORE_WAIT_TIMEOUT_MS = 30_000;
+const DEFAULT_STORE_POLL_INTERVAL_MS = 10;
+
+type CheckedStoreCoordinationOptions = {
+  waitTimeoutMs: number;
+  pollIntervalMs: number;
+};
+
+function checkedCoordinationOptions(
+  options: StoreCoordinationOptions = {},
+): CheckedStoreCoordinationOptions {
+  const waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_STORE_WAIT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_STORE_POLL_INTERVAL_MS;
+  if (!Number.isSafeInteger(waitTimeoutMs) || waitTimeoutMs < 0) {
+    throw new Error("Store coordination waitTimeoutMs must be a non-negative safe integer.");
+  }
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 1000) {
+    throw new Error("Store coordination pollIntervalMs must be an integer from 1 through 1000.");
+  }
+  return { waitTimeoutMs, pollIntervalMs };
+}
+
+function createOwnedMarker(
+  path: string,
+  marker: Record<string, unknown>,
+  label: string,
+): void {
+  const descriptor = openSync(path, "wx", 0o600);
   try {
-    descriptor = openSync(lockPath, "wx", 0o600);
+    writeFileSync(descriptor, JSON.stringify(marker) + "\n");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+  } catch (error) {
+    try { closeSync(descriptor); } catch {}
+    try { unlinkSync(path); } catch {}
+    throw new Error("Could not create " + label + " marker: " +
+      (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+function releaseOwnedMarker(
+  path: string,
+  token: string,
+  schema: string,
+  label: string,
+): void {
+  if (!existsByLstat(path)) {
+    throw new Error("The " + label + " marker disappeared before its owner released it.");
+  }
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error("The " + label + " marker was replaced by a non-regular entry.");
+  }
+  const parsed = parseStrictJson(new Uint8Array(readFileSync(path)), label + " marker");
+  if (!parsed.ok || !isRecord(parsed.value) ||
+      parsed.value.schema !== schema || parsed.value.token !== token) {
+    throw new Error("The " + label + " marker ownership changed; refusing to remove a marker not owned by this operation.");
+  }
+  unlinkSync(path);
+}
+
+function readerMarkerPaths(root: string): string[] {
+  const directory = join(root, STORE_READER_DIRECTORY);
+  if (!existsByLstat(directory)) return [];
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("Store reader-marker path must be a real directory: " + directory);
+  }
+  return readdirSync(directory).sort().map((name) => {
+    const path = join(directory, name);
+    const marker = lstatSync(path);
+    // Unknown entries and malformed markers count as readers. A writer must fail
+    // closed rather than infer that an unrecognized marker is safe to ignore.
+    if (marker.isSymbolicLink() || !marker.isFile()) {
+      throw new Error("Store reader-marker directory contains a non-regular entry: " + path);
+    }
+    return path;
+  });
+}
+
+async function waitForReadersToDrain(
+  root: string,
+  options: CheckedStoreCoordinationOptions,
+): Promise<void> {
+  const deadline = performance.now() + options.waitTimeoutMs;
+  while (true) {
+    const readers = readerMarkerPaths(root);
+    if (readers.length === 0) return;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      throw new Error(
+        "Timed out waiting for active or stale package-store reader markers: " +
+        readers.map((path) => basename(path)).join(", ") +
+        ". No package-store write or deletion was started. Inspect the owning processes before manually removing stale markers.",
+      );
+    }
+    await new Promise<void>((resolveDelay) =>
+      setTimeout(resolveDelay, Math.max(1, Math.min(options.pollIntervalMs, Math.ceil(remaining)))));
+  }
+}
+
+async function waitForWriterToClear(
+  root: string,
+  options: CheckedStoreCoordinationOptions,
+): Promise<void> {
+  const writerPath = join(root, STORE_WRITER_LOCK);
+  const deadline = performance.now() + options.waitTimeoutMs;
+  while (existsByLstat(writerPath)) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      throw new Error(
+        "Timed out waiting for the package-store writer lock (which may be stale): " + writerPath +
+        ". No package bytes were read. Inspect the owning process before manually removing the writer marker.",
+      );
+    }
+    await new Promise<void>((resolveDelay) =>
+      setTimeout(resolveDelay, Math.max(1, Math.min(options.pollIntervalMs, Math.ceil(remaining)))));
+  }
+}
+
+function ensureReaderMarkerDirectory(root: string): string {
+  const directory = join(root, STORE_READER_DIRECTORY);
+  if (!existsByLstat(directory)) mkdirSync(directory, { mode: 0o700 });
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("Store reader-marker path must be a real directory: " + directory);
+  }
+  return directory;
+}
+
+async function acquireReadLock(
+  root: string,
+  options: CheckedStoreCoordinationOptions,
+): Promise<{ release(): void }> {
+  const directory = ensureReaderMarkerDirectory(root);
+  const token = randomUUID();
+  const markerPath = join(directory, token + ".json");
+  const marker = {
+    schema: STORE_READER_SCHEMA,
+    token,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  };
+  const release = () => releaseOwnedMarker(
+    markerPath, token, STORE_READER_SCHEMA, "package-store reader",
+  );
+
+  while (true) {
+    await waitForWriterToClear(root, options);
+    createOwnedMarker(markerPath, marker, "package-store reader");
+    // This second check closes the race with a writer that claimed the store
+    // after the first check but before this reader published its marker.
+    if (!existsByLstat(join(root, STORE_WRITER_LOCK))) return { release };
+    release();
+  }
+}
+
+async function acquireWriteLock(
+  root: string,
+  options: CheckedStoreCoordinationOptions,
+): Promise<{ release(): void }> {
+  const lockPath = join(root, STORE_WRITER_LOCK);
+  const token = randomUUID();
+  const marker = {
+    schema: "cgp.local-store-lock/1",
+    token,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    createOwnedMarker(lockPath, marker, "package-store writer");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new Error(
@@ -202,32 +379,93 @@ function acquireLock(root: string): { release(): void } {
     }
     throw error;
   }
+  const release = () => releaseOwnedMarker(
+    lockPath, token, "cgp.local-store-lock/1", "package-store writer",
+  );
   try {
-    writeFileSync(descriptor, JSON.stringify({
-      schema: "cgp.local-store-lock/1",
-      token,
-      pid: process.pid,
-      createdAt: new Date().toISOString(),
-    }) + "\n");
-    fsyncSync(descriptor);
+    // Creating the writer marker prevents new readers from entering. Existing
+    // readers drain before the operation is allowed to mutate store contents.
+    await waitForReadersToDrain(root, options);
   } catch (error) {
-    try { closeSync(descriptor); } catch {}
-    try { unlinkSync(lockPath); } catch {}
+    try {
+      release();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Could not acquire the package-store writer lock or clean up its marker.",
+      );
+    }
     throw error;
   }
-  closeSync(descriptor);
-  return {
-    release() {
-      if (!existsSync(lockPath)) return;
-      const parsed = parseStrictJson(new Uint8Array(readFileSync(lockPath)), "store lock");
-      if (!parsed.ok || !isRecord(parsed.value) || parsed.value.token !== token) {
-        throw new Error("Store lock ownership changed; refusing to remove a lock not owned by this operation.");
-      }
-      unlinkSync(lockPath);
-    },
-  };
+  return { release };
 }
 
+async function runWithStoreLock<T>(
+  operation: () => Promise<T> | T,
+  release: () => void,
+  label: string,
+): Promise<T> {
+  let result!: T;
+  let operationFailed = false;
+  let operationError: unknown;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+  let releaseFailed = false;
+  let releaseError: unknown;
+  try {
+    release();
+  } catch (error) {
+    releaseFailed = true;
+    releaseError = error;
+  }
+  if (operationFailed && releaseFailed) {
+    throw new AggregateError(
+      [operationError, releaseError],
+      "The package-store " + label + " operation and marker release both failed.",
+    );
+  }
+  if (operationFailed) throw operationError;
+  if (releaseFailed) throw releaseError;
+  return result;
+}
+
+/**
+ * Holds a cooperative cross-process reader marker for the entire callback.
+ *
+ * The callback must finish all package-file reads before returning. Returning a
+ * package path does not extend this marker's lifetime and is not a retention pin.
+ * A marker left by a crashed process is deliberately not reclaimed automatically.
+ */
+export async function withLocalStoreReadLock<T>(
+  storeDirectory: string,
+  operation: (canonicalStoreRoot: string) => Promise<T> | T,
+  coordination: StoreCoordinationOptions = {},
+): Promise<T> {
+  const root = storeRoot(storeDirectory);
+  const lock = await acquireReadLock(root, checkedCoordinationOptions(coordination));
+  return runWithStoreLock(() => operation(root), lock.release, "reader");
+}
+
+/**
+ * Holds the exclusive package-store writer marker and waits for all readers to drain.
+ *
+ * Registration and future destructive maintenance must use this gate. The lock is
+ * cooperative and intended for same-host processes on a local filesystem; it is not
+ * a distributed lock or a security boundary.
+ */
+export async function withLocalStoreWriteLock<T>(
+  storeDirectory: string,
+  operation: (canonicalStoreRoot: string) => Promise<T> | T,
+  coordination: StoreCoordinationOptions = {},
+): Promise<T> {
+  const root = storeRoot(storeDirectory);
+  const lock = await acquireWriteLock(root, checkedCoordinationOptions(coordination));
+  return runWithStoreLock(() => operation(root), lock.release, "writer");
+}
 function assertStoreObjectParents(root: string, digest: string): string {
   let current = root;
   for (const component of ["objects", "cgp.package-tree", "1", "sha256", digest.slice("sha256:".length)]) {
@@ -364,10 +602,8 @@ export async function registerStagedPackage(
   stagingDirectory: string,
   storeDirectory: string,
 ): Promise<RegisterStagedPackageResult> {
-  const root = storeRoot(storeDirectory);
   const stagingPath = resolve(stagingDirectory);
-  const lock = acquireLock(root);
-  try {
+  return withLocalStoreWriteLock(storeDirectory, async (root) => {
     const staged = await validateReleasePackageDirectory(stagingPath);
     if (!staged.ok) throw new Error("Staging package validation failed: " + staged.errors.join("; "));
     const stagingCanonical = realpathSync(stagingPath);
@@ -435,9 +671,7 @@ export async function registerStagedPackage(
       idempotent = false;
     }
     return { entry, objectDirectory: target, idempotent };
-  } finally {
-    lock.release();
-  }
+  });
 }
 
 /** Returns the validated local catalog. Missing catalog is an empty catalog. */
@@ -446,49 +680,51 @@ export function readLocalCatalog(storeDirectory: string): LocalCatalog {
   return readCatalog(root);
 }
 
-/** Resolves an exact immutable coordinate and verifies its stored bytes before returning the object path. */
+/** Resolves and verifies an exact package while a store read marker is held. The returned path is not a retention lease. */
 export async function resolveLocalPackage(
   storeDirectory: string,
   moduleId: string,
   version: string,
 ): Promise<{ entry: LocalCatalogEntry; objectDirectory: string } | undefined> {
-  const root = storeRoot(storeDirectory);
-  const catalog = readCatalog(root);
-  const entry = catalog.entries.find((item) => item.moduleId === moduleId && item.version === version);
-  if (!entry) return undefined;
-  const path = assertStoreObjectParents(root, entry.packageTreeDigest);
-  const result = await validateReleasePackageDirectory(path);
-  if (!result.ok) throw new Error("Stored package failed validation: " + result.errors.join("; "));
-  if (JSON.stringify(toCatalogEntry(result.package)) !== JSON.stringify(entry)) {
-    throw new Error("Stored object metadata or digests disagree with the catalog record.");
-  }
-  return { entry, objectDirectory: path };
+  return withLocalStoreReadLock(storeDirectory, async (root) => {
+    const catalog = readCatalog(root);
+    const entry = catalog.entries.find((item) => item.moduleId === moduleId && item.version === version);
+    if (!entry) return undefined;
+    const path = assertStoreObjectParents(root, entry.packageTreeDigest);
+    const result = await validateReleasePackageDirectory(path);
+    if (!result.ok) throw new Error("Stored package failed validation: " + result.errors.join("; "));
+    if (JSON.stringify(toCatalogEntry(result.package)) !== JSON.stringify(entry)) {
+      throw new Error("Stored object metadata or digests disagree with the catalog record.");
+    }
+    return { entry, objectDirectory: path };
+  });
 }
 
-/** Revalidates every catalog-referenced object and compares it to its catalog record. */
+/** Revalidates every catalog-referenced object while a store read marker is held. */
 export async function verifyLocalStore(storeDirectory: string): Promise<StoreVerification> {
-  const root = storeRoot(storeDirectory);
-  const catalog = readCatalog(root);
-  const errors: StoreVerification["errors"] = [];
-  let valid = 0;
-  for (const entry of catalog.entries) {
-    let path = objectDirectory(root, entry.packageTreeDigest);
-    try {
-      path = assertStoreObjectParents(root, entry.packageTreeDigest);
-      const result = await validateReleasePackageDirectory(path);
-      if (!result.ok) throw new Error(result.errors.join("; "));
-      const actual = toCatalogEntry(result.package);
-      if (JSON.stringify(actual) !== JSON.stringify(entry)) {
-        throw new Error("Stored object metadata or digests disagree with the catalog record.");
+  return withLocalStoreReadLock(storeDirectory, async (root) => {
+    const catalog = readCatalog(root);
+    const errors: StoreVerification["errors"] = [];
+    let valid = 0;
+    for (const entry of catalog.entries) {
+      let path = objectDirectory(root, entry.packageTreeDigest);
+      try {
+        path = assertStoreObjectParents(root, entry.packageTreeDigest);
+        const result = await validateReleasePackageDirectory(path);
+        if (!result.ok) throw new Error(result.errors.join("; "));
+        const actual = toCatalogEntry(result.package);
+        if (JSON.stringify(actual) !== JSON.stringify(entry)) {
+          throw new Error("Stored object metadata or digests disagree with the catalog record.");
+        }
+        valid += 1;
+      } catch (error) {
+        errors.push({
+          moduleId: entry.moduleId,
+          version: entry.version,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      valid += 1;
-    } catch (error) {
-      errors.push({
-        moduleId: entry.moduleId,
-        version: entry.version,
-        error: error instanceof Error ? error.message : String(error),
-      });
     }
-  }
-  return { checked: catalog.entries.length, valid, errors };
+    return { checked: catalog.entries.length, valid, errors };
+  });
 }

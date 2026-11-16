@@ -11,6 +11,7 @@ import {
 import {
   localPackageObjectDirectory,
   readLocalCatalog,
+  withLocalStoreReadLock,
   resolveLocalPackage,
   type LocalCatalogEntry,
 } from "./local-store.ts";
@@ -298,7 +299,7 @@ export type WasmProjectSnapshot = {
  *
  * maxTotalBytes is mandatory so callers choose an explicit project-wide snapshot budget.
  */
-export async function snapshotWasmProjectLock(
+async function snapshotWasmProjectLockWithReadLockHeld(
   storeDirectory: string,
   profileInput: unknown,
   lockInput: unknown,
@@ -397,4 +398,26 @@ export async function snapshotWasmProjectLock(
   }
   Object.freeze(modules);
   return Object.freeze({ lock, modules, totalBytes });
+}
+
+
+/**
+ * Holds a store reader marker while catalog metadata and every locked package tree
+ * are verified and copied into owned memory. The marker is released only after the
+ * complete all-or-nothing snapshot exists; Wasm activation does not retain store paths.
+ */
+export async function snapshotWasmProjectLock(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+  maxTotalBytes: number,
+): Promise<WasmProjectSnapshot> {
+  return withLocalStoreReadLock(storeDirectory, () =>
+    snapshotWasmProjectLockWithReadLockHeld(
+      storeDirectory,
+      profileInput,
+      lockInput,
+      maxTotalBytes,
+    ),
+  );
 }
