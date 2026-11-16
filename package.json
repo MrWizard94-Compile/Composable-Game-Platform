@@ -3,16 +3,16 @@
   "private": true,
   "type": "module",
   "description": "A module host for independently packaged game systems. Separate from STRATA.",
-  "exports": {
-    ".": "./src/foundations/index.ts"
-  },
+  "exports": { ".": "./src/foundations/index.ts" },
   "scripts": {
-    "test": "node --experimental-strip-types scripts/verify-wasm.ts && node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/packages/local-store.test.ts src/packages/project-lock.test.ts src/packages/activation-snapshot.test.ts src/packages/store-coordination.test.ts src/packages/wasm-activation.test.ts src/modules/composition.test.ts src/modules/sim.test.ts",
+    "test": "node --experimental-strip-types scripts/verify-wasm.ts && node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/packages/local-store.test.ts src/packages/project-lock.test.ts src/packages/activation-snapshot.test.ts src/packages/store-coordination.test.ts src/packages/store-retention.test.ts src/packages/wasm-activation.test.ts src/modules/composition.test.ts src/modules/sim.test.ts",
     "demo": "node --experimental-strip-types src/modules/headless-demo.ts",
     "package:build": "node --experimental-strip-types scripts/build-module-package.ts",
     "package:check": "node --experimental-strip-types scripts/check-module-package.ts",
     "store:register": "node --experimental-strip-types scripts/register-module-package.ts",
     "store:check": "node --experimental-strip-types scripts/check-module-store.ts",
+    "store:retention": "node --experimental-strip-types scripts/manage-store-retention.ts",
+    "store:gc-preview": "node --experimental-strip-types scripts/preview-store-gc.ts",
     "console:build": "node --experimental-strip-types scripts/build-console.ts",
     "console:serve": "node --experimental-strip-types scripts/serve-console.ts",
     "console": "npm run console:build && node --experimental-strip-types scripts/serve-console.ts",
@@ -20,9 +20,7 @@
     "project:lock": "node --experimental-strip-types scripts/create-project-lock.ts",
     "project:check": "node --experimental-strip-types scripts/check-project-lock.ts"
   },
-  "engines": {
-    "node": ">=22"
-  },
+  "engines": { "node": ">=22" },
   "devDependencies": {
     "@types/node": "22.16.5",
     "esbuild": "0.28.2",
