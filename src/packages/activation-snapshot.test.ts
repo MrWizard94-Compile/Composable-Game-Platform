@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -107,6 +106,9 @@ test("single-scan Wasm snapshot returns the exact verified artifact bytes as own
   if (!result.ok) return;
 
   assert.equal(result.snapshot.package.moduleId, "org.example.snapshot-one");
+  assert.equal(Object.isFrozen(result.snapshot), true);
+  assert.equal(Object.isFrozen(result.snapshot.manifest), true);
+  assert.equal(Object.isFrozen(result.snapshot.package), true);
   assert.equal(result.snapshot.package.descriptor.runtime.kind, "wasm-core");
   assert.equal(result.snapshot.packageBytes, expectedPackageBytes);
   assert.equal(
