@@ -29,7 +29,7 @@ The mark is an open modular form around a central core. Its interrupted outer pa
 Blue/cyan is the primary platform color; violet is a restrained secondary accent. Green, amber, and red are semantic status colors, not interchangeable decoration.
 
 ## Icons
-The SVGs in `icons/` use a 64×64 viewBox, a consistent 2.6-unit stroke, rounded joins, and `currentColor`. They inherit the caller's foreground color.
+The SVGs in `icons/` use a 64×64 viewBox, a consistent 2.6-unit stroke, rounded joins, and `currentColor`. They use `currentColor`. Inline the SVG (or copy its shapes into the host icon system) for automatic CSS color inheritance. When loaded as an external `<img>`, the SVG does not inherit the page's `color` property; use an explicit icon tint or inline it.
 
 Module, Slot, Capability, Composition, Lifecycle, Package, Registry, Storage, Wasm, JavaScript, Diagnostics, Simulation, and Save are platform concepts, not game-content icons. Keep them visually neutral.
 
