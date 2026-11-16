@@ -5,6 +5,7 @@ import { build } from "esbuild";
 import { inspectWasm } from "../foundations/wasm-backend.ts";
 import { validateManifest, type ModuleManifest } from "../foundations/manifest.ts";
 import {
+  PACKAGE_RESOURCE_LIMITS,
   computeArtifactDigest,
   computePackageTreeDigest,
   parseStrictJson,
@@ -31,22 +32,30 @@ export type ReleasePackageValidation =
 type ScanResult = {
   files: PackageFile[];
   errors: string[];
+  totalBytes: number;
 };
 
-function scanDirectory(root: string): ScanResult {
+function scanDirectory(root: string, maxTotalBytes?: number): ScanResult {
   const files: PackageFile[] = [];
   const errors: string[] = [];
+  let totalBytes = 0;
+  let fileCount = 0;
+  let resourceLimitExceeded = false;
+  const byteLimit = maxTotalBytes === undefined
+    ? undefined
+    : Math.min(maxTotalBytes, PACKAGE_RESOURCE_LIMITS.maxTotalBytes);
   let rootInfo;
   try {
     rootInfo = lstatSync(root);
   } catch {
-    return { files, errors: ["Package directory does not exist or cannot be inspected."] };
+    return { files, errors: ["Package directory does not exist or cannot be inspected."], totalBytes };
   }
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
-    return { files, errors: ["Package root must be a real directory, not a symlink or file."] };
+    return { files, errors: ["Package root must be a real directory, not a symlink or file."], totalBytes };
   }
 
   function visit(directory: string, prefix: string): void {
+    if (resourceLimitExceeded) return;
     let entries;
     try {
       entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) => (
@@ -58,7 +67,20 @@ function scanDirectory(root: string): ScanResult {
     }
 
     for (const entry of entries) {
+      if (resourceLimitExceeded) return;
       const path = prefix ? prefix + "/" + entry.name : entry.name;
+      if (byteLimit !== undefined) {
+        if (Buffer.byteLength(path, "utf8") > PACKAGE_RESOURCE_LIMITS.maxPathBytes) {
+          errors.push("Package path exceeds the " + PACKAGE_RESOURCE_LIMITS.maxPathBytes + "-byte snapshot limit: " + path);
+          resourceLimitExceeded = true;
+          return;
+        }
+        if (path.split("/").length > PACKAGE_RESOURCE_LIMITS.maxPathDepth) {
+          errors.push("Package path exceeds the " + PACKAGE_RESOURCE_LIMITS.maxPathDepth + "-component snapshot limit: " + path);
+          resourceLimitExceeded = true;
+          return;
+        }
+      }
       const absolute = join(directory, entry.name);
       let info;
       try {
@@ -83,6 +105,23 @@ function scanDirectory(root: string): ScanResult {
         errors.push("Package entry \"" + path + "\" is not a regular file.");
         continue;
       }
+      if (byteLimit !== undefined) {
+        if (info.size > PACKAGE_RESOURCE_LIMITS.maxFileBytes) {
+          errors.push("Package file exceeds the " + PACKAGE_RESOURCE_LIMITS.maxFileBytes + "-byte snapshot limit: " + path);
+          resourceLimitExceeded = true;
+          return;
+        }
+        if (fileCount + 1 > PACKAGE_RESOURCE_LIMITS.maxFiles) {
+          errors.push("Package exceeds the " + PACKAGE_RESOURCE_LIMITS.maxFiles + "-file snapshot limit.");
+          resourceLimitExceeded = true;
+          return;
+        }
+        if (totalBytes + info.size > byteLimit) {
+          errors.push("Package snapshot exceeds the configured byte limit of " + byteLimit + " bytes.");
+          resourceLimitExceeded = true;
+          return;
+        }
+      }
       let bytes: Buffer;
       try {
         bytes = readFileSync(absolute);
@@ -98,12 +137,14 @@ function scanDirectory(root: string): ScanResult {
         errors.push("Cannot read package file \"" + path + "\".");
         continue;
       }
-      files.push({ path, bytes: new Uint8Array(bytes) });
+      files.push({ path, bytes });
+      fileCount += 1;
+      totalBytes += bytes.byteLength;
     }
   }
 
   visit(resolve(root), "");
-  return { files, errors };
+  return { files, errors, totalBytes };
 }
 
 function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string[] {
@@ -157,6 +198,7 @@ function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string
   return errors;
 }
 
+
 async function validateJavaScriptEntry(path: string): Promise<string[]> {
   try {
     const result = await build({
@@ -203,8 +245,21 @@ async function validateJavaScriptEntry(path: string): Promise<string[]> {
  * Validates a released package directory without importing JavaScript or instantiating WebAssembly.
  * This is package tooling, deliberately separate from the Foundations composition/runtime path.
  */
-export async function validateReleasePackageDirectory(directory: string): Promise<ReleasePackageValidation> {
-  const scanned = scanDirectory(directory);
+type ScannedPackageValidation =
+  | {
+      ok: true;
+      package: ReleasePackageSummary;
+      manifest: ModuleManifest;
+      artifactBytes: Uint8Array;
+      packageBytes: number;
+    }
+  | { ok: false; errors: string[] };
+
+async function validateScannedPackageDirectory(
+  directory: string,
+  scanned: ScanResult,
+  requiredRuntime?: "wasm-core",
+): Promise<ScannedPackageValidation> {
   const errors = [...scanned.errors];
   if (errors.length > 0) return { ok: false, errors };
 
@@ -230,6 +285,16 @@ export async function validateReleasePackageDirectory(directory: string): Promis
   const descriptorCheck = validatePackageDescriptor(parsedDescriptor.value);
   if (!descriptorCheck.ok) errors.push(...descriptorCheck.errors);
   if (!manifestCheck.ok || !descriptorCheck.ok) return { ok: false, errors };
+
+  if (requiredRuntime && descriptorCheck.descriptor.runtime.kind !== requiredRuntime) {
+    return {
+      ok: false,
+      errors: [
+        "Package runtime is " + descriptorCheck.descriptor.runtime.kind +
+        "; this snapshot operation accepts only " + requiredRuntime + ".",
+      ],
+    };
+  }
 
   const wasmFile = byPath.get("module.wasm");
   const jsFile = byPath.get("module.mjs");
@@ -265,6 +330,66 @@ export async function validateReleasePackageDirectory(directory: string): Promis
       artifactDigest: computeArtifactDigest(artifact.bytes),
       files: [...files].map((item) => item.path).sort(),
     },
+    artifactBytes: artifact.bytes,
+    packageBytes: scanned.totalBytes,
   };
 }
 
+/**
+ * Validates a released package directory without importing JavaScript or instantiating WebAssembly.
+ * This is package tooling, deliberately separate from the Foundations composition/runtime path.
+ */
+export async function validateReleasePackageDirectory(directory: string): Promise<ReleasePackageValidation> {
+  const checked = await validateScannedPackageDirectory(directory, scanDirectory(directory));
+  if (!checked.ok) return { ok: false, errors: checked.errors };
+  return { ok: true, package: checked.package, manifest: checked.manifest };
+}
+
+function freezeSnapshotMetadata<T>(value: T): T {
+  if (value === null || typeof value !== "object" ||
+      ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  const record = value as unknown as Record<string, unknown>;
+  for (const key of Object.keys(record)) freezeSnapshotMetadata(record[key]);
+  return Object.freeze(value);
+}
+
+export type WasmReleasePackageSnapshot = {
+  package: ReleasePackageSummary;
+  manifest: ModuleManifest;
+  /** Private, owned buffer containing the exact Wasm bytes included in both checked digests. */
+  wasmBytes: Uint8Array;
+  /** Total size of every file in the verified package tree, not just the Wasm artifact. */
+  packageBytes: number;
+};
+
+export type WasmReleasePackageSnapshotValidation =
+  | { ok: true; snapshot: WasmReleasePackageSnapshot }
+  | { ok: false; errors: string[] };
+
+/**
+ * Produces a Wasm-only runtime snapshot from one bounded directory scan.
+ * The returned owned buffer is retained from the same scanned file set used for package-tree
+ * and artifact digest verification. This function does not import, instantiate, or execute code.
+ */
+export async function snapshotWasmReleasePackageDirectory(
+  directory: string,
+  maxPackageBytes: number,
+): Promise<WasmReleasePackageSnapshotValidation> {
+  if (!Number.isSafeInteger(maxPackageBytes) || maxPackageBytes <= 0) {
+    return { ok: false, errors: ["maxPackageBytes must be a positive safe integer."] };
+  }
+  const scanned = scanDirectory(directory, maxPackageBytes);
+  const checked = await validateScannedPackageDirectory(directory, scanned, "wasm-core");
+  if (!checked.ok) return { ok: false, errors: checked.errors };
+  freezeSnapshotMetadata(checked.package);
+  freezeSnapshotMetadata(checked.manifest);
+  return {
+    ok: true,
+    snapshot: Object.freeze({
+      package: checked.package,
+      manifest: checked.manifest,
+      wasmBytes: checked.artifactBytes,
+      packageBytes: checked.packageBytes,
+    }),
+  };
+}

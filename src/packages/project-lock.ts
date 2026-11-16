@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { isModuleId } from "../foundations/manifest.ts";
+import { isModuleId, type ModuleManifest } from "../foundations/manifest.ts";
 import { formatSemVer, parseSemVer } from "../foundations/semver.ts";
 import { validateProfile, type CompositionProfile } from "../foundations/profile.ts";
 import {
   validatePackagePaths,
 } from "./package-format.ts";
 import {
+  snapshotWasmReleasePackageDirectory,
+} from "./package-directory.ts";
+import {
+  localPackageObjectDirectory,
   readLocalCatalog,
   resolveLocalPackage,
   type LocalCatalogEntry,
@@ -259,4 +263,138 @@ export async function resolveProjectLock(
     resolvedModules.push({ entry: copyEntry(resolved.entry), objectDirectory: resolved.objectDirectory });
   }
   return { lock, modules: resolvedModules };
+}
+
+
+function freezeSnapshotMetadata<T>(value: T): T {
+  if (value === null || typeof value !== "object" ||
+      ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  const record = value as unknown as Record<string, unknown>;
+  for (const key of Object.keys(record)) freezeSnapshotMetadata(record[key]);
+  return Object.freeze(value);
+}
+
+export type WasmProjectModuleSnapshot = {
+  entry: LocalCatalogEntry;
+  manifest: ModuleManifest;
+  wasmBytes: Uint8Array;
+  packageBytes: number;
+};
+
+export type WasmProjectSnapshot = {
+  lock: ProjectLock;
+  /** Preserves the exact module order recorded by the profile and lock. */
+  modules: WasmProjectModuleSnapshot[];
+  /** Sum of complete package-tree bytes scanned, including manifests and documentation. */
+  totalBytes: number;
+};
+
+/**
+ * Creates an all-or-nothing, Wasm-only in-memory snapshot from an exact project lock.
+ *
+ * Unlike resolveProjectLock(), this operation verifies catalog metadata and the actual
+ * stored bytes in one package-directory scan per module. It never returns store paths,
+ * imports JavaScript, instantiates Wasm, or invokes module hooks.
+ *
+ * maxTotalBytes is mandatory so callers choose an explicit project-wide snapshot budget.
+ */
+export async function snapshotWasmProjectLock(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+  maxTotalBytes: number,
+): Promise<WasmProjectSnapshot> {
+  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
+    throw new Error("maxTotalBytes must be a positive safe integer.");
+  }
+
+  const profile = checkedProfile(profileInput);
+  const checkedLock = validateProjectLock(lockInput);
+  if (!checkedLock.ok) {
+    throw new Error("Project lock validation failed: " + checkedLock.errors.join("; "));
+  }
+  const lock = checkedLock.lock;
+  const expectedProfileDigest = computeProjectProfileDigest(profile);
+  if (lock.profileId !== profile.profileId || lock.profileDigest !== expectedProfileDigest) {
+    throw new Error("Project profile does not match the profile identity recorded in the lockfile.");
+  }
+  if (lock.modules.length !== profile.modules.length) {
+    throw new Error("Lockfile module set does not match the project profile.");
+  }
+
+  // Preflight every identity and runtime kind before scanning or retaining any artifact bytes.
+  const catalog = readLocalCatalog(storeDirectory);
+  const selected: Array<{ entry: LocalCatalogEntry; objectDirectory: string }> = [];
+  for (let index = 0; index < profile.modules.length; index += 1) {
+    const pin = profile.modules[index]!;
+    const locked = lock.modules[index]!;
+    if (locked.moduleId !== pin.moduleId || locked.version !== pin.version) {
+      throw new Error("Lockfile module order or exact version differs from the project profile at index " + index + ".");
+    }
+    if (locked.runtime !== "wasm-core") {
+      throw new Error(
+        "Wasm-only project snapshot refuses " + locked.moduleId + "@" + locked.version +
+        " because its runtime is " + locked.runtime + ".",
+      );
+    }
+    const catalogEntry = catalog.entries.find((entry) =>
+      entry.moduleId === locked.moduleId && entry.version === locked.version);
+    if (!catalogEntry) {
+      throw new Error("Locked release " + locked.moduleId + "@" + locked.version +
+        " is not registered in the local catalog.");
+    }
+    if (!sameEntry(catalogEntry, locked)) {
+      throw new Error("Local catalog identity differs from the lockfile for " +
+        locked.moduleId + "@" + locked.version + ".");
+    }
+    selected.push({
+      entry: copyEntry(locked),
+      objectDirectory: localPackageObjectDirectory(storeDirectory, locked.packageTreeDigest),
+    });
+  }
+
+  const modules: WasmProjectModuleSnapshot[] = [];
+  let totalBytes = 0;
+  for (const item of selected) {
+    const remaining = maxTotalBytes - totalBytes;
+    if (remaining <= 0) {
+      throw new Error("Project snapshot exceeds the configured aggregate byte limit of " + maxTotalBytes + " bytes.");
+    }
+    const result = await snapshotWasmReleasePackageDirectory(item.objectDirectory, remaining);
+    if (!result.ok) {
+      throw new Error("Wasm snapshot failed for " + item.entry.moduleId + "@" + item.entry.version +
+        ": " + result.errors.join("; "));
+    }
+    const actual: LocalCatalogEntry = {
+      moduleId: result.snapshot.package.moduleId,
+      version: result.snapshot.package.version,
+      packageTreeProfile: result.snapshot.package.packageTreeProfile,
+      packageTreeDigest: result.snapshot.package.packageTreeDigest,
+      artifactDigest: result.snapshot.package.artifactDigest,
+      runtime: "wasm-core",
+      files: [...result.snapshot.package.files],
+    };
+    if (!sameEntry(actual, item.entry)) {
+      throw new Error("Stored package bytes differ from the exact lock identity for " +
+        item.entry.moduleId + "@" + item.entry.version + ".");
+    }
+    if (result.snapshot.packageBytes > remaining) {
+      throw new Error("Project snapshot exceeds the configured aggregate byte limit of " + maxTotalBytes + " bytes.");
+    }
+    modules.push({
+      entry: copyEntry(item.entry),
+      manifest: result.snapshot.manifest,
+      wasmBytes: result.snapshot.wasmBytes,
+      packageBytes: result.snapshot.packageBytes,
+    });
+    totalBytes += result.snapshot.packageBytes;
+  }
+
+  freezeSnapshotMetadata(lock);
+  for (const module of modules) {
+    freezeSnapshotMetadata(module.entry);
+    Object.freeze(module);
+  }
+  Object.freeze(modules);
+  return Object.freeze({ lock, modules, totalBytes });
 }
