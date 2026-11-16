@@ -117,9 +117,15 @@ try {
     response.url().endsWith("/api/project/lock") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Generate lockfile" }).click();
   const lockResponse = await lockResponsePromise;
-  assert.equal(lockResponse.status(), 200, "Project lock API failed: " + await lockResponse.text());
+  const lockResponseBody = await lockResponse.text();
+  assert.equal(lockResponse.status(), 200, "Project lock API failed: " + lockResponseBody);
+  assert.equal(existsSync(lockPath), true, "Lock API returned success but did not publish the lockfile: " + lockResponseBody);
+  const projectRefresh = await page.evaluate(async () => {
+    const response = await fetch("/api/project", { cache: "no-store" });
+    return { status: response.status, body: await response.text() };
+  });
+  assert.equal(projectRefresh.status, 200, "Project refresh failed after lock creation: " + projectRefresh.body);
   await page.getByText("Created lockfile for org.example.console-project (2 packages).").waitFor();
-  assert.equal(existsSync(lockPath), true);
 
   await page.getByRole("button", { name: "Verify & resolve lock" }).click();
   await page.getByText("Project lock verified. 2 packages resolved by exact identity.").waitFor();
