@@ -5,7 +5,7 @@ import { createBrowserWasmBackend } from "../../src/foundations/wasm-browser.ts"
 import { CATALOG, moduleIdOf, toPackage, type CatalogEntry } from "../../src/modules/registry.ts";
 import { PROFILES } from "../../src/modules/profiles.ts";
 
-type View = "overview" | "profiles" | "modules" | "composition" | "catalog" | "diagnostics" | "settings";
+type View = "overview" | "profiles" | "modules" | "composition" | "catalog" | "store" | "project" | "diagnostics" | "settings";
 type ModuleFilter = "all" | "baseline" | "javascript" | "wasm" | "manifest-only";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("CGP console root element #app was not found.");
@@ -17,6 +17,105 @@ let compositionNotes: string[] = [];
 let busy = false;
 let moduleSearch = "";
 let moduleFilter: ModuleFilter = "all";
+type StoreEntry = { moduleId: string; version: string; runtime: string; packageTreeDigest: string; artifactDigest: string; files: string[] };
+type StagedEntry = { name: string; valid: boolean; moduleId?: string; version?: string; runtime?: string; packageTreeDigest?: string; errors?: string[] };
+type ProjectInfo = {
+  profile: { profileId: string; name: string; description?: string; modules: Array<{ moduleId: string; version: string }> };
+  profilePath: string;
+  lockPath: string | null;
+  lockExists: boolean;
+  lockPreview: unknown;
+  lockError: string | null;
+};
+let apiStatus: { storeDirectory: string; storeExists: boolean; profileConfigured: boolean; lockConfigured: boolean; stagingConfigured: boolean } | undefined;
+let storeEntries: StoreEntry[] = [];
+let storeVerification: { checked: number; valid: number; errors: Array<{ moduleId: string; version: string; error: string }> } | undefined;
+let stagedEntries: StagedEntry[] = [];
+let projectInfo: ProjectInfo | undefined;
+let projectResolution: { profileId: string; modules: Array<StoreEntry & { verified: boolean }> } | undefined;
+let apiNotice = "";
+let apiBusy = false;
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    cache: "no-store",
+    ...init,
+    headers: { ...(init?.headers ?? {}), ...(init?.method === "POST" ? { "content-type": "application/json" } : {}) },
+  });
+  const body = await response.json() as T & { ok?: boolean; error?: string };
+  if (!response.ok || body.ok === false) throw new Error(body.error ?? ("Console API returned " + response.status));
+  return body;
+}
+async function refreshStoreData(): Promise<void> {
+  try {
+    const [status, catalog, staging] = await Promise.all([
+      apiRequest<typeof apiStatus & { ok: boolean }>("/api/status"),
+      apiRequest<{ ok: boolean; entries: StoreEntry[] }>("/api/store/catalog"),
+      apiRequest<{ ok: boolean; packages: StagedEntry[] }>("/api/store/staging"),
+    ]);
+    apiStatus = status!;
+    storeEntries = catalog.entries;
+    stagedEntries = staging.packages;
+    apiNotice = "";
+  } catch (error) {
+    apiNotice = error instanceof Error ? error.message : String(error);
+  }
+  render();
+}
+async function refreshProjectData(): Promise<void> {
+  try {
+    projectInfo = await apiRequest<ProjectInfo & { ok: boolean }>("/api/project");
+    apiNotice = "";
+  } catch (error) {
+    projectInfo = undefined;
+    apiNotice = error instanceof Error ? error.message : String(error);
+  }
+  render();
+}
+async function verifyStore(): Promise<void> {
+  apiBusy = true; apiNotice = "Verifying every catalog-referenced package object…"; render();
+  try {
+    storeVerification = await apiRequest<typeof storeVerification & { ok: boolean }>("/api/store/verify");
+    apiNotice = storeVerification && storeVerification.errors.length
+      ? "Store verification found " + storeVerification.errors.length + " invalid object(s)."
+      : "All catalog-referenced package objects passed verification.";
+  } catch (error) { apiNotice = error instanceof Error ? error.message : String(error); }
+  apiBusy = false;
+  await refreshStoreData();
+}
+async function registerStaged(name: string): Promise<void> {
+  apiBusy = true; apiNotice = "Registering " + name + "…"; render();
+  try {
+    const result = await apiRequest<{ ok: boolean; idempotent: boolean; entry: StoreEntry }>("/api/store/register", {
+      method: "POST", body: JSON.stringify({ name }),
+    });
+    apiNotice = (result.idempotent ? "Already registered: " : "Registered: ") + result.entry.moduleId + "@" + result.entry.version;
+  } catch (error) { apiNotice = error instanceof Error ? error.message : String(error); }
+  apiBusy = false;
+  await refreshStoreData();
+}
+async function lockAction(mode: "create" | "update"): Promise<void> {
+  apiBusy = true; apiNotice = mode === "create" ? "Creating lockfile from verified store packages…" : "Updating lockfile from verified store packages…"; render();
+  try {
+    const result = await apiRequest<{ ok: boolean; profileId: string; moduleCount: number }>("/api/project/lock", {
+      method: "POST", body: JSON.stringify({ mode }),
+    });
+    apiNotice = (mode === "create" ? "Created" : "Updated") + " lockfile for " + result.profileId + " (" + result.moduleCount + " packages).";
+    projectResolution = undefined;
+  } catch (error) { apiNotice = error instanceof Error ? error.message : String(error); }
+  apiBusy = false;
+  await refreshProjectData();
+}
+async function resolveLock(): Promise<void> {
+  apiBusy = true; apiNotice = "Verifying project pins against catalog records and stored bytes…"; render();
+  try {
+    const result = await apiRequest<{ ok: boolean; profileId: string; modules: Array<StoreEntry & { verified: boolean }> }>("/api/project/resolve");
+    projectResolution = result;
+    apiNotice = "Project lock verified. " + result.modules.length + " packages resolved by exact identity.";
+  } catch (error) { projectResolution = undefined; apiNotice = error instanceof Error ? error.message : String(error); }
+  apiBusy = false;
+  render();
+}
 
 function esc(value: unknown): string {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
@@ -65,7 +164,9 @@ const NAV: Array<{ id: View; label: string; icon: string; section: "workspace" |
   { id: "profiles", label: "Profiles", icon: "profiles", section: "workspace" },
   { id: "modules", label: "Modules", icon: "modules", section: "workspace" },
   { id: "composition", label: "Composition", icon: "composition", section: "workspace" },
-  { id: "catalog", label: "Catalog", icon: "catalog", section: "workspace" },
+  { id: "catalog", label: "Bundled", icon: "catalog", section: "workspace" },
+  { id: "store", label: "Package Store", icon: "settings", section: "workspace" },
+  { id: "project", label: "Project", icon: "profiles", section: "workspace" },
   { id: "diagnostics", label: "Diagnostics", icon: "diagnostics", section: "system" },
   { id: "settings", label: "Settings", icon: "settings", section: "system" },
 ];
@@ -74,7 +175,9 @@ const VIEW_COPY: Record<View, { eyebrow: string; title: string; description: str
   profiles: { eyebrow: "Workspace", title: "Composition profiles", description: "Choose an exact set of module versions. Profiles do not upgrade or select versions automatically." },
   modules: { eyebrow: "Workspace", title: "Module catalog", description: "Browse the module examples bundled with this CGP checkout." },
   composition: { eyebrow: "Workspace", title: "Composition", description: "Resolve a profile through Foundations and inspect its modules, slots, dependencies, and runtime state." },
-  catalog: { eyebrow: "Workspace", title: "Package catalog", description: "Inspect the bundled module implementations and the runtime type CGP uses for each one." },
+  catalog: { eyebrow: "Workspace", title: "Bundled catalog", description: "Inspect the example modules compiled into this console build." },
+  store: { eyebrow: "Workspace", title: "Local package store", description: "Inspect registered immutable releases, verify stored bytes, and register validated staging snapshots." },
+  project: { eyebrow: "Workspace", title: "Project and lockfile", description: "Pin exact releases for a project, generate a reproducible lockfile, and verify that every locked package still matches the local store." },
   diagnostics: { eyebrow: "System", title: "Diagnostics", description: "Review the latest composition report and the phase-by-phase host result." },
   settings: { eyebrow: "System", title: "Console settings", description: "Visual tokens and runtime boundaries for this local browser console." },
 };
@@ -281,6 +384,70 @@ function renderSettings(): string {
     '<div class="detail-row"><span class="detail-label">Console storage</span><strong class="detail-value">None; no local persistence</strong></div>' +
     '<div class="detail-row"><span class="detail-label">Package acquisition</span><strong class="detail-value">Not implemented here</strong></div></div></div></article>';
 }
+function renderStore(): string {
+  const entries = storeEntries.length ? storeEntries.map((entry) =>
+    '<tr><td><span class="table-primary">' + esc(entry.moduleId) + '</span><span class="table-secondary">' + esc(entry.version) + '</span></td>' +
+    '<td>' + esc(entry.runtime) + '</td><td><span class="digest-text">' + esc(entry.packageTreeDigest) + '</span><span class="table-secondary">Artifact ' + esc(entry.artifactDigest) + '</span></td>' +
+    '<td>' + entry.files.length + '</td></tr>').join("") :
+    '<tr><td colspan="4">No packages are registered in this local store yet.</td></tr>';
+  const staging = stagedEntries.length ? stagedEntries.map((item) =>
+    '<article class="diagnostic-item staged-entry"><div><strong>' + esc(item.name) + '</strong>' +
+    (item.valid ? '<p>' + esc(item.moduleId) + '@' + esc(item.version) + ' · ' + esc(item.runtime) + '</p>' :
+      '<p>Invalid staging package · ' + esc(item.errors?.join("; ") ?? "Validation failed") + '</p>') +
+    '</div>' + (item.valid ? '<button class="cgp-button cgp-button--secondary" type="button" data-action="register-staged" data-name="' + esc(item.name) + '" ' + (apiBusy ? "disabled" : "") + '>Register</button>' : "") +
+    '</article>').join("") : '<div class="notice-empty">No validated staging snapshots were found in the configured staging root.</div>';
+  const verification = storeVerification
+    ? '<span class="cgp-badge ' + (storeVerification.errors.length ? "cgp-badge--error" : "cgp-badge--success") + '">' +
+      storeVerification.valid + ' / ' + storeVerification.checked + ' verified</span>'
+    : '<span class="cgp-badge cgp-badge--info">Not verified yet</span>';
+  return '<div class="summary-grid">' +
+    '<article class="cgp-panel summary-card"><p class="summary-label">Registered releases</p><strong class="summary-value">' + storeEntries.length + '</strong><p class="summary-detail">Catalog entries; not a byte-integrity result</p></article>' +
+    '<article class="cgp-panel summary-card"><p class="summary-label">Store verification</p><div class="summary-value summary-value--status">' + verification + '</div><p class="summary-detail">Full object verification is explicit</p></article>' +
+    '<article class="cgp-panel summary-card"><p class="summary-label">Store location</p><strong class="summary-value summary-value--status">' + esc(apiStatus?.storeDirectory ?? "Unavailable") + '</strong><p class="summary-detail">' + (apiStatus?.storeExists ? "Directory present" : "Created when store API is used") + '</p></article></div>' +
+    '<div class="heading-actions store-actions"><button class="cgp-button cgp-button--primary" type="button" data-action="verify-store" ' + (apiBusy ? "disabled" : "") + '>Verify all objects</button><button class="cgp-button cgp-button--secondary" type="button" data-action="refresh-store" ' + (apiBusy ? "disabled" : "") + '>Refresh store</button></div>' +
+    (apiNotice ? '<div class="diagnostic-item api-notice">' + esc(apiNotice) + '</div>' : "") +
+    '<article class="cgp-panel" style="margin-top:16px"><div class="panel-heading"><div><h2>Content-addressed releases</h2><p>Catalog metadata is shown separately from byte verification.</p></div><span class="cgp-badge cgp-badge--info">cgp.local-catalog/1</span></div>' +
+    '<div class="table-wrap"><table class="data-table"><thead><tr><th>Release</th><th>Runtime</th><th>Content identity</th><th>Files</th></tr></thead><tbody>' + entries + '</tbody></table></div></article>' +
+    '<article class="cgp-panel" style="margin-top:16px"><div class="panel-heading"><div><h2>Staging snapshots</h2><p>Register a validated staged package into the local content store.</p></div></div>' +
+    (apiStatus?.stagingConfigured ? '<div class="panel-body"><div class="diagnostic-stack">' + staging + '</div></div>' :
+      '<div class="panel-body"><div class="notice-empty">No staging root configured. Restart with --staging &lt;staging-root&gt; to register packages from this screen.</div></div>') +
+    '</article>';
+}
+
+function renderProject(): string {
+  if (!projectInfo) {
+    return '<div class="cgp-panel"><div class="panel-heading"><div><h2>Project profile not connected</h2><p>Connect a profile file and lockfile path when starting the local console.</p></div></div>' +
+      '<div class="panel-body"><p class="cgp-muted">' + esc(apiNotice || "No project profile configured.") + '</p><p class="table-secondary">Example: --profile examples/project.json --lock ./out/project.cgp.lock.json</p>' +
+      '<button class="cgp-button cgp-button--secondary" type="button" data-action="refresh-project">Retry connection</button></div></div>';
+  }
+  const pins = projectInfo.profile.modules.map((item) =>
+    '<div class="detail-row"><span class="detail-label">' + esc(item.moduleId) + '</span><strong class="detail-value">' + esc(item.version) + '</strong></div>').join("");
+  const lockPreview = projectInfo.lockPreview && typeof projectInfo.lockPreview === "object" ? projectInfo.lockPreview as { modules?: unknown[]; profileDigest?: string } : undefined;
+  const resolved = projectResolution?.modules.length ? projectResolution.modules.map((item) =>
+    '<tr><td><span class="table-primary">' + esc(item.moduleId) + '</span><span class="table-secondary">' + esc(item.version) + '</span></td>' +
+    '<td>' + esc(item.runtime) + '</td><td><span class="cgp-badge cgp-badge--success">Bytes verified</span></td>' +
+    '<td><span class="digest-text">' + esc(item.packageTreeDigest) + '</span><span class="table-secondary">Artifact ' + esc(item.artifactDigest) + '</span></td></tr>').join("") :
+    '<tr><td colspan="4">Lock has not been resolved in this session.</td></tr>';
+  const lockState = projectInfo.lockError
+    ? '<span class="cgp-badge cgp-badge--error">Unreadable lockfile</span>'
+    : projectInfo.lockExists ? '<span class="cgp-badge cgp-badge--info">Lockfile present</span>' : '<span class="cgp-badge cgp-badge--warning">No lockfile yet</span>';
+  return '<div class="dashboard-grid">' +
+    '<article class="cgp-panel"><div class="panel-heading"><div><h2>' + esc(projectInfo.profile.name) + '</h2><p>' + esc(projectInfo.profile.profileId) + '</p></div>' + lockState + '</div>' +
+    '<div class="panel-body"><div class="detail-list"><div class="detail-row"><span class="detail-label">Profile file</span><strong class="detail-value">' + esc(projectInfo.profilePath) + '</strong></div>' +
+    '<div class="detail-row"><span class="detail-label">Lockfile</span><strong class="detail-value">' + esc(projectInfo.lockPath ?? "Not configured") + '</strong></div>' +
+    '<div class="detail-row"><span class="detail-label">Pinned modules</span><strong class="detail-value">' + projectInfo.profile.modules.length + '</strong></div>' +
+    '<div class="detail-row"><span class="detail-label">Lock entries</span><strong class="detail-value">' + (lockPreview?.modules?.length ?? "—") + '</strong></div></div>' +
+    '<div class="profile-pin-list">' + pins + '</div></div></article>' +
+    '<article class="cgp-panel"><div class="panel-heading"><div><h2>Lockfile actions</h2><p>Exact package identities, verified against stored bytes.</p></div></div><div class="panel-body lock-actions">' +
+    '<button class="cgp-button cgp-button--primary" type="button" data-action="' + (projectInfo.lockExists ? "update-lock" : "create-lock") + '" ' + (apiBusy ? "disabled" : "") + '>' + (projectInfo.lockExists ? "Update lockfile" : "Generate lockfile") + '</button>' +
+    '<button class="cgp-button cgp-button--secondary" type="button" data-action="resolve-lock" ' + (!projectInfo.lockExists || apiBusy ? "disabled" : "") + '>Verify & resolve lock</button>' +
+    (projectInfo.lockError ? '<p class="api-error">' + esc(projectInfo.lockError) + '</p>' : "") +
+    '<p class="table-secondary">Updating a lockfile replaces its recorded digests only after all exact releases are found and verified in the store.</p></div></article></div>' +
+    (apiNotice ? '<div class="diagnostic-item api-notice">' + esc(apiNotice) + '</div>' : "") +
+    '<article class="cgp-panel" style="margin-top:16px"><div class="panel-heading"><div><h2>Verified lock resolution</h2><p>' + (projectResolution ? esc(projectResolution.modules.length + " exact package(s) resolved") : "No verification result for this session") + '</p></div></div>' +
+    '<div class="table-wrap"><table class="data-table"><thead><tr><th>Package</th><th>Runtime</th><th>Integrity</th><th>Digests</th></tr></thead><tbody>' + resolved + '</tbody></table></div></article>';
+}
+
 function renderView(): string {
   switch (activeView) {
     case "overview": return renderOverview();
@@ -288,6 +455,8 @@ function renderView(): string {
     case "modules": return renderModules();
     case "composition": return renderComposition();
     case "catalog": return renderCatalog();
+    case "store": return renderStore();
+    case "project": return renderProject();
     case "diagnostics": return renderDiagnostics();
     case "settings": return renderSettings();
   }
@@ -359,6 +528,13 @@ app.addEventListener("click", async (event) => {
   const actionButton = target.closest<HTMLElement>("[data-action]");
   if (!actionButton) return;
   if (actionButton.dataset.action === "compose") await runComposition();
+  if (actionButton.dataset.action === "refresh-store") await refreshStoreData();
+  if (actionButton.dataset.action === "verify-store") await verifyStore();
+  if (actionButton.dataset.action === "refresh-project") await refreshProjectData();
+  if (actionButton.dataset.action === "create-lock") await lockAction("create");
+  if (actionButton.dataset.action === "update-lock") await lockAction("update");
+  if (actionButton.dataset.action === "resolve-lock") await resolveLock();
+  if (actionButton.dataset.action === "register-staged" && actionButton.dataset.name) await registerStaged(actionButton.dataset.name);
   if (actionButton.dataset.action === "shutdown" && activeComposition?.runtimeActive && !activeComposition.quiesced) {
     await activeComposition.shutdown();
     render();
@@ -383,3 +559,5 @@ app.addEventListener("input", (event) => {
 
 render();
 void runComposition();
+void refreshStoreData();
+void refreshProjectData();
