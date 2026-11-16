@@ -34,6 +34,8 @@ let stagedEntries: StagedEntry[] = [];
 let projectInfo: ProjectInfo | undefined;
 let projectResolution: { profileId: string; modules: Array<StoreEntry & { verified: boolean }> } | undefined;
 let apiNotice = "";
+let projectError = "";
+let storeError = "";
 let apiBusy = false;
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -56,17 +58,20 @@ async function refreshStoreData(): Promise<void> {
     apiStatus = status!;
     storeEntries = catalog.entries;
     stagedEntries = staging.packages;
+    storeError = "";
   } catch (error) {
-    apiNotice = error instanceof Error ? error.message : String(error);
+    storeError = error instanceof Error ? error.message : String(error);
   }
   render();
 }
 async function refreshProjectData(): Promise<void> {
   try {
     projectInfo = await apiRequest<ProjectInfo & { ok: boolean }>("/api/project");
+    projectError = "";
   } catch (error) {
     projectInfo = undefined;
-    apiNotice = error instanceof Error ? error.message : String(error);
+    projectError = error instanceof Error ? error.message : String(error);
+    if (!projectError.includes("not configured")) apiNotice = projectError;
   }
   render();
 }
@@ -403,6 +408,7 @@ function renderStore(): string {
     '<article class="cgp-panel summary-card"><p class="summary-label">Store verification</p><div class="summary-value summary-value--status">' + verification + '</div><p class="summary-detail">Full object verification is explicit</p></article>' +
     '<article class="cgp-panel summary-card"><p class="summary-label">Store location</p><strong class="summary-value summary-value--status">' + esc(apiStatus?.storeDirectory ?? "Unavailable") + '</strong><p class="summary-detail">' + (apiStatus?.storeExists ? "Directory present" : "Created when store API is used") + '</p></article></div>' +
     '<div class="heading-actions store-actions"><button class="cgp-button cgp-button--primary" type="button" data-action="verify-store" ' + (apiBusy ? "disabled" : "") + '>Verify all objects</button><button class="cgp-button cgp-button--secondary" type="button" data-action="refresh-store" ' + (apiBusy ? "disabled" : "") + '>Refresh store</button></div>' +
+    (storeError ? '<div class="diagnostic-item api-notice">' + esc(storeError) + '</div>' : "") +
     (apiNotice ? '<div class="diagnostic-item api-notice">' + esc(apiNotice) + '</div>' : "") +
     '<article class="cgp-panel" style="margin-top:16px"><div class="panel-heading"><div><h2>Content-addressed releases</h2><p>Catalog metadata is shown separately from byte verification.</p></div><span class="cgp-badge cgp-badge--info">cgp.local-catalog/1</span></div>' +
     '<div class="table-wrap"><table class="data-table"><thead><tr><th>Release</th><th>Runtime</th><th>Content identity</th><th>Files</th></tr></thead><tbody>' + entries + '</tbody></table></div></article>' +
@@ -415,7 +421,7 @@ function renderStore(): string {
 function renderProject(): string {
   if (!projectInfo) {
     return '<div class="cgp-panel"><div class="panel-heading"><div><h2>Project profile not connected</h2><p>Connect a profile file and lockfile path when starting the local console.</p></div></div>' +
-      '<div class="panel-body"><p class="cgp-muted">' + esc(apiNotice || "No project profile configured.") + '</p><p class="table-secondary">Example: --profile examples/project.json --lock ./out/project.cgp.lock.json</p>' +
+      '<div class="panel-body"><p class="cgp-muted">' + esc(projectError || "No project profile configured.") + '</p><p class="table-secondary">Example: --profile examples/project.json --lock ./out/project.cgp.lock.json</p>' +
       '<button class="cgp-button cgp-button--secondary" type="button" data-action="refresh-project">Retry connection</button></div></div>';
   }
   const pins = projectInfo.profile.modules.map((item) =>
@@ -507,7 +513,12 @@ app.addEventListener("click", async (event) => {
   const viewButton = target.closest<HTMLElement>("[data-view]");
   if (viewButton) {
     const view = viewButton.dataset.view as View | undefined;
-    if (view && view in VIEW_COPY) { activeView = view; render(); }
+    if (view && view in VIEW_COPY) {
+      activeView = view;
+      render();
+      if (view === "store") void refreshStoreData();
+      if (view === "project") void refreshProjectData();
+    }
     return;
   }
   const filterButton = target.closest<HTMLElement>("[data-filter]");
