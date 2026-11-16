@@ -44,6 +44,7 @@ function runtimeOf(entry: CatalogEntry): string {
 }
 function statusOf(result: CompositionResult | undefined): string {
   if (!result) return busy ? "Preparing" : "Not loaded";
+  if (result.quiesced) return "Shutdown";
   if (result.runtimeActive && result.ok) return "Active";
   if (result.runtimeActive) return "Partially active";
   return "Refused";
@@ -131,8 +132,8 @@ function renderOverview(): string {
     '</strong><p class="summary-detail">Entries in the source catalog</p></article>' +
     '<article class="cgp-panel summary-card"><p class="summary-label">Composition profiles</p><strong class="summary-value">' + PROFILES.length +
     '</strong><p class="summary-detail">Exact-version example selections</p></article>' +
-    '<article class="cgp-panel summary-card"><p class="summary-label">Active modules</p><strong class="summary-value">' + activeModules +
-    '</strong><p class="summary-detail">' + esc(status) + ' · ' + esc(profile.profile.name) + '</p></article></div>' +
+    '<article class="cgp-panel summary-card"><p class="summary-label">Accepted modules</p><strong class="summary-value">' + activeModules +
+    '</strong><p class="summary-detail">Admitted by the latest resolution · ' + esc(status) + '</p></article></div>' +
     '<div class="dashboard-grid">' +
       '<article class="cgp-panel"><div class="panel-heading"><div><h2>Composition order</h2><p>Foundations’ resolved module order</p></div><span class="cgp-badge ' +
       statusClass(status) + '">' + esc(status) + '</span></div><div class="panel-body"><div class="composition-flow">' + graph + '</div></div></article>' +
@@ -221,7 +222,7 @@ function renderComposition(): string {
   return '<div class="composition-toolbar"><label>Profile<select id="profile-select" class="cgp-control" data-control="profile">' + options +
     '</select></label><button class="cgp-button cgp-button--primary" type="button" data-action="compose" ' + (busy ? "disabled" : "") + '>' +
     (busy ? "Composing…" : "Compose selected profile") + '</button><button class="cgp-button cgp-button--secondary" type="button" data-action="shutdown" ' +
-    (!result?.runtimeActive || busy ? "disabled" : "") + '>Shutdown composition</button></div>' + notes +
+    (!result?.runtimeActive || result.quiesced || busy ? "disabled" : "") + '>Shutdown composition</button></div>' + notes +
     '<div class="runtime-summary"><span class="cgp-badge ' + statusClass(statusOf(result)) + '">' + esc(statusOf(result)) + '</span>' +
     '<span class="cgp-badge cgp-badge--info">' + profile.profile.modules.length + ' profile pins</span><span class="runtime-fingerprint" title="' +
     esc(result?.fingerprint ?? "Not composed") + '">Fingerprint: ' + esc(result?.fingerprint ?? "Not composed") + '</span></div>' +
