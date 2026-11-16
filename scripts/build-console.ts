@@ -1,5 +1,5 @@
 import { cpSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
@@ -7,7 +7,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "dist/console");
 
 export async function buildConsole(): Promise<void> {
-  if (output === root || !output.startsWith(root + "/")) {
+  const outputRelative = relative(root, output);
+  if (outputRelative === "" || outputRelative === ".." || outputRelative.startsWith(".." + sep) || isAbsolute(outputRelative)) {
     throw new Error("Refusing to build outside dist/console.");
   }
   rmSync(output, { recursive: true, force: true });
