@@ -137,7 +137,7 @@ function scanDirectory(root: string, maxTotalBytes?: number): ScanResult {
         errors.push("Cannot read package file \"" + path + "\".");
         continue;
       }
-      files.push({ path, bytes: new Uint8Array(bytes) });
+      files.push({ path, bytes });
       fileCount += 1;
       totalBytes += bytes.byteLength;
     }
@@ -326,7 +326,7 @@ export async function snapshotWasmReleasePackageDirectory(
     snapshot: {
       package: checked.package,
       manifest: checked.manifest,
-      wasmBytes: new Uint8Array(checked.artifactBytes),
+      wasmBytes: checked.artifactBytes,
       packageBytes: checked.packageBytes,
     },
   };
