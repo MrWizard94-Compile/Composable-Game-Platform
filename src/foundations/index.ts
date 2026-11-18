@@ -57,4 +57,6 @@ export type { HostBudget, LogBudget } from "./wasm-backend.ts";
 export { createCrossBackend, CROSS_POLICY } from "./cross-backend.ts";
 export { ABI_HOOK, ABI_ID, encodeAbiJson, isAbiHandle } from "./abi.ts";
 export type { AbiHandle } from "./abi.ts";
+export { LANGUAGE_INDEX, TOP_LANGUAGES } from "./languages.ts";
+export type { LanguagePackage, LanguageRow } from "./languages.ts";
 export type { Diagnostic, PhaseName, PhaseRecord } from "./diagnostics.ts";

@@ -1,9 +1,9 @@
 import { createBrowserWasmBackend } from "../src/foundations/wasm-browser.ts";
-import { compose, runExclusive, type CompositionResult } from "../src/foundations/host.ts";
+import { callService, runPipeline } from "../src/foundations/dispatch.ts";
+import { boundaryGuest, storeGuest, templateGuest, wasiGuest, withCustomPadding } from "../src/foundations/wasm-build.ts";
+import { compose, runExclusive, type CompositionResult, type ModuleImplementation } from "../src/foundations/host.ts";
 import { isAbiHandle } from "../src/foundations/abi.ts";
 import { captureSave, restoreSave, type SaveDocument } from "../src/foundations/save.ts";
-import { callService } from "../src/foundations/dispatch.ts";
-import { templateGuest, wasiGuest, withCustomPadding } from "../src/foundations/wasm-build.ts";
 import { CROSS_POLICY, createCrossBackend } from "../src/foundations/cross-backend.ts";
 import { SIM_IDS, packagesFor } from "../src/modules/registry.ts";
 import { advanceSimulation, seedSimulation } from "../src/modules/sim.ts";
@@ -56,6 +56,228 @@ export async function runBrowserComposition(): Promise<{
     paddedDetail: padded.diagnostics.map((item) => item.message).join("\n"),
     sessions: backend.openSessions(),
   };
+}
+
+export type BrowserBoundaryReport = {
+  active: boolean;
+  detail: string;
+  piped: unknown;
+  copied: boolean;
+  service: unknown;
+  serviceCopied: boolean;
+  refused: boolean;
+  refusedMessage: string;
+  lateSkipped: boolean;
+  still: unknown;
+  jsToGuest: unknown;
+  guestToJs: unknown;
+  sessions: number;
+  guests: number;
+};
+
+/**
+ * JavaScript and one unlabeled guest share copied JSON.
+ * The guest is not a C, Go, or Python program. A function does not enter it.
+ */
+export async function runBrowserBoundary(): Promise<BrowserBoundaryReport> {
+  const wasm = createBrowserWasmBackend();
+  const backend = createCrossBackend(wasm);
+  const open: CompositionResult[] = [];
+  const report: BrowserBoundaryReport = {
+    active: false,
+    detail: "",
+    piped: undefined,
+    copied: false,
+    service: undefined,
+    serviceCopied: false,
+    refused: false,
+    refusedMessage: "",
+    lateSkipped: false,
+    still: undefined,
+    jsToGuest: undefined,
+    guestToJs: undefined,
+    sessions: -1,
+    guests: -1,
+  };
+  try {
+    let poison = false;
+    let made: { n: number } | undefined;
+    let seen: unknown;
+    let lateRan = 0;
+    const desk = {
+      manifest: {
+        moduleId: "org.example.desk",
+        name: "desk",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        exposesSlots: [
+          { slotId: "example.pipe", contract: "example.pipe", contractVersion: "1.0.0", kind: "pipeline", required: false },
+          { slotId: "example.ask", contract: "example.ask", contractVersion: "1.0.0", kind: "service", required: false },
+        ],
+      },
+    };
+    const early: { manifest: unknown; implementation: ModuleImplementation } = {
+      manifest: {
+        moduleId: "org.example.early",
+        name: "early",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+      },
+      implementation: {
+        register(ctx) {
+          ctx.contribute("example.pipe", {
+            id: "early",
+            order: 0,
+            payload() {
+              if (poison) return function stop() {};
+              made = { n: 1 };
+              return made;
+            },
+          });
+        },
+      },
+    };
+    const late: { manifest: unknown; implementation: ModuleImplementation } = {
+      manifest: {
+        moduleId: "org.example.late",
+        name: "late",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+      },
+      implementation: {
+        register(ctx) {
+          ctx.contribute("example.pipe", {
+            id: "late",
+            order: 20,
+            payload(input: unknown) {
+              lateRan += 1;
+              const row = input && typeof input === "object" ? (input as { arg?: unknown }) : undefined;
+              seen = row?.arg;
+              const arg = row?.arg as { n?: unknown } | undefined;
+              return { n: arg?.n };
+            },
+          });
+        },
+      },
+    };
+    const relay = {
+      manifest: {
+        moduleId: "org.example.relay",
+        name: "relay",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        connectsTo: [
+          { slot: "example.pipe", contract: "example.pipe/1" },
+          { slot: "example.ask", contract: "example.ask/1" },
+        ],
+      },
+      implementation: { wasm: boundaryGuest() },
+    };
+    const mixed = await compose([desk, early, relay, late], { backend, policy: CROSS_POLICY, profileName: "lang-call" });
+    open.push(mixed);
+    report.detail = mixed.diagnostics.map((item) => item.message).join("\n");
+    report.active = mixed.runtimeActive;
+    if (!mixed.runtimeActive) return report;
+    const piped = await runPipeline(mixed, "example.pipe", null);
+    report.piped = piped.output;
+    report.copied = seen !== made && JSON.stringify(seen) === JSON.stringify({ n: 1 });
+    const input = { n: 1 };
+    const asked = await callService(mixed, "example.ask", input);
+    const echoed = asked.output as { arg?: unknown } | undefined;
+    report.service = echoed?.arg;
+    report.serviceCopied = echoed?.arg !== input && JSON.stringify(echoed?.arg) === JSON.stringify(input);
+    poison = true;
+    const before = lateRan;
+    const refused = await runPipeline(mixed, "example.pipe", null);
+    report.refused = refused.ok === false;
+    report.refusedMessage = refused.stages.map((item) => item.message ?? "").join("\n");
+    report.lateSkipped = lateRan === before;
+    const still = await callService(mixed, "example.ask", { n: 2 });
+    report.still = (still.output as { arg?: unknown } | undefined)?.arg;
+
+    const state = { n: 4, label: "js" };
+    const jsBox: { manifest: unknown; implementation: ModuleImplementation } = {
+      manifest: {
+        moduleId: "org.example.kept",
+        name: "kept",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        save: { version: "1.0.0" },
+      },
+      implementation: {
+        register(ctx) {
+          ctx.keep(state);
+        },
+        exportState() {
+          return { n: state.n, label: state.label };
+        },
+        importState(_ctx, saved) {
+          const row = saved as { n?: unknown; label?: unknown };
+          if (typeof row?.n === "number") state.n = row.n;
+          if (typeof row?.label === "string") state.label = row.label;
+        },
+      },
+    };
+    const js = await compose([jsBox], { backend, policy: CROSS_POLICY, profileName: "lang-js" });
+    open.push(js);
+    if (!js.runtimeActive) {
+      report.detail = js.diagnostics.map((item) => item.message).join("\n");
+      return report;
+    }
+    const fromJs = await captureSave(js);
+    const guest = await compose(
+      [
+        {
+          manifest: {
+            moduleId: "org.example.kept",
+            name: "kept",
+            version: "1.0.0",
+            moduleApi: ">=1.0.0 <2.0.0",
+            save: { version: "1.0.0" },
+          },
+          implementation: { wasm: storeGuest("{}") },
+        },
+      ],
+      { backend, policy: CROSS_POLICY, profileName: "lang-guest" },
+    );
+    open.push(guest);
+    if (!fromJs.ok || !guest.runtimeActive) {
+      report.detail = guest.diagnostics.map((item) => item.message).join("\n");
+      return report;
+    }
+    const applied = await restoreSave(guest, fromJs.document);
+    if (!applied.ok) {
+      report.detail = applied.notices.map((item) => item.message).join("\n");
+      return report;
+    }
+    const guestShot = await captureSave(guest);
+    report.jsToGuest = guestShot.document.slices[0]?.payload;
+    const fromGuest = await restoreSave(guest, {
+      ...guestShot.document,
+      slices: [{ moduleId: "org.example.kept", version: "1.0.0", payload: { n: 9, label: "guest" } }],
+    });
+    if (!fromGuest.ok) {
+      report.detail = fromGuest.notices.map((item) => item.message).join("\n");
+      return report;
+    }
+    const stored = await captureSave(guest);
+    const back = await restoreSave(js, stored.document);
+    if (!back.ok) {
+      report.detail = back.notices.map((item) => item.message).join("\n");
+      return report;
+    }
+    report.guestToJs = (await captureSave(js)).document.slices[0]?.payload;
+    return report;
+  } finally {
+    for (const result of open) {
+      if (result.runtimeActive && !result.quiesced) await result.shutdown();
+    }
+    report.sessions = wasm.openSessions();
+    report.guests = wasm.resourceUsage().guests;
+    await wasm.dispose();
+  }
 }
 
 const PROOF_DRIVES = [
