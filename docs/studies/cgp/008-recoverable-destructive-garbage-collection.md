@@ -54,7 +54,9 @@ A writer lock is adopted only when both of these are true: its token equals the 
 
 ## Idle claims
 
-A `deleting` reservation outlives the process that created it. That is not, by itself, an abandoned in-progress deletion. `reconcileIdleDeletionClaims` is a separate writer-gated command. It returns idle `deleting` records to `ready` and does not delete bytes. It leaves `intent`, `quarantined`, `removing`, and `ambiguous` records for recovery. It does not run during reads or registration.
+A `deleting` reservation outlives the process that created it. That is not, by itself, an abandoned in-progress deletion. The claim token is the owner's credential. Pid liveness and age are not proof the owner is gone, so reconcile does not use them.
+
+`reconcileIdleDeletionClaims` is a writer-gated report. Without `cancelClaim` it leaves every token-owned `deleting` record in place and does not delete bytes. The holder releases their own claim with `releasePackageObjectDeletionClaim` and the token. `cancelClaim` is a different operation: administrative cancellation of that one digest. It revokes the holder even if they still have the token. It does not sweep other claims. It leaves `intent`, `quarantined`, `removing`, and `ambiguous` records for recovery. It does not run during reads or registration.
 
 ## Commands
 
@@ -64,9 +66,10 @@ npm run store:gc-apply -- --store ./out/cgp-store --apply --grace-hours 24
 npm run store:gc-recover -- --store ./out/cgp-store --apply
 npm run store:gc-reconcile -- --store ./out/cgp-store --apply
 npm run store:gc-reconcile -- --store ./out/cgp-store --apply --digest sha256:<hex>
+npm run store:gc-reconcile -- --store ./out/cgp-store --apply --cancel-claim --digest sha256:<hex>
 ```
 
-Apply, recover, and reconcile refuse to run without `--apply`. Tests use temporary stores only.
+`--apply` alone reports token-owned claims and releases none. `--cancel-claim` requires one `--digest` and revokes that holder. Apply, recover, and reconcile all refuse to run without `--apply`. Reconcile does not delete package bytes. Tests use temporary stores only.
 
 ## What this does not guarantee
 

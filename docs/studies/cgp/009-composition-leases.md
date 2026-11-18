@@ -58,7 +58,7 @@ npm run store:leases -- --store ./out/cgp-store --action release-abandoned --app
 
 ## What this does not guarantee
 
-- No path-backed JavaScript package loading. JavaScript ESM and mixed activation stay refused.
+- No path-backed JavaScript package loading. Study 010 imports snapshotted `module.mjs` bytes after an explicit trust opt-in. It still does not load JavaScript from a lockfile path or keep a store path open.
 - No automatic stale-lease reclamation and no automatic stale-reader reclamation.
 - No automatic garbage collection. Apply remains explicit.
 - No multi-host or network-filesystem coordination. Same-host local filesystem only.

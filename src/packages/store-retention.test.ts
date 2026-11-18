@@ -315,13 +315,26 @@ test("a tombstone symlink is refused and its target is not removed",async t=>{
  assert.equal(existsSync(join(tombstonePath(store,digest),"linked")),true);
 });
 
-test("idle claims can be reconciled explicitly and a live or unrelated writer lock is not stolen",async t=>{
+test("idle claims stay with their token owner unless that claim is explicitly cancelled",async t=>{
  resetGcHooks(t);
  const {store,digest,registered}=await unpinnedStore(t);
- await claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()});
- const reconciled=await reconcileIdleDeletionClaims(store,{now:later(),digest});
- assert.deepEqual(reconciled.released,[digest]);
+ const claim=await claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()});
+ setStoreWriterLivenessProbeForTests(()=>false);
+ const held=await reconcileIdleDeletionClaims(store,{now:later(),digest});
+ assert.deepEqual(held.released,[]);
+ assert.equal(held.retained[0]?.digest,digest);
+ assert.match(held.retained[0]?.reason??"",/token owner/);
+ assert.equal(stateOf(store,digest),"deleting");
  assert.equal(existsSync(registered.objectDirectory),true);
+ await assert.rejects(reconcileIdleDeletionClaims(store,{now:later(),cancelClaim:"sha256:"+"0".repeat(64)}),/did not change other claims/);
+ assert.equal(stateOf(store,digest),"deleting");
+ const cancelled=await reconcileIdleDeletionClaims(store,{now:later(),cancelClaim:digest});
+ assert.deepEqual(cancelled.released,[digest]);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ assert.equal(stateOf(store,digest),"ready");
+ await releasePackageObjectDeletionClaim(store,digest,claim.claimToken).then(()=>assert.fail("released claim must not still match"),()=>{});
+ const again=await claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()});
+ await releasePackageObjectDeletionClaim(store,digest,again.claimToken);
  assert.equal(stateOf(store,digest),"ready");
  setStoreGcFaultForTests("after-intent");
  await assert.rejects(applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/after-intent/);
@@ -514,5 +527,25 @@ test("composition-lease commands list and release without deleting bytes",async 
  assert.match(abandoned.stdout,/were not deleted/);
  assert.equal(existsSync(leaseFile(store,abandonedId)),false);
  assert.equal(existsSync(registered.objectDirectory),true);
+});
+
+test("reconcile refuses to sweep token-owned claims and cancellation names one digest",async t=>{
+ const {store,digest,registered}=await unpinnedStore(t);
+ const claim=await claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()});
+ const run=(...args:string[])=>spawnSync(process.execPath,["--experimental-strip-types","scripts/reconcile-store-claims.ts","--store",store,...args],{cwd:repositoryRoot,encoding:"utf8"});
+ const listed=run("--apply","--digest",digest);
+ assert.equal(listed.status,0,listed.stderr);
+ assert.match(listed.stdout,/left in place/);
+ assert.equal(stateOf(store,digest),"deleting");
+ const sweep=run("--apply","--cancel-claim");
+ assert.notEqual(sweep.status,0);
+ assert.match(sweep.stderr,/requires --digest/);
+ assert.equal(stateOf(store,digest),"deleting");
+ const cancelled=run("--apply","--cancel-claim","--digest",digest);
+ assert.equal(cancelled.status,0,cancelled.stderr);
+ assert.match(cancelled.stdout,/no longer owns it/);
+ assert.equal(stateOf(store,digest),"ready");
+ assert.equal(existsSync(registered.objectDirectory),true);
+ await assert.rejects(releasePackageObjectDeletionClaim(store,digest,claim.claimToken),/does not own/);
 });
 

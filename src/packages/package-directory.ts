@@ -393,3 +393,46 @@ export async function snapshotWasmReleasePackageDirectory(
     }),
   };
 }
+
+export type ReleasePackageSnapshot = {
+  package: ReleasePackageSummary;
+  manifest: ModuleManifest;
+  /** Owned bytes of the runtime artifact from the same scan that produced the digests. */
+  artifactBytes: Uint8Array;
+  packageBytes: number;
+};
+
+export type ReleasePackageSnapshotValidation =
+  | { ok: true; snapshot: ReleasePackageSnapshot }
+  | { ok: false; errors: string[] };
+
+/**
+ * One bounded scan of a wasm-core or javascript-esm release.
+ * Does not import JavaScript or instantiate WebAssembly.
+ */
+export async function snapshotReleasePackageDirectory(
+  directory: string,
+  maxPackageBytes: number,
+): Promise<ReleasePackageSnapshotValidation> {
+  if (!Number.isSafeInteger(maxPackageBytes) || maxPackageBytes <= 0) {
+    return { ok: false, errors: ["maxPackageBytes must be a positive safe integer."] };
+  }
+  const scanned = scanDirectory(directory, maxPackageBytes);
+  const checked = await validateScannedPackageDirectory(directory, scanned);
+  if (!checked.ok) return { ok: false, errors: checked.errors };
+  const kind = checked.package.descriptor.runtime.kind;
+  if (kind !== "wasm-core" && kind !== "javascript-esm") {
+    return { ok: false, errors: ["Unsupported package runtime: " + kind + "."] };
+  }
+  freezeSnapshotMetadata(checked.package);
+  freezeSnapshotMetadata(checked.manifest);
+  return {
+    ok: true,
+    snapshot: Object.freeze({
+      package: checked.package,
+      manifest: checked.manifest,
+      artifactBytes: checked.artifactBytes,
+      packageBytes: checked.packageBytes,
+    }),
+  };
+}

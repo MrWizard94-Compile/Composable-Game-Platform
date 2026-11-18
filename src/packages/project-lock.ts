@@ -6,6 +6,7 @@ import {
   validatePackagePaths,
 } from "./package-format.ts";
 import {
+  snapshotReleasePackageDirectory,
   snapshotWasmReleasePackageDirectory,
 } from "./package-directory.ts";
 import {
@@ -301,10 +302,11 @@ export type WasmProjectSnapshot = {
  *
  * maxTotalBytes is mandatory so callers choose an explicit project-wide snapshot budget.
  */
-function validatedWasmLockModules(
+function validatedLockModules(
   storeDirectory: string,
   profileInput: unknown,
   lockInput: unknown,
+  mode: "wasm-only" | "project",
 ): LocalCatalogEntry[] {
   const profile = checkedProfile(profileInput);
   const checkedLock = validateProjectLock(lockInput);
@@ -327,9 +329,15 @@ function validatedWasmLockModules(
     if (locked.moduleId !== pin.moduleId || locked.version !== pin.version) {
       throw new Error("Lockfile module order or exact version differs from the project profile at index " + index + ".");
     }
-    if (locked.runtime !== "wasm-core") {
+    if (mode === "wasm-only" && locked.runtime !== "wasm-core") {
       throw new Error(
         "Wasm-only project snapshot refuses " + locked.moduleId + "@" + locked.version +
+        " because its runtime is " + locked.runtime + ".",
+      );
+    }
+    if (locked.runtime !== "wasm-core" && locked.runtime !== "javascript-esm") {
+      throw new Error(
+        "Project activation refuses " + locked.moduleId + "@" + locked.version +
         " because its runtime is " + locked.runtime + ".",
       );
     }
@@ -354,8 +362,17 @@ export function wasmLockPackageDigests(
   profileInput: unknown,
   lockInput: unknown,
 ): string[] {
-  return validatedWasmLockModules(storeDirectory, profileInput, lockInput)
+  return validatedLockModules(storeDirectory, profileInput, lockInput, "wasm-only")
     .map((entry) => entry.packageTreeDigest);
+}
+
+/** Exact locked identities for a project activation, in profile order, before a lease or snapshot. */
+export function projectLockModules(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+): LocalCatalogEntry[] {
+  return validatedLockModules(storeDirectory, profileInput, lockInput, "project");
 }
 
 async function snapshotWasmProjectLockWithReadLockHeld(
@@ -372,7 +389,7 @@ async function snapshotWasmProjectLockWithReadLockHeld(
     throw new Error("Project lock validation failed: " + checkedLock.errors.join("; "));
   }
   const lock = checkedLock.lock;
-  const selected = validatedWasmLockModules(storeDirectory, profileInput, lockInput).map((entry) => ({
+  const selected = validatedLockModules(storeDirectory, profileInput, lockInput, "wasm-only").map((entry) => ({
     entry,
     objectDirectory: localPackageObjectDirectory(storeDirectory, entry.packageTreeDigest),
   }));
@@ -443,6 +460,98 @@ export async function snapshotWasmProjectLock(
       lockInput,
       maxTotalBytes,
     ),
+  );
+}
+
+export type ProjectModuleSnapshot = {
+  entry: LocalCatalogEntry;
+  manifest: ModuleManifest;
+  /** Owned runtime artifact from the verifying scan. Wasm bytes or module.mjs bytes. */
+  artifactBytes: Uint8Array;
+  packageBytes: number;
+};
+
+export type ProjectSnapshot = {
+  lock: ProjectLock;
+  modules: ProjectModuleSnapshot[];
+  totalBytes: number;
+};
+
+async function snapshotProjectLockWithReadLockHeld(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+  maxTotalBytes: number,
+): Promise<ProjectSnapshot> {
+  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
+    throw new Error("maxTotalBytes must be a positive safe integer.");
+  }
+  const checkedLock = validateProjectLock(lockInput);
+  if (!checkedLock.ok) {
+    throw new Error("Project lock validation failed: " + checkedLock.errors.join("; "));
+  }
+  const lock = checkedLock.lock;
+  const selected = validatedLockModules(storeDirectory, profileInput, lockInput, "project").map((entry) => ({
+    entry,
+    objectDirectory: localPackageObjectDirectory(storeDirectory, entry.packageTreeDigest),
+  }));
+  const modules: ProjectModuleSnapshot[] = [];
+  let totalBytes = 0;
+  for (const item of selected) {
+    const remaining = maxTotalBytes - totalBytes;
+    if (remaining <= 0) {
+      throw new Error("Project snapshot exceeds the configured aggregate byte limit of " + maxTotalBytes + " bytes.");
+    }
+    const result = await snapshotReleasePackageDirectory(item.objectDirectory, remaining);
+    if (!result.ok) {
+      throw new Error("Project snapshot failed for " + item.entry.moduleId + "@" + item.entry.version +
+        ": " + result.errors.join("; "));
+    }
+    const actual: LocalCatalogEntry = {
+      moduleId: result.snapshot.package.moduleId,
+      version: result.snapshot.package.version,
+      packageTreeProfile: result.snapshot.package.packageTreeProfile,
+      packageTreeDigest: result.snapshot.package.packageTreeDigest,
+      artifactDigest: result.snapshot.package.artifactDigest,
+      runtime: result.snapshot.package.descriptor.runtime.kind,
+      files: [...result.snapshot.package.files],
+    };
+    if (!sameEntry(actual, item.entry)) {
+      throw new Error("Stored package bytes differ from the exact lock identity for " +
+        item.entry.moduleId + "@" + item.entry.version + ".");
+    }
+    if (result.snapshot.packageBytes > remaining) {
+      throw new Error("Project snapshot exceeds the configured aggregate byte limit of " + maxTotalBytes + " bytes.");
+    }
+    modules.push({
+      entry: copyEntry(item.entry),
+      manifest: result.snapshot.manifest,
+      artifactBytes: result.snapshot.artifactBytes,
+      packageBytes: result.snapshot.packageBytes,
+    });
+    totalBytes += result.snapshot.packageBytes;
+  }
+  freezeSnapshotMetadata(lock);
+  for (const module of modules) {
+    freezeSnapshotMetadata(module.entry);
+    Object.freeze(module);
+  }
+  Object.freeze(modules);
+  return Object.freeze({ lock, modules, totalBytes });
+}
+
+/**
+ * Verifies and copies every locked package before any JavaScript import or Wasm instantiation.
+ * The reader marker ends when the owned snapshot exists. It does not keep a store path.
+ */
+export async function snapshotProjectLock(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+  maxTotalBytes: number,
+): Promise<ProjectSnapshot> {
+  return withLocalStoreReadLock(storeDirectory, () =>
+    snapshotProjectLockWithReadLockHeld(storeDirectory, profileInput, lockInput, maxTotalBytes),
   );
 }
 

@@ -147,7 +147,10 @@ export type StoreGcRecoveryReport = {
 export type StoreGcReconcileReport = {
   schema: "cgp.store-gc-reconcile/1";
   reconciledAt: string;
+  /** Claims returned to ready by explicit administrative cancellation. Never inferred from pid or age. */
   released: string[];
+  /** Token-owned deleting claims left with their holder. */
+  retained: Array<{ digest: string; reason: string }>;
   leftInProgress: string[];
 };
 export type StoreGcFaultPoint =
@@ -2149,22 +2152,55 @@ export async function recoverInterruptedStoreDeletions(
   }, options.coordination);
 }
 /**
- * Returns idle deletion reservations to ready. It does not delete bytes and does not
- * touch in-progress intent, quarantine, or removal records. Ordinary reads never call this.
+ * Reports token-owned deletion claims and, only when asked, cancels one of them.
+ *
+ * This is not stale-owner recovery. A dead pid or an old timestamp is not proof that
+ * the holder is gone, so those facts are ignored. `releasePackageObjectDeletionClaim`
+ * is the holder's own release and requires the claim token.
+ *
+ * `cancelClaim` is administrative cancellation of that one digest. It revokes the
+ * holder even if they still have the token. It does not sweep other claims and it
+ * does not delete bytes. In-progress intent, quarantine, and removal records are left
+ * for recovery. Ordinary reads never call this.
  */
 export async function reconcileIdleDeletionClaims(
   storeDirectory: string,
-  options: { now?: Date; digest?: string; coordination?: StoreCoordinationOptions } = {},
+  options: {
+    now?: Date;
+    digest?: string;
+    cancelClaim?: string;
+    coordination?: StoreCoordinationOptions;
+  } = {},
 ): Promise<StoreGcReconcileReport> {
   if (options.digest !== undefined && !isDigest(options.digest)) throw new Error("Invalid package-tree SHA-256 digest.");
+  if (options.cancelClaim !== undefined && !isDigest(options.cancelClaim)) {
+    throw new Error("Invalid package-tree SHA-256 digest.");
+  }
+  if (options.cancelClaim !== undefined && options.digest !== undefined && options.cancelClaim !== options.digest) {
+    throw new Error("cancelClaim and digest must name the same package object.");
+  }
   const nowDate = options.now ?? new Date();
   if (!(nowDate instanceof Date) || !Number.isFinite(nowDate.getTime())) {
     throw new Error("GC reconcile clock must be a valid Date.");
   }
   const now = nowDate.toISOString();
+  const retainedReason =
+    "Deletion claim stays with its token owner. Reconcile is not stale-owner recovery and does not consult pid or age. " +
+    "Release the claim with its token, or cancel that one claim explicitly.";
   return withLocalStoreWriteLock(storeDirectory, (root) => {
     const lifecycle = readStoreLifecycle(root, readCatalog(root));
+    const cancelDigest = options.cancelClaim;
+    if (cancelDigest) {
+      const target = lifecycleObject(lifecycle, cancelDigest);
+      if (target?.state !== "deleting") {
+        throw new Error(
+          "No token-owned deletion claim exists for " + cancelDigest +
+          ". Administrative cancellation did not change other claims.",
+        );
+      }
+    }
     const released: string[] = [];
+    const retained: Array<{ digest: string; reason: string }> = [];
     const leftInProgress: string[] = [];
     for (const object of lifecycle.objects) {
       if (object.state === "intent" || object.state === "quarantined" || object.state === "removing" || object.state === "ambiguous") {
@@ -2172,16 +2208,19 @@ export async function reconcileIdleDeletionClaims(
         continue;
       }
       if (object.state !== "deleting") continue;
-      if (options.digest && object.digest !== options.digest) continue;
-      replaceLifecycleObject(lifecycle, {
-        digest: object.digest,
-        state: "ready",
-        createdAt: object.createdAt,
-        updatedAt: now,
-      });
-      released.push(object.digest);
+      if (cancelDigest && object.digest === cancelDigest) {
+        replaceLifecycleObject(lifecycle, {
+          digest: object.digest,
+          state: "ready",
+          createdAt: object.createdAt,
+          updatedAt: now,
+        });
+        released.push(object.digest);
+        continue;
+      }
+      retained.push({ digest: object.digest, reason: retainedReason });
     }
     if (released.length > 0) writeStoreLifecycleAtomically(root, lifecycle);
-    return { schema: "cgp.store-gc-reconcile/1", reconciledAt: now, released, leftInProgress };
+    return { schema: "cgp.store-gc-reconcile/1", reconciledAt: now, released, retained, leftInProgress };
   }, options.coordination);
 }

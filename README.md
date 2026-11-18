@@ -31,7 +31,7 @@ For an existing project, replace `examples/project.json` with your project profi
 
 The local API binds only to `127.0.0.1`, accepts same-origin browser writes, limits request size, and only accepts staging directory names below the configured staging root. The browser never receives arbitrary filesystem paths for use as requests.
 
-**Runtime boundary:** the browser console's lock resolver validates and returns exact package object locations and identities; the console does not dynamically load or execute packages from the local store, and its Composition view still exercises the bundled proof modules. Node host code can separately call `activateWasmProject()` from `src/packages/wasm-activation.ts` to activate a complete exact Wasm-only lock after all package bytes have been verified and snapshotted. That adapter uses the existing `wasm-isolate` backend and requires the caller to shut the composition down. JavaScript ESM and mixed-runtime activation are not supported; JavaScript package artifacts remain trusted-in-process code and are not sandboxed.
+**Runtime boundary:** the browser console's lock resolver validates and returns exact package object locations and identities; the console does not dynamically load or execute packages from the local store, and its Composition view still exercises the bundled proof modules. Node host code calls `activateProject()` from `src/packages/project-activation.ts` to activate an exact JavaScript, Wasm, or mixed lock after every package has been verified. JavaScript requires `javascript: "trusted-in-process"` and is not sandboxed. Mixed locks use the existing cross backend: Wasm stays isolated, JavaScript stays in-process. `activateWasmProject()` remains the Wasm-only entry and refuses JavaScript before a lease. The caller shuts the composition down. There is no hot reload.
 
 Useful options:
 
@@ -81,16 +81,17 @@ Deletion is a separate command. It rechecks eligibility under the writer lock. A
 npm run store:gc-apply -- --store ./out/cgp-store --apply --grace-hours 24
 ```
 
-Apply persists a deletion intent, renames the object into `.cgp-store-tombstones/`, then removes that tombstone. Catalog rows stay. Finish an interrupted deletion, or return an idle deletion claim to `ready` without deleting bytes:
+Apply persists a deletion intent, renames the object into `.cgp-store-tombstones/`, then removes that tombstone. Catalog rows stay. Finish an interrupted deletion, or inspect token-owned claims without deleting bytes:
 
 ```sh
 npm run store:gc-recover -- --store ./out/cgp-store --apply
 npm run store:gc-reconcile -- --store ./out/cgp-store --apply
+npm run store:gc-reconcile -- --store ./out/cgp-store --apply --cancel-claim --digest sha256:<hex>
 ```
 
-Recover and reconcile also require `--apply`. They do not run from preview, registration, verification, or project-lock commands. A writer lock is removed only when its token matches an in-progress deletion and its recorded pid is not alive. Unrelated stale locks and stale reader markers still have to be inspected by hand. See [Study 008](docs/studies/cgp/008-recoverable-destructive-garbage-collection.md).
+Recover and reconcile require `--apply`. Reconcile without `--cancel-claim` leaves token-owned `deleting` claims in place. It does not treat a dead pid or an old timestamp as proof the holder is gone. `--cancel-claim` revokes that one named claim and does not delete bytes. The holder releases their own claim with its token. These commands do not run from preview, registration, verification, or project-lock commands. A writer lock is removed only when its token matches an in-progress deletion and its recorded pid is not alive. Unrelated stale locks and stale reader markers still have to be inspected by hand. See [Study 008](docs/studies/cgp/008-recoverable-destructive-garbage-collection.md).
 
-A live Wasm activation keeps a composition lease until shutdown. The lease is a retention root, not a reader marker, so unrelated store writes can proceed. It is released with the runtime. List leases, or drop one by token, without deleting bytes:
+A live activation keeps a composition lease until shutdown. The lease is a retention root, not a reader marker, so unrelated store writes can proceed. It covers every locked package. List leases, or drop one by token, without deleting bytes:
 
 ```sh
 npm run store:leases -- --store ./out/cgp-store --action list
