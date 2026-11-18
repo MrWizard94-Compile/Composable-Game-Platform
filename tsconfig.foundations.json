@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -11,7 +15,9 @@
     "checkJs": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "moduleDetection": "force"
   },
   "include": [
@@ -28,6 +34,8 @@
     "scripts/check-module-package.ts",
     "scripts/build-module-package.ts",
     "scripts/browser-wasm.ts",
-    "scripts/browser-compose-entry.ts"
+    "scripts/browser-compose-entry.ts",
+    "scripts/register-module-package.ts",
+    "scripts/check-module-store.ts"
   ]
 }

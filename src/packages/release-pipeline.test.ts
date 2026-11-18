@@ -21,6 +21,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url))
 function makeWritable(directory: string): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) makeWritable(path);
     try { chmodSync(path, entry.isDirectory() ? 0o755 : 0o644); } catch {}
   }

@@ -86,6 +86,14 @@ function scanDirectory(root: string): ScanResult {
       let bytes: Buffer;
       try {
         bytes = readFileSync(absolute);
+        const afterRead = lstatSync(absolute);
+        if (afterRead.isSymbolicLink() || !afterRead.isFile() ||
+            afterRead.dev !== info.dev || afterRead.ino !== info.ino ||
+            afterRead.size !== info.size || afterRead.mtimeMs !== info.mtimeMs ||
+            bytes.byteLength !== info.size) {
+          errors.push("Package file changed while it was being read: " + path);
+          continue;
+        }
       } catch {
         errors.push("Cannot read package file \"" + path + "\".");
         continue;
