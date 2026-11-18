@@ -78,11 +78,11 @@ This milestone intentionally stops before destructive collection:
 - no dry-run apply or background collector;
 - no power-loss guarantee for directory entry updates;
 - no automatic project lock discovery;
-- no path-backed JavaScript composition lease or multi-host/network-filesystem coordination.
+- no path-backed JavaScript package loading or multi-host/network-filesystem coordination.
 
 A stale deletion claim blocks readers and new pin creation until a future recovery process or operator validates and releases it. This favors retention over unsafe deletion.
 
-Study 008 is the destructive continuation. It does not change the preview or claim behavior described above.
+Study 008 is the destructive continuation. Study 009 adds composition leases as GC roots on that collector. Neither changes the preview or claim behavior described above, except that a lease is now one of the roots a claim must not find.
 
 ## Conformance coverage
 

@@ -48,7 +48,7 @@ Therefore the current Wasm-only activation path does not need to retain a packag
 
 After that boundary, the active worker owns the executable bytes and store deletion cannot invalidate the running module.
 
-This is specific to the existing Wasm snapshot adapter. It does not authorize JavaScript ESM activation. A future path-backed JavaScript loader, lazy asset reader, or runtime that reopens package files will need a separate composition-lifetime lease (or a second fully-owned snapshot strategy) held through shutdown and loader release.
+This is specific to the existing Wasm snapshot adapter. It does not authorize JavaScript ESM activation. A future path-backed JavaScript loader, lazy asset reader, or runtime that reopens package files will need a separate composition-lifetime lease (or a second fully-owned snapshot strategy) held through shutdown and loader release. Study 009 implements the retention-root form of that lease for the current in-memory Wasm snapshot. It still does not hold a reader marker for the composition lifetime, and it does not load JavaScript from package paths.
 
 ## Failure and stale-marker policy
 

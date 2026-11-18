@@ -90,6 +90,21 @@ npm run store:gc-reconcile -- --store ./out/cgp-store --apply
 
 Recover and reconcile also require `--apply`. They do not run from preview, registration, verification, or project-lock commands. A writer lock is removed only when its token matches an in-progress deletion and its recorded pid is not alive. Unrelated stale locks and stale reader markers still have to be inspected by hand. See [Study 008](docs/studies/cgp/008-recoverable-destructive-garbage-collection.md).
 
+A live Wasm activation keeps a composition lease until shutdown. The lease is a retention root, not a reader marker, so unrelated store writes can proceed. It is released with the runtime. List leases, or drop one by token, without deleting bytes:
+
+```sh
+npm run store:leases -- --store ./out/cgp-store --action list
+npm run store:leases -- --store ./out/cgp-store --action release --lease <uuid> --token <token>
+```
+
+An abandoned lease whose recorded pid is not alive can be dropped explicitly. That command does not delete package bytes and does not run during GC:
+
+```sh
+npm run store:leases -- --store ./out/cgp-store --action release-abandoned --apply --lease <uuid>
+```
+
+Stale leases are not reclaimed automatically. See [Study 009](docs/studies/cgp/009-composition-leases.md).
+
 See [the CGP visual identity guide](assets/brand/README.md) for marks, icons, palette, and component usage.
 
 ## Proof

@@ -16,6 +16,7 @@
     "store:gc-apply": "node --experimental-strip-types scripts/apply-store-gc.ts",
     "store:gc-recover": "node --experimental-strip-types scripts/recover-store-gc.ts",
     "store:gc-reconcile": "node --experimental-strip-types scripts/reconcile-store-claims.ts",
+    "store:leases": "node --experimental-strip-types scripts/manage-composition-leases.ts",
     "console:build": "node --experimental-strip-types scripts/build-console.ts",
     "console:serve": "node --experimental-strip-types scripts/serve-console.ts",
     "console": "npm run console:build && node --experimental-strip-types scripts/serve-console.ts",

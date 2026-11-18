@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import test from "node:test";
-import {addLocalRetentionPin,applyClaimedPackageObjectDeletion,applyLocalStoreGarbageCollection,claimPackageObjectDeletion,previewLocalStoreGarbageCollection,recoverInterruptedStoreDeletions,reconcileIdleDeletionClaims,registerStagedPackage,releasePackageObjectDeletionClaim,removeLocalRetentionPin,resolveLocalPackage,setStoreGcFaultForTests,setStoreWriterLivenessProbeForTests,verifyLocalStore,withLocalStoreReadLock} from "./local-store.ts";
+import {acquireCompositionLease,addLocalRetentionPin,applyClaimedPackageObjectDeletion,applyLocalStoreGarbageCollection,claimPackageObjectDeletion,listCompositionLeases,previewLocalStoreGarbageCollection,recoverInterruptedStoreDeletions,reconcileIdleDeletionClaims,registerStagedPackage,releaseAbandonedCompositionLease,releaseCompositionLease,releasePackageObjectDeletionClaim,removeLocalRetentionPin,resolveLocalPackage,setStoreGcFaultForTests,setStoreWriterLivenessProbeForTests,verifyLocalStore,withLocalStoreReadLock} from "./local-store.ts";
 import {buildReleasePackage} from "./release-pipeline.ts";
 import {createProjectLock,pinProjectLock,unpinProjectLock} from "./project-lock.ts";
 const repositoryRoot=resolve(fileURLToPath(new URL("../../",import.meta.url)));
@@ -372,5 +372,147 @@ test("legacy v1 lifecycle files stay readable and destructive commands require -
  assert.equal((await resolveLocalPackage(store,"org.example.starter","1.0.0"))?.entry.packageTreeDigest,digest);
  const verification=await verifyLocalStore(store);
  assert.equal(verification.errors.length,0);
+});
+
+const leaseDirectory=(store:string)=>join(store,".cgp-store.composition-leases");
+const leaseFile=(store:string,leaseId:string)=>join(leaseDirectory(store),leaseId+".json");
+
+test("a composition lease retains an unpinned object until its token is released",async t=>{
+ const {store,registered,digest}=await unpinnedStore(t);
+ await assert.rejects(acquireCompositionLease(store,[]),/at least one package digest/);
+ await assert.rejects(acquireCompositionLease(store,["sha256:"+"0".repeat(63)]),/Invalid package-tree/);
+ const lease=await acquireCompositionLease(store,[digest,digest]);
+ assert.match(lease.leaseId,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+ assert.equal(lease.digests.length,1);
+ const listed=await listCompositionLeases(store);
+ assert.equal(listed.length,1);
+ assert.equal(Object.hasOwn(listed[0]!,"token"),false);
+ assert.deepEqual(listed[0]!.digests,[digest]);
+ const preview=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ const object=preview.objects.find(item=>item.digest===digest);
+ assert.equal(object?.status,"retained");
+ assert.deepEqual(object?.retentionRoots,["composition:"+lease.leaseId]);
+ assert.equal(preview.rootsChecked.compositionLeases,1);
+ const applied=await applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.equal(applied.deleted.includes(digest),false);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ await assert.rejects(claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()}),/still retained by: composition:/);
+ await assert.rejects(releaseCompositionLease(store,lease.leaseId,"0123456789abcdef"),/does not own/);
+ assert.equal(existsSync(leaseFile(store,lease.leaseId)),true);
+ assert.equal((await releaseCompositionLease(store,lease.leaseId,lease.token)).released,true);
+ assert.equal((await releaseCompositionLease(store,lease.leaseId,lease.token)).released,false);
+ const candidate=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.equal(candidate.candidates.some(item=>item.digest===digest),true);
+});
+
+test("one composition lease does not retain an object held only by another",async t=>{
+ const root=fixture(t),store=join(root,"store");
+ const firstStage=await buildStarter(root);
+ const secondSource=join(root,"other-source");mkdirSync(secondSource);
+ const manifest=JSON.parse(readFileSync(join(repositoryRoot,"examples/starter-module/manifest.json"),"utf8")) as {moduleId:string;name:string};
+ manifest.moduleId="org.example.other";manifest.name="Other";
+ writeFileSync(join(secondSource,"manifest.json"),JSON.stringify(manifest,null,2)+"\n");
+ writeFileSync(join(secondSource,"module.ts"),readFileSync(join(repositoryRoot,"examples/starter-module/module.ts")));
+ const secondStage=join(root,"other-stage");
+ await buildReleasePackage({sourceDirectory:secondSource,releaseDirectory:join(root,"other-release"),stagingDirectory:secondStage});
+ const kept=await registerStagedPackage(firstStage,store);
+ const dropped=await registerStagedPackage(secondStage,store);
+ await removeLocalRetentionPin(store,kept.entry.packageTreeDigest);
+ await removeLocalRetentionPin(store,dropped.entry.packageTreeDigest);
+ const first=await acquireCompositionLease(store,[kept.entry.packageTreeDigest]);
+ const second=await acquireCompositionLease(store,[kept.entry.packageTreeDigest]);
+ await releaseCompositionLease(store,first.leaseId,first.token);
+ const stillKept=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.deepEqual(stillKept.objects.find(item=>item.digest===kept.entry.packageTreeDigest)?.retentionRoots,["composition:"+second.leaseId]);
+ const applied=await applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.equal(applied.deleted.includes(kept.entry.packageTreeDigest),false);
+ assert.equal(applied.deleted.includes(dropped.entry.packageTreeDigest),true);
+ assert.equal(existsSync(kept.objectDirectory),true);
+ assert.equal(existsSync(dropped.objectDirectory),false);
+ await releaseCompositionLease(store,second.leaseId,second.token);
+ const open=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.equal(open.candidates.some(item=>item.digest===kept.entry.packageTreeDigest),true);
+});
+
+test("abandoned composition-lease release refuses a live or unknown pid and does not delete bytes",async t=>{
+ resetGcHooks(t);
+ const {store,digest,registered}=await unpinnedStore(t);
+ const lease=await acquireCompositionLease(store,[digest]);
+ await assert.rejects(releaseAbandonedCompositionLease(store,lease.leaseId),/may still be active/);
+ setStoreWriterLivenessProbeForTests(()=>"unknown");
+ await assert.rejects(releaseAbandonedCompositionLease(store,lease.leaseId),/may still be active/);
+ assert.equal(existsSync(leaseFile(store,lease.leaseId)),true);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ setStoreWriterLivenessProbeForTests(()=>false);
+ const dropped=await releaseAbandonedCompositionLease(store,lease.leaseId);
+ assert.deepEqual(dropped.digests,[digest]);
+ assert.equal(existsSync(leaseFile(store,lease.leaseId)),false);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ const preview=await previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()});
+ assert.equal(preview.candidates.some(item=>item.digest===digest),true);
+ await assert.rejects(releaseAbandonedCompositionLease(store,lease.leaseId),/does not exist/);
+});
+
+test("malformed composition leases fail closed and a deleting object cannot be leased",async t=>{
+ const {store,digest,registered}=await unpinnedStore(t);
+ const directory=leaseDirectory(store);
+ mkdirSync(directory,{mode:0o700});
+ writeFileSync(join(directory,"notes.txt"),"nope\n");
+ await assert.rejects(previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/unexpected entry/);
+ await assert.rejects(applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/unexpected entry/);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ unlinkSync(join(directory,"notes.txt"));
+ const id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+ writeFileSync(join(directory,id+".json"),JSON.stringify({
+  schema:"cgp.store-composition-lease/1",leaseId:id,token:"0123456789abcdef",pid:1,
+  createdAt:new Date(0).toISOString(),digests:[digest,digest],
+ })+"\n");
+ await assert.rejects(previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/invalid or duplicate digest/);
+ await assert.rejects(applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/invalid or duplicate digest/);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ unlinkSync(join(directory,id+".json"));
+ rmSync(directory,{recursive:true,force:true});
+ symlinkSync(store,directory);
+ try{
+  await assert.rejects(previewLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/must be a real directory/);
+  await assert.rejects(applyLocalStoreGarbageCollection(store,{gracePeriodMs:0,now:later()}),/must be a real directory/);
+  assert.equal(existsSync(registered.objectDirectory),true);
+ }finally{unlinkSync(directory);}
+ const claim=await claimPackageObjectDeletion(store,digest,{gracePeriodMs:0,now:later()});
+ await assert.rejects(acquireCompositionLease(store,[digest]),/marked deleting/);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ assert.equal(existsSync(directory),false);
+ await releasePackageObjectDeletionClaim(store,digest,claim.claimToken);
+});
+
+test("composition-lease commands list and release without deleting bytes",async t=>{
+ const {store,digest,registered}=await unpinnedStore(t);
+ const lease=await acquireCompositionLease(store,[digest]);
+ const run=(...args:string[])=>spawnSync(process.execPath,["--experimental-strip-types","scripts/manage-composition-leases.ts",...args],{cwd:repositoryRoot,encoding:"utf8"});
+ const listed=run("--store",store,"--action","list");
+ assert.equal(listed.status,0,listed.stderr);
+ assert.match(listed.stdout,new RegExp(lease.leaseId));
+ assert.doesNotMatch(listed.stdout,new RegExp(lease.token));
+ const premature=run("--store",store,"--action","release-abandoned","--lease",lease.leaseId);
+ assert.notEqual(premature.status,0);
+ assert.match(premature.stderr,/--apply/);
+ const wrong=run("--store",store,"--action","release","--lease",lease.leaseId,"--token","0123456789abcdef");
+ assert.notEqual(wrong.status,0);
+ assert.match(wrong.stderr,/does not own/);
+ assert.equal(existsSync(leaseFile(store,lease.leaseId)),true);
+ const released=run("--store",store,"--action","release","--lease",lease.leaseId,"--token",lease.token);
+ assert.equal(released.status,0,released.stderr);
+ assert.match(released.stdout,/does not delete package bytes/);
+ assert.equal(existsSync(registered.objectDirectory),true);
+ const abandonedId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+ writeFileSync(leaseFile(store,abandonedId),JSON.stringify({
+  schema:"cgp.store-composition-lease/1",leaseId:abandonedId,token:"0123456789abcdef",pid:2147483646,
+  createdAt:new Date(0).toISOString(),digests:[digest],
+ })+"\n");
+ const abandoned=run("--store",store,"--action","release-abandoned","--apply","--lease",abandonedId);
+ assert.equal(abandoned.status,0,abandoned.stderr);
+ assert.match(abandoned.stdout,/were not deleted/);
+ assert.equal(existsSync(leaseFile(store,abandonedId)),false);
+ assert.equal(existsSync(registered.objectDirectory),true);
 });
 

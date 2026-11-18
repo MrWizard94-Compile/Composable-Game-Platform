@@ -119,7 +119,7 @@ export type StoreGcObjectReport = {
 };
 export type StoreGcPreview = {
   schema: "cgp.store-gc-preview/1"; dryRun: true; generatedAt: string; gracePeriodMs: number;
-  rootsChecked: { localPins: number; projectPins: number; activeReaderMarkers: number };
+  rootsChecked: { localPins: number; projectPins: number; compositionLeases: number; activeReaderMarkers: number };
   candidates: StoreGcObjectReport[]; objects: StoreGcObjectReport[];
   missingObjects: Array<{ digest: string; releases: Array<{ moduleId: string; version: string }> }>;
   ignoredEntries: string[]; candidateBytes: number;
@@ -897,11 +897,208 @@ function setLocalPin(lifecycle:StoreLifecycle,digest:string,now:string):boolean{
 function projectPinRootsDigest(lifecycle:StoreLifecycle,digest:string):string[]{
   return lifecycle.projectPins.filter(p=>p.modules.some(m=>m.digest===digest)).map(p=>"project:"+p.projectId);
 }
-function assertNoRetentionRoots(lifecycle:StoreLifecycle,digest:string):void{
-  const roots:string[]=[];
-  if(lifecycle.localPins.some(p=>p.digest===digest))roots.push("local-retention");
-  roots.push(...projectPinRootsDigest(lifecycle,digest));
-  if(roots.length)throw new Error("Package object "+digest+" is still retained by: "+roots.join(", ")+".");
+
+const COMPOSITION_LEASE_DIR = ".cgp-store.composition-leases";
+const COMPOSITION_LEASE_SCHEMA = "cgp.store-composition-lease/1";
+const LEASE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export type CompositionLease = {
+  schema: "cgp.store-composition-lease/1";
+  leaseId: string;
+  token: string;
+  pid: number;
+  createdAt: string;
+  digests: string[];
+};
+export type CompositionLeaseSummary = {
+  leaseId: string;
+  pid: number;
+  createdAt: string;
+  digests: string[];
+};
+
+function leasePath(root: string, leaseId: string): string {
+  return join(root, COMPOSITION_LEASE_DIR, leaseId + ".json");
+}
+function parseCompositionLease(path: string, expectedId: string): CompositionLease {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error("Composition lease must be a regular file: " + path);
+  }
+  if (info.size > 1024 * 1024) throw new Error("Composition lease exceeds the 1 MiB limit: " + path);
+  const parsed = parseStrictJson(new Uint8Array(readFileSync(path)), "composition lease");
+  if (!parsed.ok || !isRecord(parsed.value) ||
+      Object.keys(parsed.value).sort().join(",") !== "createdAt,digests,leaseId,pid,schema,token" ||
+      parsed.value.schema !== COMPOSITION_LEASE_SCHEMA ||
+      parsed.value.leaseId !== expectedId || !LEASE_ID_RE.test(expectedId) ||
+      typeof parsed.value.token !== "string" || parsed.value.token.length < 16 ||
+      !Number.isSafeInteger(parsed.value.pid) || (parsed.value.pid as number) <= 0 ||
+      !validIsoDate(parsed.value.createdAt) || !Array.isArray(parsed.value.digests) ||
+      parsed.value.digests.length === 0) {
+    throw new Error("Composition lease is malformed. Refusing to ignore it: " + path);
+  }
+  const digests: string[] = [];
+  for (const digest of parsed.value.digests) {
+    if (!isDigest(digest) || digests.includes(digest)) {
+      throw new Error("Composition lease contains an invalid or duplicate digest: " + path);
+    }
+    digests.push(digest);
+  }
+  const sorted = [...digests].sort();
+  if (digests.some((digest, index) => digest !== sorted[index])) {
+    throw new Error("Composition lease digests must be sorted: " + path);
+  }
+  return {
+    schema: COMPOSITION_LEASE_SCHEMA,
+    leaseId: expectedId,
+    token: parsed.value.token,
+    pid: parsed.value.pid as number,
+    createdAt: parsed.value.createdAt,
+    digests,
+  };
+}
+function readCompositionLeases(root: string): CompositionLease[] {
+  const directory = join(root, COMPOSITION_LEASE_DIR);
+  if (!existsByLstat(directory)) return [];
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("Composition-lease path must be a real directory: " + directory);
+  }
+  const leases: CompositionLease[] = [];
+  for (const name of readdirSync(directory).sort()) {
+    if (!name.endsWith(".json") || !LEASE_ID_RE.test(name.slice(0, -".json".length))) {
+      throw new Error("Composition-lease directory contains an unexpected entry: " + name);
+    }
+    const child = join(directory, name);
+    leases.push(parseCompositionLease(child, name.slice(0, -".json".length)));
+  }
+  return leases;
+}
+function compositionLeaseRoots(root: string, digest: string): string[] {
+  return readCompositionLeases(root)
+    .filter((lease) => lease.digests.includes(digest))
+    .map((lease) => "composition:" + lease.leaseId);
+}
+function writeCompositionLease(root: string, lease: CompositionLease): void {
+  const directory = join(root, COMPOSITION_LEASE_DIR);
+  if (!existsByLstat(directory)) mkdirSync(directory, { mode: 0o700 });
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("Composition-lease path must be a real directory: " + directory);
+  }
+  const path = leasePath(root, lease.leaseId);
+  const descriptor = openSync(path, "wx", 0o600);
+  try {
+    writeFileSync(descriptor, JSON.stringify(lease, null, 2) + "\n");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+  } catch (error) {
+    try { closeSync(descriptor); } catch {}
+    try { unlinkSync(path); } catch {}
+    throw error;
+  }
+}
+/**
+ * Retains exact package objects for one composition. The lease is a GC root.
+ * It does not hold the store writer or reader marker after this call returns.
+ * A deleting or otherwise unavailable object is refused. Bytes are not copied.
+ */
+export async function acquireCompositionLease(
+  storeDirectory: string,
+  digests: readonly string[],
+): Promise<CompositionLease> {
+  if (!Array.isArray(digests) || digests.length === 0) {
+    throw new Error("A composition lease requires at least one package digest.");
+  }
+  const unique = [...new Set(digests)];
+  for (const digest of unique) if (!isDigest(digest)) throw new Error("Invalid package-tree SHA-256 digest.");
+  const sorted = [...unique].sort();
+  return withLocalStoreWriteLock(storeDirectory, async (root) => {
+    const catalog = readCatalog(root);
+    const lifecycle = readStoreLifecycle(root, catalog);
+    for (const digest of sorted) {
+      assertObjectReady(lifecycle, digest);
+      await verifyPackageObjectForDigest(root, digest, catalog);
+    }
+    const lease: CompositionLease = {
+      schema: COMPOSITION_LEASE_SCHEMA,
+      leaseId: randomUUID(),
+      token: randomUUID(),
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+      digests: sorted,
+    };
+    writeCompositionLease(root, lease);
+    return lease;
+  });
+}
+/** Removes one lease. A missing lease is already released. A wrong token deletes nothing. */
+export async function releaseCompositionLease(
+  storeDirectory: string,
+  leaseId: string,
+  token: string,
+): Promise<{ leaseId: string; released: boolean }> {
+  if (!LEASE_ID_RE.test(leaseId)) throw new Error("Invalid composition lease id.");
+  if (typeof token !== "string" || token.length < 16) throw new Error("A composition lease token is required.");
+  return withLocalStoreWriteLock(storeDirectory, (root) => {
+    const path = leasePath(root, leaseId);
+    if (!existsByLstat(path)) return { leaseId, released: false };
+    const lease = parseCompositionLease(path, leaseId);
+    if (lease.token !== token) throw new Error("Composition lease token does not own this lease.");
+    unlinkSync(path);
+    return { leaseId, released: true };
+  });
+}
+/**
+ * Drops one lease whose recorded pid is not alive. Explicit only.
+ * This does not delete package bytes and does not run during GC or registration.
+ * Unknown liveness fails closed. A live pid is not stolen.
+ */
+export async function releaseAbandonedCompositionLease(
+  storeDirectory: string,
+  leaseId: string,
+): Promise<{ leaseId: string; released: true; digests: string[] }> {
+  if (!LEASE_ID_RE.test(leaseId)) throw new Error("Invalid composition lease id.");
+  return withLocalStoreWriteLock(storeDirectory, (root) => {
+    const path = leasePath(root, leaseId);
+    if (!existsByLstat(path)) throw new Error("Composition lease does not exist: " + leaseId);
+    const lease = parseCompositionLease(path, leaseId);
+    const alive = writerPidIsAlive(lease.pid);
+    if (alive !== false) {
+      throw new Error(
+        "Composition lease owner may still be active (pid " + lease.pid +
+        "). Refusing to release " + leaseId + ".",
+      );
+    }
+    const again = parseCompositionLease(path, leaseId);
+    if (again.token !== lease.token || again.pid !== lease.pid) {
+      throw new Error("Composition lease changed while it was checked. Refusing to release it.");
+    }
+    unlinkSync(path);
+    return { leaseId, released: true, digests: lease.digests };
+  });
+}
+/** Lists lease ids and digests. Tokens stay in the lease files and are not returned. */
+export async function listCompositionLeases(storeDirectory: string): Promise<CompositionLeaseSummary[]> {
+  return withLocalStoreReadLock(storeDirectory, (root) =>
+    readCompositionLeases(root).map((lease) => ({
+      leaseId: lease.leaseId,
+      pid: lease.pid,
+      createdAt: lease.createdAt,
+      digests: [...lease.digests],
+    })));
+}
+
+function retentionRootsFor(root: string, lifecycle: StoreLifecycle, digest: string): string[] {
+  const roots: string[] = [];
+  if (lifecycle.localPins.some((pin) => pin.digest === digest)) roots.push("local-retention");
+  roots.push(...projectPinRootsDigest(lifecycle, digest));
+  roots.push(...compositionLeaseRoots(root, digest));
+  return roots;
+}
+function assertNoRetentionRoots(root: string, lifecycle: StoreLifecycle, digest: string): void {
+  const roots = retentionRootsFor(root, lifecycle, digest);
+  if (roots.length) throw new Error("Package object " + digest + " is still retained by: " + roots.join(", ") + ".");
 }
 async function verifyPackageObjectForDigest(root:string,digest:string,catalog:LocalCatalog):Promise<ReleasePackageSummary>{
   const path=assertStoreObjectParents(root,digest);
@@ -1278,7 +1475,7 @@ export async function claimPackageObjectDeletion(
   const checked=checkedGcOptions(options);
   return withLocalStoreWriteLock(storeDirectory,async root=>{
     const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
-    assertNoRetentionRoots(lifecycle,digest);
+    assertNoRetentionRoots(root,lifecycle,digest);
     const current=lifecycleObject(lifecycle,digest);
     if(current?.state==="deleting")throw new Error("Package object already has an active deletion claim: "+digest);
     const verified=await verifyPackageObjectForDigest(root,digest,catalog);
@@ -1391,9 +1588,7 @@ async function inspectLockedStore(
     const createdAt = record?.createdAt ?? new Date(info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs).toISOString();
     const ageMs = Math.max(0, checked.now.getTime() - Date.parse(createdAt));
     const releases = releasesFor(digest);
-    const retentionRoots: string[] = [];
-    if (lifecycle.localPins.some((pin) => pin.digest === digest)) retentionRoots.push("local-retention");
-    retentionRoots.push(...projectPinRootsDigest(lifecycle, digest));
+    const retentionRoots = retentionRootsFor(root, lifecycle, digest);
     const report: StoreGcObjectReport = {
       digest, state: record?.state ?? "untracked", status: "invalid", bytes: null, createdAt, ageMs,
       releases, retentionRoots, reasons: [],
@@ -1428,13 +1623,13 @@ async function inspectLockedStore(
       report.reasons.push("An existing deletion claim requires recovery or release.");
     } else if (retentionRoots.length) {
       report.status = "retained";
-      report.reasons.push("One or more persistent retention pins reference this object.");
+      report.reasons.push("One or more retention roots reference this object.");
     } else if (ageMs < checked.gracePeriodMs) {
       report.status = "grace-period";
       report.reasons.push("The object has not reached the configured GC grace period.");
     } else {
       report.status = "candidate";
-      report.reasons.push("Verified package has no local or project retention pins and has passed the grace period.");
+      report.reasons.push("Verified package has no local, project, or composition retention and has passed the grace period.");
     }
     reports.push(report);
   }
@@ -1461,6 +1656,7 @@ export async function previewLocalStoreGarbageCollection(
       rootsChecked:{
         localPins:inspected.lifecycle.localPins.length,
         projectPins:inspected.lifecycle.projectPins.length,
+        compositionLeases:readCompositionLeases(root).length,
         activeReaderMarkers,
       },
       candidates,objects:inspected.reports,
@@ -1773,9 +1969,7 @@ async function recheckFreshDeletion(
 ): Promise<{ createdAt: string } | { skip: string }> {
   const catalog = readCatalog(root);
   const lifecycle = readStoreLifecycle(root, catalog);
-  const roots: string[] = [];
-  if (lifecycle.localPins.some((pin) => pin.digest === digest)) roots.push("local-retention");
-  roots.push(...projectPinRootsDigest(lifecycle, digest));
+  const roots = retentionRootsFor(root, lifecycle, digest);
   if (roots.length) return { skip: "Package object " + digest + " is still retained by: " + roots.join(", ") + "." };
   const current = lifecycleObject(lifecycle, digest);
   if (current && current.state !== "ready") {
@@ -1872,7 +2066,7 @@ export async function applyClaimedPackageObjectDeletion(
     if (current?.state !== "deleting" || current.deletionClaim?.token !== claimToken) {
       throw new Error("Deletion claim token does not own the deleting package object.");
     }
-    assertNoRetentionRoots(lifecycle, digest);
+    assertNoRetentionRoots(root, lifecycle, digest);
     await verifyPackageObjectForDigest(root, digest, catalog);
     await measurePackageDirectory(assertStoreObjectParents(root, digest));
     const path = assertStoreObjectParents(root, digest);

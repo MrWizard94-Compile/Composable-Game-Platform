@@ -301,16 +301,11 @@ export type WasmProjectSnapshot = {
  *
  * maxTotalBytes is mandatory so callers choose an explicit project-wide snapshot budget.
  */
-async function snapshotWasmProjectLockWithReadLockHeld(
+function validatedWasmLockModules(
   storeDirectory: string,
   profileInput: unknown,
   lockInput: unknown,
-  maxTotalBytes: number,
-): Promise<WasmProjectSnapshot> {
-  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
-    throw new Error("maxTotalBytes must be a positive safe integer.");
-  }
-
+): LocalCatalogEntry[] {
   const profile = checkedProfile(profileInput);
   const checkedLock = validateProjectLock(lockInput);
   if (!checkedLock.ok) {
@@ -324,10 +319,8 @@ async function snapshotWasmProjectLockWithReadLockHeld(
   if (lock.modules.length !== profile.modules.length) {
     throw new Error("Lockfile module set does not match the project profile.");
   }
-
-  // Preflight every identity and runtime kind before scanning or retaining any artifact bytes.
   const catalog = readLocalCatalog(storeDirectory);
-  const selected: Array<{ entry: LocalCatalogEntry; objectDirectory: string }> = [];
+  const selected: LocalCatalogEntry[] = [];
   for (let index = 0; index < profile.modules.length; index += 1) {
     const pin = profile.modules[index]!;
     const locked = lock.modules[index]!;
@@ -350,11 +343,39 @@ async function snapshotWasmProjectLockWithReadLockHeld(
       throw new Error("Local catalog identity differs from the lockfile for " +
         locked.moduleId + "@" + locked.version + ".");
     }
-    selected.push({
-      entry: copyEntry(locked),
-      objectDirectory: localPackageObjectDirectory(storeDirectory, locked.packageTreeDigest),
-    });
+    selected.push(copyEntry(locked));
   }
+  return selected;
+}
+
+/** Package-tree digests for a Wasm-only lock, in profile order, before a composition lease or snapshot. */
+export function wasmLockPackageDigests(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+): string[] {
+  return validatedWasmLockModules(storeDirectory, profileInput, lockInput)
+    .map((entry) => entry.packageTreeDigest);
+}
+
+async function snapshotWasmProjectLockWithReadLockHeld(
+  storeDirectory: string,
+  profileInput: unknown,
+  lockInput: unknown,
+  maxTotalBytes: number,
+): Promise<WasmProjectSnapshot> {
+  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
+    throw new Error("maxTotalBytes must be a positive safe integer.");
+  }
+  const checkedLock = validateProjectLock(lockInput);
+  if (!checkedLock.ok) {
+    throw new Error("Project lock validation failed: " + checkedLock.errors.join("; "));
+  }
+  const lock = checkedLock.lock;
+  const selected = validatedWasmLockModules(storeDirectory, profileInput, lockInput).map((entry) => ({
+    entry,
+    objectDirectory: localPackageObjectDirectory(storeDirectory, entry.packageTreeDigest),
+  }));
 
   const modules: WasmProjectModuleSnapshot[] = [];
   let totalBytes = 0;
@@ -406,7 +427,8 @@ async function snapshotWasmProjectLockWithReadLockHeld(
 /**
  * Holds a store reader marker while catalog metadata and every locked package tree
  * are verified and copied into owned memory. The marker is released only after the
- * complete all-or-nothing snapshot exists; Wasm activation does not retain store paths.
+ * complete all-or-nothing snapshot exists. This snapshot does not keep a store path.
+ * Wasm activation holds a separate composition lease until shutdown.
  */
 export async function snapshotWasmProjectLock(
   storeDirectory: string,

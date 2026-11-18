@@ -48,6 +48,7 @@
     "scripts/preview-store-gc.ts",
     "scripts/apply-store-gc.ts",
     "scripts/recover-store-gc.ts",
-    "scripts/reconcile-store-claims.ts"
+    "scripts/reconcile-store-claims.ts",
+    "scripts/manage-composition-leases.ts"
   ]
 }

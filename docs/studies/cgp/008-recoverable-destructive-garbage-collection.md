@@ -30,7 +30,7 @@ Catalog rows are not retention roots and are not removed when bytes are deleted.
 
 Apply and claim-apply hold the existing exclusive writer lock and wait for readers to drain. They do not accept a preview document as authorization.
 
-1. Recheck local pins, project pins, grace, and the package-tree digest. Measure the tree without following symlinks.
+1. Recheck local pins, project pins, composition leases, grace, and the package-tree digest. Measure the tree without following symlinks.
 2. Persist `intent` with the claim token and the current writer-lock token.
 3. Make the object directory writable and `rename` it into `.cgp-store-tombstones/<hex>` on the same store filesystem. The directory itself must be writable or ext4 refuses the rename. Children are not retargeted.
 4. Persist `quarantined`, then `removing`.
@@ -77,6 +77,8 @@ Apply, recover, and reconcile refuse to run without `--apply`. Tests use tempora
 - No removal of catalog release metadata.
 - No proof that a pid which is still alive is the original writer; a live pid always blocks lock adoption.
 - JavaScript packages remain trusted in-process. Deletion does not sandbox them.
+
+Study 009 adds composition leases as a retention root this deletion path rechecks. This study does not acquire or release those leases.
 
 ## Conformance coverage
 
