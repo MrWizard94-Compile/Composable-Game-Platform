@@ -1,6 +1,8 @@
 # Writing a module
 
-Copy [examples/starter-module](../examples/starter-module) for JavaScript, or [examples/wasm-module](../examples/wasm-module) for a portable guest. Change `moduleId`. A package is a folder with `manifest.json` and, if it has behavior, either `module.ts` exporting `implementation` or `module.wasm`.
+Copy [examples/starter-module](../examples/starter-module) to start a JavaScript module, or [examples/wasm-module](../examples/wasm-module) for a portable guest. Change `moduleId`.
+
+An in-repository authoring folder has `manifest.json` and, when it has behavior, authoring source: `module.ts` exporting `implementation`, or `module.wasm`. That folder is not a format-v1 release. A release has `manifest.json`, `cgp-package.json`, and exactly one executable artifact. JavaScript releases use `module.mjs`. WebAssembly releases use `module.wasm`. `module.ts` is source. `module.mjs` is the built JavaScript artifact.
 
 The package is not named by language. The November 2026 index, recorded in [ADR 0020](adr/0020-cross-language-modules.md), is Python, C, Java, C++, C#, JavaScript, R, SQL, Visual Basic, and Go. That list is documentation. It is not a Foundations export. Only JavaScript is an in-process implementation. The other nine are not hosted: there is no CPython, JVM, CLR, R runtime, SQL engine, Visual Basic runtime, or C, C++, or Go compiler in this host. A `language` field is unknown and is refused. A WebAssembly guest is not attributed to the language that compiled it. Rust is not in this top ten. SQL is not a module runtime. An authoring project may use TypeScript. The author's toolchain compiles or bundles it. The format-v1 JavaScript artifact is `module.mjs`. This host does not compile TypeScript. That is not a ban on TypeScript as an authoring language.
 
