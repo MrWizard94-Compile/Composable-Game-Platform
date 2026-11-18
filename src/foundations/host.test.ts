@@ -10,7 +10,6 @@ function compose(packages: readonly ModulePackage[], options: ComposeOptions = {
   return hostCompose(packages, { policy: IN_PROCESS_POLICY, ...options });
 }
 import { validateManifest } from "./manifest.ts";
-import { LANGUAGE_INDEX, TOP_LANGUAGES } from "./languages.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -167,23 +166,19 @@ describe("manifest validation", () => {
     assert.equal(result.slots.find((item) => item.slotId === "platform.systems")?.mutates, false);
   });
 
-  it("names the November 2026 top ten and does not accept a language field", () => {
-    assert.equal(LANGUAGE_INDEX, "TIOBE November 2026");
-    assert.deepEqual(
-      TOP_LANGUAGES.map((row) => row.language),
-      ["Python", "C", "Java", "C++", "C#", "JavaScript", "R", "SQL", "Visual Basic", "Go"],
-    );
-    assert.deepEqual(
-      TOP_LANGUAGES.map((row) => row.rank),
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-    );
-    assert.deepEqual(
-      TOP_LANGUAGES.filter((row) => row.package === "javascript-host").map((row) => row.language),
-      ["JavaScript"],
-    );
-    for (const row of TOP_LANGUAGES) {
-      if (row.language !== "JavaScript") assert.equal(row.package, "not-hosted");
-    }
+  it("refuses a language field and keeps the ranking out of the public API", () => {
+    const files = readdirSync(here);
+    assert.equal(files.includes("languages.ts"), false);
+    const barrel = readFileSync(join(here, "index.ts"), "utf8");
+    assert.equal(barrel.includes("LANGUAGE_INDEX"), false);
+    assert.equal(barrel.includes("TOP_LANGUAGES"), false);
+    const adr = readFileSync(join(here, "../../docs/adr/0020-cross-language-modules.md"), "utf8");
+    assert.match(adr, /Python, C, Java, C\+\+, C#, JavaScript, R, SQL, Visual Basic, and Go, in that order/);
+    assert.match(adr, /An authoring project may contain TypeScript/);
+    assert.match(adr, /This host does not compile TypeScript/);
+    assert.match(adr, /not a ban on TypeScript as an authoring language/);
+    assert.match(adr, /ADR 0018 is the local content store/);
+    assert.match(adr, /ADR 0019 is project lockfiles/);
     const claimed = validateManifest({
       moduleId: "org.example.lang",
       name: "Lang",

@@ -76,7 +76,9 @@ The wasmCloud studies support a WIT compatibility prototype before finalizing M4
 | ADR | Subject | Status |
 |---|---|---|
 | [0017 — Independent module release package and identity](../adr/0017-independent-module-release-package-and-identity.md) | Accepted v1 package descriptor, JavaScript/Wasm release artifacts, portable path profile, canonical package-tree digest, and immutable module release coordinates | Accepted — implementation pending |
-| [0018 — Cross-language modules](../adr/0018-cross-language-modules.md) | November 2026 top ten. Only JavaScript is hosted. A WebAssembly guest has no source language. | Accepted |
+| [0018 — Local content store and release catalog](../adr/0018-local-content-store-and-release-catalog.md) | Content-addressed local objects and catalog registration outside Foundations. | Accepted |
+| [0019 — Project lockfiles and exact local resolution](../adr/0019-project-lockfiles-and-exact-local-resolution.md) | Exact project pins. No dependency solving. | Accepted |
+| [0020 — Cross-language modules](../adr/0020-cross-language-modules.md) | November 2026 top ten as documentation, not a Foundations export. Only JavaScript is hosted. A WebAssembly guest has no source language. | Accepted |
 
 This table tracks both proposals and accepted decisions. Acceptance records the architecture contract; it does not imply that implementation or conformance tests are complete.
 
