@@ -7,12 +7,14 @@ import { discoverModules, loadInProcessImplementations } from "./discover-node.t
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import { IN_PROCESS_POLICY, type ExecutionPolicy } from "./backend.ts";
 import { captureSave, restoreSave } from "./save.ts";
-import { publish } from "./dispatch.ts";
+import { callService, publish, runPipeline } from "./dispatch.ts";
+import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { ABI_ID, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, materializeAbiValue, mintAbiHandle } from "./abi.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
 import {
   counterGuest,
   echoGuest,
+  boundaryGuest,
   growGuest,
   hugeTableGuest,
   logGuest,
@@ -776,6 +778,154 @@ describe("abi payloads and cleanup", () => {
     assert.equal(backend.openSessions(), 0);
     assert.equal(backend.resourceUsage().guests, 0);
     await backend.dispose();
+  });
+});
+
+describe("javascript and a guest share JSON", () => {
+  it("passes a call and a save slice across the language boundary", async () => {
+    const wasm = createWasmBackend();
+    const backend = createCrossBackend(wasm);
+    let poison = false;
+    let made: { n: number } | undefined;
+    let seen: unknown;
+    let lateRan = 0;
+    const desk = {
+      manifest: manifest("org.example.desk", {
+        exposesSlots: [
+          {
+            slotId: "example.pipe",
+            contract: "example.pipe",
+            contractVersion: "1.0.0",
+            kind: "pipeline",
+            required: false,
+          },
+          {
+            slotId: "example.ask",
+            contract: "example.ask",
+            contractVersion: "1.0.0",
+            kind: "service",
+            required: false,
+          },
+        ],
+      }),
+    };
+    const early = {
+      manifest: manifest("org.example.early", {
+        connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+      }),
+      implementation: {
+        register(ctx: { contribute: (slotId: string, contribution: { id: string; order?: number; payload: (input: unknown) => unknown }) => void }) {
+          ctx.contribute("example.pipe", {
+            id: "early",
+            order: 0,
+            payload() {
+              if (poison) return function stop() {};
+              made = { n: 1 };
+              return made;
+            },
+          });
+        },
+      },
+    };
+    const late = {
+      manifest: manifest("org.example.late", {
+        connectsTo: [{ slot: "example.pipe", contract: "example.pipe/1" }],
+      }),
+      implementation: {
+        register(ctx: { contribute: (slotId: string, contribution: { id: string; order?: number; payload: (input: unknown) => unknown }) => void }) {
+          ctx.contribute("example.pipe", {
+            id: "late",
+            order: 20,
+            payload(input: unknown) {
+              lateRan += 1;
+              const row = input && typeof input === "object" ? (input as { arg?: unknown }) : undefined;
+              seen = row?.arg;
+              const arg = row?.arg as { n?: unknown } | undefined;
+              return { n: arg?.n };
+            },
+          });
+        },
+      },
+    };
+    const relay = {
+      manifest: manifest("org.example.relay", {
+        connectsTo: [
+          { slot: "example.pipe", contract: "example.pipe/1" },
+          { slot: "example.ask", contract: "example.ask/1" },
+        ],
+      }),
+      implementation: { wasm: boundaryGuest() },
+    };
+    const mixed = await compose([desk, early, relay, late], { backend, policy: CROSS_POLICY, profileName: "lang-call" });
+    assert.equal(mixed.runtimeActive, true, messages(mixed));
+    const piped = await runPipeline(mixed, "example.pipe", null);
+    assert.equal(piped.ok, true, piped.reason ?? piped.stages.map((item) => item.message).join("\n"));
+    assert.deepEqual(piped.output, { n: 1 });
+    assert.deepEqual(seen, { n: 1 });
+    assert.notEqual(seen, made);
+    const input = { n: 1 };
+    const asked = await callService(mixed, "example.ask", input);
+    assert.equal(asked.ok, true, asked.reason ?? asked.message ?? "");
+    const echoed = asked.output as { arg?: unknown };
+    assert.deepEqual(echoed.arg, { n: 1 });
+    assert.notEqual(echoed.arg, input);
+    poison = true;
+    const before = lateRan;
+    const refused = await runPipeline(mixed, "example.pipe", null);
+    assert.equal(refused.ok, false);
+    assert.equal(lateRan, before);
+    assert.match(refused.stages.map((item) => item.message ?? "").join("\n"), /not JSON \(function\)/);
+    const still = await callService(mixed, "example.ask", { n: 2 });
+    assert.equal(still.ok, true, still.reason ?? still.message ?? "");
+    assert.deepEqual((still.output as { arg?: unknown }).arg, { n: 2 });
+
+    const state = { n: 4, label: "js" };
+    const jsBox = {
+      manifest: manifest("org.example.kept", { save: { version: "1.0.0" } }),
+      implementation: {
+        register(ctx: { keep: (value: unknown) => void }) {
+          ctx.keep(state);
+        },
+        exportState() {
+          return { n: state.n, label: state.label };
+        },
+        importState(_ctx: unknown, saved: unknown) {
+          const row = saved as { n?: unknown; label?: unknown };
+          if (typeof row?.n === "number") state.n = row.n;
+          if (typeof row?.label === "string") state.label = row.label;
+        },
+      },
+    };
+    const js = await compose([jsBox], { backend, policy: CROSS_POLICY, profileName: "lang-js" });
+    assert.equal(js.runtimeActive, true, messages(js));
+    const fromJs = await captureSave(js);
+    assert.equal(fromJs.ok, true);
+    const guestBox = {
+      manifest: manifest("org.example.kept", { save: { version: "1.0.0" } }),
+      implementation: { wasm: storeGuest("{}") },
+    };
+    const guest = await compose([guestBox], { backend, policy: CROSS_POLICY, profileName: "lang-guest" });
+    assert.equal(guest.runtimeActive, true, messages(guest));
+    const applied = await restoreSave(guest, fromJs.document);
+    assert.equal(applied.ok, true, applied.notices.map((item) => item.message).join("\n"));
+    const guestShot = await captureSave(guest);
+    assert.deepEqual(guestShot.document.slices[0]?.payload, { n: 4, label: "js" });
+    const fromGuest = await restoreSave(guest, {
+      ...guestShot.document,
+      slices: [{ moduleId: "org.example.kept", version: "1.0.0", payload: { n: 9, label: "guest" } }],
+    });
+    assert.equal(fromGuest.ok, true, fromGuest.notices.map((item) => item.message).join("\n"));
+    const stored = await captureSave(guest);
+    const back = await restoreSave(js, stored.document);
+    assert.equal(back.ok, true, back.notices.map((item) => item.message).join("\n"));
+    assert.deepEqual((await captureSave(js)).document.slices[0]?.payload, { n: 9, label: "guest" });
+
+    await mixed.shutdown();
+    await js.shutdown();
+    await guest.shutdown();
+    assert.equal(wasm.openSessions(), 0);
+    assert.equal(wasm.resourceUsage().guests, 0);
+    await wasm.dispose();
   });
 });
 

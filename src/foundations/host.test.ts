@@ -10,6 +10,7 @@ function compose(packages: readonly ModulePackage[], options: ComposeOptions = {
   return hostCompose(packages, { policy: IN_PROCESS_POLICY, ...options });
 }
 import { validateManifest } from "./manifest.ts";
+import { LANGUAGE_INDEX, TOP_LANGUAGES } from "./languages.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -164,6 +165,35 @@ describe("manifest validation", () => {
     assert.equal(result.slots.find((item) => item.slotId === "example.look")?.mutates, false);
     assert.equal(result.slots.find((item) => item.slotId === "example.ask")?.mutates, true);
     assert.equal(result.slots.find((item) => item.slotId === "platform.systems")?.mutates, false);
+  });
+
+  it("names the November 2026 top ten and does not accept a language field", () => {
+    assert.equal(LANGUAGE_INDEX, "TIOBE November 2026");
+    assert.deepEqual(
+      TOP_LANGUAGES.map((row) => row.language),
+      ["Python", "C", "Java", "C++", "C#", "JavaScript", "R", "SQL", "Visual Basic", "Go"],
+    );
+    assert.deepEqual(
+      TOP_LANGUAGES.map((row) => row.rank),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    );
+    assert.deepEqual(
+      TOP_LANGUAGES.filter((row) => row.package === "javascript-host").map((row) => row.language),
+      ["JavaScript"],
+    );
+    for (const row of TOP_LANGUAGES) {
+      if (row.language !== "JavaScript") assert.equal(row.package, "not-hosted");
+    }
+    const claimed = validateManifest({
+      moduleId: "org.example.lang",
+      name: "Lang",
+      version: "1.0.0",
+      moduleApi: ">=1.0.0 <2.0.0",
+      language: "Python",
+    });
+    assert.equal(claimed.ok, false);
+    if (claimed.ok) return;
+    assert.ok(claimed.errors.some((error) => error.message.includes("language")));
   });
 
   it("rejects a self-owned slot connection", async () => {

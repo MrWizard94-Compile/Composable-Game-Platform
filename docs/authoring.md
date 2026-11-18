@@ -2,6 +2,8 @@
 
 Copy [examples/starter-module](../examples/starter-module) for JavaScript, or [examples/wasm-module](../examples/wasm-module) for a portable guest. Change `moduleId`. A package is a folder with `manifest.json` and, if it has behavior, either `module.ts` exporting `implementation` or `module.wasm`.
 
+The package is not named by language. The November 2026 index is Python, C, Java, C++, C#, JavaScript, R, SQL, Visual Basic, and Go. Only JavaScript is an in-process implementation. The other nine are not hosted: there is no CPython, JVM, CLR, R runtime, SQL engine, Visual Basic runtime, or C, C++, or Go compiler in this host. A `language` field is unknown and is refused. A WebAssembly guest is not attributed to the language that compiled it. Rust is not in this top ten. TypeScript is not compiled. SQL is not a module runtime.
+
 The browser console can check a manifest. It does not load an implementation by importing it. Loading code is `compose()`.
 
 ## Independent release packages

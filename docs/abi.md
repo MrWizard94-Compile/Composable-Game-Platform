@@ -1,6 +1,6 @@
 # Module ABI `cgp.abi/1`
 
-A portable module is a WebAssembly binary. The host copies UTF-8 JSON in and copies UTF-8 JSON out. It does not share the guest memory with another module or with the host's objects.
+A portable module is a WebAssembly binary. The host copies UTF-8 JSON in and copies UTF-8 JSON out. It does not share the guest memory with another module or with the host's objects. The guest has no source language. The TIOBE index for November 2026 names Python, C, Java, C++, C#, JavaScript, R, SQL, Visual Basic, and Go. Of those, only JavaScript is hosted, and only as the in-process implementation. A binary that speaks this ABI is a guest. It is not a Python, C, C++, or Go module because someone compiled it from one of those languages. The host does not embed the other nine, and it does not compile TypeScript. Rust is not in this top ten.
 
 The guest exports:
 

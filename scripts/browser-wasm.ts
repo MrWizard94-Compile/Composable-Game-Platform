@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 import { chromium } from "playwright";
 import { templateGuest, wasiGuest } from "../src/foundations/wasm-build.ts";
-import type { BrowserServiceAuthority } from "./browser-compose-entry.ts";
+import type { BrowserBoundaryReport, BrowserServiceAuthority } from "./browser-compose-entry.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -183,21 +183,64 @@ export async function runBrowserCompositionCheck(): Promise<void> {
             sessions: number;
             detail: string;
           }>;
+          runBrowserBoundary: () => Promise<{
+            active: boolean;
+            detail: string;
+            piped: unknown;
+            copied: boolean;
+            service: unknown;
+            serviceCopied: boolean;
+            refused: boolean;
+            refusedMessage: string;
+            lateSkipped: boolean;
+            still: unknown;
+            jsToGuest: unknown;
+            guestToJs: unknown;
+            sessions: number;
+            guests: number;
+          }>;
         };
-        return loaded.runBrowserComposition();
+        return {
+          composition: await loaded.runBrowserComposition(),
+          boundary: await loaded.runBrowserBoundary(),
+        };
       }, "/compose.js");
       if (failed.length > 0) throw new Error(failed.join("\n"));
-      if (report.active !== true || report.contributionId !== "starter") {
-        throw new Error(`Browser composition did not contribute: ${JSON.stringify(report)}`);
+      if (report.composition.active !== true || report.composition.contributionId !== "starter") {
+        throw new Error(`Browser composition did not contribute: ${JSON.stringify(report.composition)}`);
       }
-      if (typeof report.wasi !== "string" || !/Unauthorized import wasi_snapshot_preview1/.test(report.wasi)) {
-        throw new Error(`Browser composition accepted a forbidden import: ${JSON.stringify(report)}`);
+      if (typeof report.composition.wasi !== "string" || !/Unauthorized import wasi_snapshot_preview1/.test(report.composition.wasi)) {
+        throw new Error(`Browser composition accepted a forbidden import: ${JSON.stringify(report.composition)}`);
       }
-      if (report.padded !== true) {
-        throw new Error(`Browser composition tied binary size to linear memory: ${JSON.stringify(report)}`);
+      if (report.composition.padded !== true) {
+        throw new Error(`Browser composition tied binary size to linear memory: ${JSON.stringify(report.composition)}`);
       }
-      if (report.sessions !== 0) {
-        throw new Error(`Browser composition left a session open: ${JSON.stringify(report)}`);
+      if (report.composition.sessions !== 0) {
+        throw new Error(`Browser composition left a session open: ${JSON.stringify(report.composition)}`);
+      }
+      const boundary = report.boundary;
+      if (boundary.active !== true || JSON.stringify(boundary.piped) !== JSON.stringify({ n: 1 }) || boundary.copied !== true) {
+        throw new Error(`Browser boundary did not copy a call: ${JSON.stringify(boundary)}`);
+      }
+      if (JSON.stringify(boundary.service) !== JSON.stringify({ n: 1 }) || boundary.serviceCopied !== true) {
+        throw new Error(`Browser boundary did not copy a service call: ${JSON.stringify(boundary)}`);
+      }
+      if (boundary.refused !== true || boundary.lateSkipped !== true || !/not JSON \(function\)/.test(boundary.refusedMessage)) {
+        throw new Error(`Browser boundary accepted a non-JSON value: ${JSON.stringify(boundary)}`);
+      }
+      if (JSON.stringify(boundary.still) !== JSON.stringify({ n: 2 })) {
+        throw new Error(`Browser boundary stopped the guest after a refused call: ${JSON.stringify(boundary)}`);
+      }
+      const fromJs = boundary.jsToGuest as { n?: unknown; label?: unknown } | null;
+      if (!fromJs || fromJs.n !== 4 || fromJs.label !== "js") {
+        throw new Error(`Browser boundary did not restore a JavaScript slice into the guest: ${JSON.stringify(boundary)}`);
+      }
+      const fromGuest = boundary.guestToJs as { n?: unknown; label?: unknown } | null;
+      if (!fromGuest || fromGuest.n !== 9 || fromGuest.label !== "guest") {
+        throw new Error(`Browser boundary did not restore a guest slice into JavaScript: ${JSON.stringify(boundary)}`);
+      }
+      if (boundary.sessions !== 0 || boundary.guests !== 0) {
+        throw new Error(`Browser boundary left a session open: ${JSON.stringify(boundary)}`);
       }
     } finally {
       await browser.close();

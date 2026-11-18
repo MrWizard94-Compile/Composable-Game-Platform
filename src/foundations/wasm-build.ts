@@ -239,8 +239,8 @@ export function abiExports(funcBase: number): WasmSpec["exports"] {
   return standardExports(funcBase);
 }
 
-/** Copies an imported JSON payload and later exports those same bytes. */
-export function storeGuest(registerJson: string): Uint8Array {
+/** Copies an imported JSON payload and later exports those same bytes. A call can echo its input bytes. */
+export function storeGuest(registerJson: string, echoCalls = false): Uint8Array {
   const register = text(registerJson);
   const initial = text('{"count":0}');
   const registerAt = 400;
@@ -251,7 +251,23 @@ export function storeGuest(registerJson: string): Uint8Array {
   if (stateAt + stateLimit > heapAt) {
     throw new Error(`Register payload is ${register.length} bytes. It must end before the guest heap.`);
   }
+  const echo: number[] = echoCalls
+    ? [
+        ...op.localGet(0),
+        ...op.i32Const(5),
+        ...op.i32Eq,
+        ...op.if,
+        ...op.localGet(1),
+        ...op.globalSet(1),
+        ...op.localGet(2),
+        ...op.globalSet(2),
+        ...op.i32Const(0),
+        ...op.ret,
+        ...op.end,
+      ]
+    : [];
   const copy: number[] = [
+    ...echo,
     ...op.localGet(0),
     ...op.i32Const(4),
     ...op.i32Eq,
@@ -322,6 +338,22 @@ export function storeGuest(registerJson: string): Uint8Array {
       { offset: stateAt, bytes: initial },
     ],
   });
+}
+
+/**
+ * A guest for the language boundary. Hook 5 returns the call bytes unchanged.
+ * Import stores the JSON and export returns those bytes. This is not a C, Go, or Python program.
+ */
+export function boundaryGuest(): Uint8Array {
+  return storeGuest(
+    JSON.stringify({
+      contributions: [
+        { slotId: "example.pipe", id: "relay", order: 10, dispatch: true },
+        { slotId: "example.ask", id: "ask", dispatch: true },
+      ],
+    }),
+    true,
+  );
 }
 
 /** Increments its own digit. A second instance must not see that digit. */
