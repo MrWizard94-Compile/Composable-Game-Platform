@@ -32,7 +32,7 @@ Apply and claim-apply hold the existing exclusive writer lock and wait for reade
 
 1. Recheck local pins, project pins, grace, and the package-tree digest. Measure the tree without following symlinks.
 2. Persist `intent` with the claim token and the current writer-lock token.
-3. `rename` the real object directory into `.cgp-store-tombstones/<hex>` on the same store filesystem.
+3. Make the object directory writable and `rename` it into `.cgp-store-tombstones/<hex>` on the same store filesystem. The directory itself must be writable or ext4 refuses the rename. Children are not retargeted.
 4. Persist `quarantined`, then `removing`.
 5. Thaw and unlink only regular files. Refuse a symlink or special entry without removing it or its target.
 6. Persist `deleted` only after the tombstone directory is gone.

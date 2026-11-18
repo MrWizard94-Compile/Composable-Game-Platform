@@ -1559,6 +1559,10 @@ function moveCanonicalToTombstone(root: string, digest: string): void {
   if (sourceInfo.isSymbolicLink() || !sourceInfo.isDirectory()) {
     throw new Error("Refusing to move a package object that is not a real directory.");
   }
+  // Stored object directories are mode 0555. ext4 refuses to rename a directory
+  // that is not writable, because the rename updates its "..". Thaw only this
+  // directory inode; do not follow or retarget anything inside it.
+  chmodSync(source, 0o755);
   const destination = join(ensureTombstoneRoot(root), digestHex(digest));
   if (existsByLstat(destination)) throw new Error("Quarantine path already exists for " + digest + ".");
   renameSync(source, destination);
