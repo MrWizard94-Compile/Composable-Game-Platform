@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 150" role="img" aria-labelledby="title desc">
+  <title id="title">CGP — Composable Game Platform</title>
+  <desc id="desc">CGP platform mark and wordmark with the full platform name.</desc>
+  <defs>
+    <linearGradient id="mark" x1="16" y1="10" x2="116" y2="120" gradientUnits="userSpaceOnUse"><stop stop-color="#48D7FF"/><stop offset=".52" stop-color="#159BFF"/><stop offset="1" stop-color="#8B72FF"/></linearGradient>
+    <linearGradient id="type" x1="150" y1="18" x2="490" y2="100" gradientUnits="userSpaceOnUse"><stop stop-color="#F4FAFF"/><stop offset="1" stop-color="#C7D8F2"/></linearGradient>
+  </defs>
+  <g transform="translate(8 8) scale(1.05)">
+    <g fill="none" stroke="url(#mark)" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"><path d="M59 11 20 33v31M69 11l39 22v31M20 77v18l39 22M108 77v18l-39 22M20 64l44 25 44-25"/></g>
+    <path d="m64 34 27 15v30L64 94 37 79V49z" fill="#10213B" stroke="url(#mark)" stroke-width="3"/>
+    <path d="m64 34 27 15-27 16-27-16z" fill="#2EC5FF"/><path d="M64 65v29L37 79V49z" fill="#167BE8"/><path d="M64 65 91 49v30L64 94z" fill="#735CEB"/>
+  </g>
+  <text x="158" y="76" fill="url(#type)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="66" font-weight="760" letter-spacing="-3">CGP</text>
+  <text x="162" y="112" fill="#AFC4E3" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" font-weight="500" letter-spacing=".15">COMPOSABLE GAME PLATFORM</text>
+</svg>

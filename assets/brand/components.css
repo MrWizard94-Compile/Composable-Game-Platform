@@ -1,0 +1,16 @@
+@import url("./tokens.css");
+.cgp-panel{color:var(--cgp-text);background:var(--cgp-surface);border:1px solid var(--cgp-border);border-radius:var(--cgp-radius-lg);box-shadow:var(--cgp-shadow-panel)}
+.cgp-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 16px;border:1px solid transparent;border-radius:var(--cgp-radius-md);color:var(--cgp-text);background:var(--cgp-surface-raised);font:inherit;font-weight:600;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease,transform 120ms ease}
+.cgp-button:hover{background:var(--cgp-surface-hover)}.cgp-button:active{transform:translateY(1px)}
+.cgp-button:focus-visible,.cgp-control:focus-visible{outline:none;box-shadow:var(--cgp-focus)}
+.cgp-button--primary{color:#041525;background:var(--cgp-blue);border-color:#62D7FF}.cgp-button--primary:hover{background:#55CCFA}
+.cgp-button--secondary{background:transparent;border-color:var(--cgp-border-strong)}
+.cgp-button:disabled{color:var(--cgp-text-subtle);background:#26364C;border-color:#34465E;cursor:not-allowed;transform:none}
+.cgp-control{min-height:38px;padding:8px 10px;color:var(--cgp-text);background:#0D1728;border:1px solid var(--cgp-border);border-radius:var(--cgp-radius-md);font:inherit}
+.cgp-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border:1px solid var(--cgp-border);border-radius:999px;color:var(--cgp-text-muted);background:var(--cgp-surface-raised);font-size:12px}
+.cgp-badge--success{color:#88E5B7;border-color:#236B4D;background:#123426}.cgp-badge--warning{color:#F5CD7B;border-color:#765B27;background:#362A13}
+.cgp-badge--error{color:#FF9EA4;border-color:#773B43;background:#381B24}.cgp-badge--info{color:#8BD5FF;border-color:#265C7E;background:#132C41}
+.cgp-muted{color:var(--cgp-text-muted)}
+.cgp-nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--cgp-radius-md);color:var(--cgp-text-muted);text-decoration:none}
+.cgp-nav-item[aria-current="page"]{color:white;background:#123B5B;box-shadow:inset 2px 0 var(--cgp-cyan)}
+@media(prefers-reduced-motion:reduce){.cgp-button{transition:none}.cgp-button:active{transform:none}}

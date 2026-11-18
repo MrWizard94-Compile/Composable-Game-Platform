@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">CGP platform mark</title>
+  <desc id="desc">An open modular hexagonal form with linked paths around a central core.</desc>
+  <defs>
+    <linearGradient id="cgp-blue" x1="18" y1="12" x2="104" y2="108" gradientUnits="userSpaceOnUse"><stop stop-color="#48D7FF"/><stop offset=".52" stop-color="#159BFF"/><stop offset="1" stop-color="#8B72FF"/></linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#cgp-blue)" stroke-linecap="round" stroke-linejoin="round" stroke-width="9">
+    <path d="M59 11 20 33v31M69 11l39 22v31M20 77v18l39 22M108 77v18l-39 22M20 64l44 25 44-25"/>
+  </g>
+  <path d="m64 34 27 15v30L64 94 37 79V49z" fill="#10213B" stroke="url(#cgp-blue)" stroke-width="3"/>
+  <path d="m64 34 27 15-27 16-27-16z" fill="#2EC5FF"/>
+  <path d="M64 65v29L37 79V49z" fill="#167BE8"/>
+  <path d="M64 65 91 49v30L64 94z" fill="#735CEB"/>
+</svg>
