@@ -13,9 +13,17 @@ The starter folder above is an in-repository authoring example; it is not a publ
 - A WebAssembly release contains `manifest.json`, `cgp-package.json`, and `module.wasm`.
 - A JavaScript release contains `manifest.json`, `cgp-package.json`, and a self-contained `module.mjs` exporting `implementation`.
 - A release contains one runtime artifact. The format-v1 package validator never imports JavaScript or instantiates WebAssembly.
-- Check a release directory with `node --experimental-strip-types scripts/check-module-package.ts <package-dir>`. The checker reports the immutable package-tree digest and the selected artifact digest.
+- Build and stage an authoring project with `node --experimental-strip-types scripts/build-module-package.ts --source <authoring-dir> --release <release-dir> --stage <staging-dir>`.
+- The packer infers the runtime only when exactly one of `module.ts` or `module.wasm` exists. Use `--runtime javascript-esm` or `--runtime wasm-core` to select explicitly.
+- JavaScript authoring starts from `module.ts`; esbuild bundles it and its local/dependency imports into one `module.mjs`. Node built-ins must use `node:` specifiers and remain external. Dynamic imports are refused.
+- Wasm authoring supplies a compiled `module.wasm`; the packer copies it without instantiating it.
+- The packer always includes `manifest.json`, generates `cgp-package.json`, and includes existing `README.md`, `LICENSE`, `NOTICE`, `docs/`, `assets/`, and `data/`. Add other files with repeated `--include <relative-path>` arguments. Included directories are copied recursively.
+- The packer creates a clean release directory, copies it into a separate staging snapshot, freezes the staged files/directories as read-only, validates the snapshot, compares both copies, and calculates the package-tree and selected-artifact digests from the staged bytes. Default resource ceilings are 4,096 files, 64 MiB per file, 128 MiB total file content, 240 UTF-8 bytes per path, and 16 path components. Exceeding a limit refuses the build; files are never truncated or silently omitted.
+- A JSON release summary is written outside the package at `<staging-dir>.summary.json` by default. The summary is not part of the package-tree digest.
+- Existing release, staging, and summary paths are never overwritten. Choose new paths for every build. The release directory remains editable; the staging snapshot is the frozen handoff artifact.
+- Check a release directory or staging snapshot with `node --experimental-strip-types scripts/check-module-package.ts <package-dir>`.
 
-The current checker validates an existing directory. It is not yet a staging/packaging tool, installer, catalog, or package publisher. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.
+The packer and validator are local Node-side tooling, not an installer, catalog, archive importer, registry, or publisher. Read-only filesystem permissions are a guard against accidental edits, not cryptographic immutability against an owner or privileged process. JavaScript packages are classified as `trusted-in-process`; packaging and hashing do not sandbox them.
 
 ## Public entry
 

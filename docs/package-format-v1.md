@@ -2,7 +2,7 @@
 
 This document records the first executable implementation of the accepted package contract in ADR 0017.
 
-The normative logical package is a directory containing regular files. Archives, catalogs, locks, remote registries, staging/build commands, package leases, and garbage collection are not part of format v1.
+The normative logical package is a directory containing regular files. The local release packer/stager is tooling layered on top of this contract; it does not alter package identity or add fields to the package. Archives, catalogs, locks, remote registries, package leases, and garbage collection are not part of format v1.
 
 ## Required files and runtime selection
 
@@ -106,6 +106,23 @@ node --experimental-strip-types scripts/check-module-package.ts examples/javascr
 ~~~
 
 The command reports the module coordinate, runtime kind, package-tree profile/digest, artifact digest, and included file paths. It does not import `module.mjs` or instantiate `module.wasm`.
+
+## Authoring build and immutable staging
+
+The local packer is `scripts/build-module-package.ts`. It accepts an authoring directory, a new release output directory, and a new staging output directory:
+
+~~~sh
+node --experimental-strip-types scripts/build-module-package.ts \\
+  --source examples/starter-module \\
+  --release ./out/starter-release \\
+  --stage ./out/staging/starter-1.0.0
+~~~
+
+The packer selects exactly one authoring entrypoint (`module.ts` or `module.wasm`), generates the closed descriptor, and includes the manifest plus existing conventional documentation/license/data paths. Additional relative paths can be included with repeated `--include` arguments. JavaScript is bundled to one self-contained `module.mjs`; Wasm is copied as bytes and is never instantiated by the packer.
+
+The release directory is copied to a separate staging directory. The staged tree is made read-only, validated using the package validator, and re-hashed. The staged and release tree/artifact digests must agree before publication. The machine-readable `cgp.release-summary/1` JSON file is written beside the staging directory by default, never inside the package. Existing output paths are refused rather than overwritten. Read-only permissions prevent accidental edits; they are not a security boundary against the directory owner or a privileged process.
+
+The staging directory is the handoff candidate for a future catalog/store registration step. The local packer currently enforces these documented resource ceilings: 4,096 regular files, 64 MiB per file, 128 MiB total file content, 240 UTF-8 bytes per relative path, and 16 path components. Exceeding any limit refuses the build without truncation. These are local tool limits, not new normative package-format limits. This command does not register, publish, install, archive, sign, or authenticate a release.
 
 ## Example packages
 

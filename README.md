@@ -41,6 +41,7 @@ npm test
 npx tsc -p tsconfig.foundations.json --noEmit
 node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
 node --experimental-strip-types scripts/check-module-package.ts examples/third-party-module
+node --experimental-strip-types scripts/build-module-package.ts --source examples/starter-module --release ./out/starter-release --stage ./out/staging/starter-1.0.0
 node --experimental-strip-types scripts/check-module-package.ts examples/javascript-module
 node --experimental-strip-types scripts/browser-wasm.ts
 ```
@@ -56,7 +57,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 ## Layout
 
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
-- `src/packages` — Node-side release package validation and content identity tooling. It is not part of the Foundations runtime.
+- `src/packages` — Node-side release validation, staging, and content identity tooling. It is not part of the Foundations runtime.
 - `src/modules/*` — packaged proofs. One folder per module.
 - `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
 - `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.

@@ -26,5 +26,13 @@ jobs:
         run: |
           node --experimental-strip-types scripts/check-module-package.ts examples/third-party-module
           node --experimental-strip-types scripts/check-module-package.ts examples/javascript-module
+      - name: Build, stage, and validate JavaScript and Wasm releases
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'chmod -R u+w "$tmp"; rm -rf "$tmp"' EXIT
+          node --experimental-strip-types scripts/build-module-package.ts --source examples/starter-module --release "$tmp/js-release" --stage "$tmp/js-stage"
+          node --experimental-strip-types scripts/check-module-package.ts "$tmp/js-stage"
+          node --experimental-strip-types scripts/build-module-package.ts --source examples/third-party-module --release "$tmp/wasm-release" --stage "$tmp/wasm-stage"
+          node --experimental-strip-types scripts/check-module-package.ts "$tmp/wasm-stage"
       - name: Foundations, browser isolation, composition, and stress
-        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/modules/composition.test.ts src/modules/sim.test.ts
+        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/modules/composition.test.ts src/modules/sim.test.ts
