@@ -31,7 +31,7 @@ For an existing project, replace `examples/project.json` with your project profi
 
 The local API binds only to `127.0.0.1`, accepts same-origin browser writes, limits request size, and only accepts staging directory names below the configured staging root. The browser never receives arbitrary filesystem paths for use as requests.
 
-**Runtime boundary:** the lock resolver validates and returns exact package object locations and identities. This console currently does not dynamically load or execute packages from the local store. The Composition view still exercises the bundled proof modules. JavaScript package artifacts are trusted-in-process code and are not sandboxed by this interface; Wasm packages require the existing isolate runtime.
+**Runtime boundary:** the browser console's lock resolver validates and returns exact package object locations and identities; the console does not dynamically load or execute packages from the local store, and its Composition view still exercises the bundled proof modules. Node host code can separately call `activateWasmProject()` from `src/packages/wasm-activation.ts` to activate a complete exact Wasm-only lock after all package bytes have been verified and snapshotted. That adapter uses the existing `wasm-isolate` backend and requires the caller to shut the composition down. JavaScript ESM and mixed-runtime activation are not supported; JavaScript package artifacts remain trusted-in-process code and are not sandboxed.
 
 Useful options:
 
@@ -100,7 +100,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 ## Layout
 
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
-- `src/packages` — Node-side release validation, staging, local content storage, catalog, project locks, and content identity tooling. It is not part of the Foundations runtime.
+- `src/packages` — Node-side release validation, staging, local content storage, catalog, project locks, verified snapshots, and the one-shot Wasm activation adapter. It is not part of the Foundations runtime.
 - `src/modules/*` — packaged proofs. One folder per module.
 - `apps/console` — maintained branded browser console.
 - `examples/project.json` — sample local-store project profile.
