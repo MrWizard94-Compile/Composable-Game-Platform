@@ -11,6 +11,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -56,7 +57,14 @@ export type StoreVerification = {
 };
 
 
-export type StoreObjectState = "ready" | "deleting";
+export type StoreObjectState =
+  | "ready"
+  | "deleting"
+  | "intent"
+  | "quarantined"
+  | "removing"
+  | "deleted"
+  | "ambiguous";
 export type ProjectRetentionPinInput = {
   profileId: string;
   profileDigest: string;
@@ -68,12 +76,32 @@ export type ProjectRetentionPin = {
   modules: Array<{ moduleId: string; version: string; digest: string }>;
   createdAt: string; updatedAt: string;
 };
+export type StoreDeletionClaim = { token: string; pid: number; createdAt: string };
+export type StoreDeletionIntent = {
+  claimToken: string;
+  writerToken: string;
+  packageTreeDigest: string;
+  createdAt: string;
+};
+export type StoreTombstoneRecord = { name: string; movedAt: string };
+export type StoreRemovalRecord = { startedAt: string };
+export type StoreDeletionRecord = { claimToken: string; deletedAt: string };
+export type StoreAmbiguityRecord = { reason: string; detectedAt: string };
 export type StoreObjectLifecycle = {
-  digest: string; state: StoreObjectState; createdAt: string; updatedAt: string;
-  deletionClaim?: { token: string; pid: number; createdAt: string };
+  digest: string;
+  state: StoreObjectState;
+  createdAt: string;
+  updatedAt: string;
+  deletionClaim?: StoreDeletionClaim;
+  deletionIntent?: StoreDeletionIntent;
+  tombstone?: StoreTombstoneRecord;
+  removal?: StoreRemovalRecord;
+  deletedAt?: string;
+  deletionRecord?: StoreDeletionRecord;
+  ambiguity?: StoreAmbiguityRecord;
 };
 export type StoreLifecycle = {
-  schema: "cgp.local-store-lifecycle/1";
+  schema: "cgp.local-store-lifecycle/2";
   objects: StoreObjectLifecycle[];
   localPins: LocalRetentionPin[];
   projectPins: ProjectRetentionPin[];
@@ -84,7 +112,7 @@ export type StoreGcPreviewOptions = {
 };
 export type StoreGcObjectReport = {
   digest: string; state: StoreObjectState | "untracked";
-  status: "candidate" | "retained" | "grace-period" | "deleting" | "invalid";
+  status: "candidate" | "retained" | "grace-period" | "deleting" | "invalid" | "in-progress" | "ambiguous";
   bytes: number | null; createdAt: string; ageMs: number;
   releases: Array<{ moduleId: string; version: string }>;
   retentionRoots: string[]; reasons: string[];
@@ -95,7 +123,39 @@ export type StoreGcPreview = {
   candidates: StoreGcObjectReport[]; objects: StoreGcObjectReport[];
   missingObjects: Array<{ digest: string; releases: Array<{ moduleId: string; version: string }> }>;
   ignoredEntries: string[]; candidateBytes: number;
+  recoveryRequired: Array<{ digest: string; state: StoreObjectState; reason: string }>;
+  completedDeletions: Array<{ digest: string; deletedAt: string; releases: Array<{ moduleId: string; version: string }> }>;
 };
+export type StoreGcCoordinationOptions = StoreGcPreviewOptions & {
+  coordination?: StoreCoordinationOptions;
+};
+export type StoreGcApplyReport = {
+  schema: "cgp.store-gc-apply/1";
+  appliedAt: string;
+  gracePeriodMs: number;
+  deleted: string[];
+  skipped: Array<{ digest: string; status: string; reasons: string[] }>;
+};
+export type StoreGcRecoveryReport = {
+  schema: "cgp.store-gc-recovery/1";
+  recoveredAt: string;
+  completed: string[];
+  unchanged: string[];
+  ambiguous: Array<{ digest: string; reason: string }>;
+  refused: Array<{ digest: string; error: string }>;
+};
+export type StoreGcReconcileReport = {
+  schema: "cgp.store-gc-reconcile/1";
+  reconciledAt: string;
+  released: string[];
+  leftInProgress: string[];
+};
+export type StoreGcFaultPoint =
+  | "before-intent"
+  | "after-intent"
+  | "after-move"
+  | "during-removal"
+  | "after-bytes-removed";
 
 
 const CATALOG_SCHEMA = "cgp.local-catalog/1";
@@ -551,8 +611,10 @@ function objectDirectory(root: string, digest: string): string {
  * This checks the store path itself but deliberately does not scan package files.
  */
 
-const LIFECYCLE_SCHEMA = "cgp.local-store-lifecycle/1";
+const LIFECYCLE_SCHEMA_V1 = "cgp.local-store-lifecycle/1";
+const LIFECYCLE_SCHEMA = "cgp.local-store-lifecycle/2";
 const LIFECYCLE_FILE = ".cgp-store-lifecycle.json";
+const TOMBSTONE_DIRECTORY = ".cgp-store-tombstones";
 const DEFAULT_GC_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
 const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -568,8 +630,21 @@ function lifecycleObject(lifecycle: StoreLifecycle, digest: string): StoreObject
   return lifecycle.objects.find((item) => item.digest === digest);
 }
 function assertObjectReady(lifecycle: StoreLifecycle, digest: string): void {
-  if (lifecycleObject(lifecycle, digest)?.state === "deleting") {
+  const state = lifecycleObject(lifecycle, digest)?.state;
+  if (state === "deleting") {
     throw new Error("Package object " + digest + " is marked deleting; new readers and retention pins are refused.");
+  }
+  if (state && state !== "ready") {
+    throw new Error("Package object " + digest + " is " + state + " and is not available to readers or new retention pins.");
+  }
+}
+function assertObjectRegisterable(lifecycle: StoreLifecycle, digest: string): void {
+  const state = lifecycleObject(lifecycle, digest)?.state;
+  if (state === "deleting") {
+    throw new Error("Package object " + digest + " is marked deleting; new readers and retention pins are refused.");
+  }
+  if (state && state !== "ready" && state !== "deleted") {
+    throw new Error("Package object " + digest + " is " + state + " and cannot be registered until deletion recovery finishes.");
   }
 }
 function compareString(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
@@ -581,43 +656,124 @@ function sortLifecycle(lifecycle: StoreLifecycle): StoreLifecycle {
     projectPins: [...lifecycle.projectPins].sort((a,b)=>compareString(a.projectId,b.projectId)),
   };
 }
+function parseDeletionClaim(raw: unknown): StoreDeletionClaim {
+  if (!isRecord(raw) ||
+      Object.keys(raw).sort().join(",") !== "createdAt,pid,token" ||
+      typeof raw.token !== "string" || raw.token.length < 16 ||
+      !Number.isSafeInteger(raw.pid) || (raw.pid as number) <= 0 ||
+      !validIsoDate(raw.createdAt)) {
+    throw new Error(LIFECYCLE_FILE + " contains an invalid deletion claim.");
+  }
+  return { token: raw.token, pid: raw.pid as number, createdAt: raw.createdAt };
+}
+function parseDeletionIntent(raw: unknown, digest: string, claimToken: string): StoreDeletionIntent {
+  if (!isRecord(raw) ||
+      Object.keys(raw).sort().join(",") !== "claimToken,createdAt,packageTreeDigest,writerToken" ||
+      raw.claimToken !== claimToken || raw.packageTreeDigest !== digest ||
+      typeof raw.writerToken !== "string" || raw.writerToken.length < 16 ||
+      !validIsoDate(raw.createdAt)) {
+    throw new Error(LIFECYCLE_FILE + " contains an invalid deletion intent.");
+  }
+  return {
+    claimToken,
+    writerToken: raw.writerToken,
+    packageTreeDigest: digest,
+    createdAt: raw.createdAt,
+  };
+}
+function parseTombstone(raw: unknown, digest: string): StoreTombstoneRecord {
+  const name = digest.slice("sha256:".length);
+  if (!isRecord(raw) || Object.keys(raw).sort().join(",") !== "movedAt,name" ||
+      raw.name !== name || !validIsoDate(raw.movedAt)) {
+    throw new Error(LIFECYCLE_FILE + " contains an invalid tombstone record.");
+  }
+  return { name, movedAt: raw.movedAt };
+}
+function lifecycleObjectKeys(state: StoreObjectState): string {
+  switch (state) {
+    case "ready": return "createdAt,digest,state,updatedAt";
+    case "deleting": return "createdAt,deletionClaim,digest,state,updatedAt";
+    case "intent": return "createdAt,deletionClaim,deletionIntent,digest,state,updatedAt";
+    case "quarantined": return "createdAt,deletionClaim,deletionIntent,digest,state,tombstone,updatedAt";
+    case "removing": return "createdAt,deletionClaim,deletionIntent,digest,removal,state,tombstone,updatedAt";
+    case "deleted": return "createdAt,deletedAt,deletionRecord,digest,state,updatedAt";
+    case "ambiguous": return "ambiguity,createdAt,digest,state,updatedAt";
+  }
+}
+function parseLifecycleObject(raw: unknown, version: 1 | 2): StoreObjectLifecycle {
+  if (!isRecord(raw)) throw new Error(LIFECYCLE_FILE + " contains an invalid object-state record.");
+  const state = raw.state;
+  const allowed: StoreObjectState[] = version === 1
+    ? ["ready", "deleting"]
+    : ["ready", "deleting", "intent", "quarantined", "removing", "deleted", "ambiguous"];
+  if (!isDigest(raw.digest) || typeof state !== "string" || !allowed.includes(state as StoreObjectState) ||
+      !validIsoDate(raw.createdAt) || !validIsoDate(raw.updatedAt)) {
+    throw new Error(LIFECYCLE_FILE + " contains an invalid or duplicate object-state record.");
+  }
+  const objectState = state as StoreObjectState;
+  if (Object.keys(raw).sort().join(",") !== lifecycleObjectKeys(objectState)) {
+    throw new Error(LIFECYCLE_FILE + " object-state record has unknown or missing fields.");
+  }
+  if (objectState === "ready") {
+    return { digest: raw.digest, state: "ready", createdAt: raw.createdAt, updatedAt: raw.updatedAt };
+  }
+  if (objectState === "deleted") {
+    if (!validIsoDate(raw.deletedAt) || !isRecord(raw.deletionRecord) ||
+        Object.keys(raw.deletionRecord).sort().join(",") !== "claimToken,deletedAt" ||
+        typeof raw.deletionRecord.claimToken !== "string" || raw.deletionRecord.claimToken.length < 16 ||
+        raw.deletionRecord.deletedAt !== raw.deletedAt) {
+      throw new Error(LIFECYCLE_FILE + " contains an invalid deletion record.");
+    }
+    return {
+      digest: raw.digest, state: "deleted", createdAt: raw.createdAt, updatedAt: raw.updatedAt,
+      deletedAt: raw.deletedAt,
+      deletionRecord: { claimToken: raw.deletionRecord.claimToken, deletedAt: raw.deletedAt },
+    };
+  }
+  if (objectState === "ambiguous") {
+    if (!isRecord(raw.ambiguity) || Object.keys(raw.ambiguity).sort().join(",") !== "detectedAt,reason" ||
+        typeof raw.ambiguity.reason !== "string" || raw.ambiguity.reason.length === 0 ||
+        raw.ambiguity.reason.length > 500 || !validIsoDate(raw.ambiguity.detectedAt)) {
+      throw new Error(LIFECYCLE_FILE + " contains an invalid ambiguity record.");
+    }
+    return {
+      digest: raw.digest, state: "ambiguous", createdAt: raw.createdAt, updatedAt: raw.updatedAt,
+      ambiguity: { reason: raw.ambiguity.reason, detectedAt: raw.ambiguity.detectedAt },
+    };
+  }
+  const deletionClaim = parseDeletionClaim(raw.deletionClaim);
+  const object: StoreObjectLifecycle = {
+    digest: raw.digest, state: objectState, createdAt: raw.createdAt, updatedAt: raw.updatedAt, deletionClaim,
+  };
+  if (objectState === "deleting") return object;
+  object.deletionIntent = parseDeletionIntent(raw.deletionIntent, raw.digest, deletionClaim.token);
+  if (objectState === "intent") return object;
+  object.tombstone = parseTombstone(raw.tombstone, raw.digest);
+  if (objectState === "quarantined") return object;
+  if (!isRecord(raw.removal) || Object.keys(raw.removal).sort().join(",") !== "startedAt" ||
+      !validIsoDate(raw.removal.startedAt)) {
+    throw new Error(LIFECYCLE_FILE + " contains an invalid removal record.");
+  }
+  object.removal = { startedAt: raw.removal.startedAt };
+  return object;
+}
 function validateStoreLifecycleValue(value: unknown): StoreLifecycle {
   if (!isRecord(value) ||
       Object.keys(value).sort().join(",") !== "localPins,objects,projectPins,schema" ||
-      value.schema !== LIFECYCLE_SCHEMA || !Array.isArray(value.objects) ||
-      !Array.isArray(value.localPins) || !Array.isArray(value.projectPins)) {
-    throw new Error(LIFECYCLE_FILE + " must use the closed cgp.local-store-lifecycle/1 schema.");
+      (value.schema !== LIFECYCLE_SCHEMA && value.schema !== LIFECYCLE_SCHEMA_V1) ||
+      !Array.isArray(value.objects) || !Array.isArray(value.localPins) || !Array.isArray(value.projectPins)) {
+    throw new Error(LIFECYCLE_FILE + " must use closed lifecycle schema v1 or v2.");
   }
+  const version: 1 | 2 = value.schema === LIFECYCLE_SCHEMA ? 2 : 1;
   const objects: StoreObjectLifecycle[] = [];
   const objectDigests = new Set<string>();
   for (const raw of value.objects) {
-    if (!isRecord(raw)) throw new Error(LIFECYCLE_FILE + " contains an invalid object-state record.");
-    const keys = Object.keys(raw).sort().join(",");
-    if (keys !== "createdAt,digest,state,updatedAt" && keys !== "createdAt,deletionClaim,digest,state,updatedAt") {
-      throw new Error(LIFECYCLE_FILE + " object-state record has unknown or missing fields.");
-    }
-    if (!isDigest(raw.digest) || (raw.state !== "ready" && raw.state !== "deleting") ||
-        !validIsoDate(raw.createdAt) || !validIsoDate(raw.updatedAt) || objectDigests.has(raw.digest)) {
+    const object = parseLifecycleObject(raw, version);
+    if (objectDigests.has(object.digest)) {
       throw new Error(LIFECYCLE_FILE + " contains an invalid or duplicate object-state record.");
     }
-    let deletionClaim: StoreObjectLifecycle["deletionClaim"];
-    if (raw.state === "deleting") {
-      if (!isRecord(raw.deletionClaim) ||
-          Object.keys(raw.deletionClaim).sort().join(",") !== "createdAt,pid,token" ||
-          typeof raw.deletionClaim.token !== "string" || raw.deletionClaim.token.length < 16 ||
-          !Number.isSafeInteger(raw.deletionClaim.pid) || (raw.deletionClaim.pid as number) <= 0 ||
-          !validIsoDate(raw.deletionClaim.createdAt)) {
-        throw new Error(LIFECYCLE_FILE + " contains an invalid deletion claim.");
-      }
-      deletionClaim = {token:raw.deletionClaim.token,pid:raw.deletionClaim.pid as number,createdAt:raw.deletionClaim.createdAt};
-    } else if (raw.deletionClaim !== undefined) {
-      throw new Error(LIFECYCLE_FILE + " ready objects must not carry a deletion claim.");
-    }
-    objectDigests.add(raw.digest);
-    objects.push({
-      digest:raw.digest,state:raw.state,createdAt:raw.createdAt,updatedAt:raw.updatedAt,
-      ...(deletionClaim?{deletionClaim}:{})
-    });
+    objectDigests.add(object.digest);
+    objects.push(object);
   }
   const localPins: LocalRetentionPin[] = [];
   const localPinDigests = new Set<string>();
@@ -719,8 +875,20 @@ function writeStoreLifecycleAtomically(root:string,input:StoreLifecycle):void{
 function setObjectReady(lifecycle:StoreLifecycle,digest:string,now:string,createdAt=now):void{
   const existing=lifecycleObject(lifecycle,digest);
   if(existing?.state==="deleting") throw new Error("Package object "+digest+" is marked deleting and cannot be registered.");
-  if(existing){existing.state="ready";existing.updatedAt=now;delete existing.deletionClaim;}
-  else lifecycle.objects.push({digest,state:"ready",createdAt,updatedAt:now});
+  if(existing && existing.state!=="ready" && existing.state!=="deleted"){
+    throw new Error("Package object "+digest+" is "+existing.state+" and cannot be registered.");
+  }
+  if(existing){
+    existing.state="ready";
+    existing.updatedAt=now;
+    delete existing.deletionClaim;
+    delete existing.deletionIntent;
+    delete existing.tombstone;
+    delete existing.removal;
+    delete existing.deletedAt;
+    delete existing.deletionRecord;
+    delete existing.ambiguity;
+  } else lifecycle.objects.push({digest,state:"ready",createdAt,updatedAt:now});
 }
 function setLocalPin(lifecycle:StoreLifecycle,digest:string,now:string):boolean{
   if(lifecycle.localPins.some(x=>x.digest===digest))return false;
@@ -891,7 +1059,7 @@ export async function registerStagedPackage(
     }
     const entry = toCatalogEntry(staged.package);
     const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
-    assertObjectReady(lifecycle,entry.packageTreeDigest);
+    assertObjectRegisterable(lifecycle,entry.packageTreeDigest);
     const existingCoordinate = catalog.entries.find((item) =>
       item.moduleId === entry.moduleId && item.version === entry.version);
     if (existingCoordinate &&
@@ -1164,73 +1332,658 @@ function packageObjectDirectoryNames(root:string,ignoredEntries:string[]):string
  * persistent roots and applies a grace period. No lifecycle records or package
  * objects are removed or claimed.
  */
+async function inspectLockedStore(
+  root: string,
+  checked: { gracePeriodMs: number; now: Date },
+): Promise<{
+  lifecycle: StoreLifecycle;
+  reports: StoreGcObjectReport[];
+  missingObjects: StoreGcPreview["missingObjects"];
+  ignoredEntries: string[];
+  recoveryRequired: StoreGcPreview["recoveryRequired"];
+  completedDeletions: StoreGcPreview["completedDeletions"];
+}> {
+  const catalog = readCatalog(root);
+  const lifecycle = readStoreLifecycle(root, catalog);
+  const ignoredEntries: string[] = [];
+  const names = packageObjectDirectoryNames(root, ignoredEntries);
+  const found = new Set(names);
+  const catalogByDigest = new Map<string, LocalCatalogEntry[]>();
+  for (const entry of catalog.entries) {
+    const group = catalogByDigest.get(entry.packageTreeDigest) ?? [];
+    group.push(entry);
+    catalogByDigest.set(entry.packageTreeDigest, group);
+  }
+  const releasesFor = (digest: string) =>
+    (catalogByDigest.get(digest) ?? []).map((entry) => ({ moduleId: entry.moduleId, version: entry.version }));
+  const missingMap = new Map<string, Array<{ moduleId: string; version: string }>>();
+  const recoveryRequired: StoreGcPreview["recoveryRequired"] = [];
+  const completedDeletions: StoreGcPreview["completedDeletions"] = [];
+  const objectDigests = new Set(names.map((name) => "sha256:" + name));
+  const handledAbsent = new Set<string>();
+  const noteAbsent = (digest: string) => {
+    if (handledAbsent.has(digest) || objectDigests.has(digest)) return;
+    handledAbsent.add(digest);
+    const record = lifecycleObject(lifecycle, digest);
+    const releases = releasesFor(digest);
+    if (record?.state === "deleted") {
+      completedDeletions.push({ digest, deletedAt: record.deletedAt ?? record.updatedAt, releases });
+      return;
+    }
+    if (record && record.state !== "ready" && record.state !== "deleting") {
+      recoveryRequired.push({
+        digest,
+        state: record.state,
+        reason: "The package directory is absent while deletion is unfinished. Run store GC recovery. This inspection did not delete it.",
+      });
+      return;
+    }
+    missingMap.set(digest, releases);
+  };
+  for (const [digest] of catalogByDigest) if (!found.has(digest.slice("sha256:".length))) noteAbsent(digest);
+  for (const record of lifecycle.objects) if (!objectDigests.has(record.digest)) noteAbsent(record.digest);
+  const reports: StoreGcObjectReport[] = [];
+  for (const name of names) {
+    const digest = "sha256:" + name;
+    const path = assertStoreObjectParents(root, digest);
+    const info = lstatSync(path);
+    const record = lifecycleObject(lifecycle, digest);
+    const createdAt = record?.createdAt ?? new Date(info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs).toISOString();
+    const ageMs = Math.max(0, checked.now.getTime() - Date.parse(createdAt));
+    const releases = releasesFor(digest);
+    const retentionRoots: string[] = [];
+    if (lifecycle.localPins.some((pin) => pin.digest === digest)) retentionRoots.push("local-retention");
+    retentionRoots.push(...projectPinRootsDigest(lifecycle, digest));
+    const report: StoreGcObjectReport = {
+      digest, state: record?.state ?? "untracked", status: "invalid", bytes: null, createdAt, ageMs,
+      releases, retentionRoots, reasons: [],
+    };
+    try {
+      const checkedPackage = await validateReleasePackageDirectory(path);
+      if (!checkedPackage.ok) throw new Error(checkedPackage.errors.join("; "));
+      if (checkedPackage.package.packageTreeDigest !== digest) {
+        throw new Error("Verified package-tree digest does not match the content-store directory name.");
+      }
+      const actual = toCatalogEntry(checkedPackage.package);
+      for (const entry of catalogByDigest.get(digest) ?? []) {
+        if (JSON.stringify(actual) !== JSON.stringify(entry)) {
+          throw new Error("Verified package metadata disagrees with catalog release " + entry.moduleId + "@" + entry.version + ".");
+        }
+      }
+      report.bytes = await measurePackageDirectory(path);
+    } catch (error) {
+      report.reasons.push(error instanceof Error ? error.message : String(error));
+      reports.push(report);
+      continue;
+    }
+    if (record && record.state !== "ready" && record.state !== "deleting") {
+      report.status = record.state === "ambiguous" || record.state === "deleted" ? "ambiguous" : "in-progress";
+      const reason = record.state === "ambiguous"
+        ? (record.ambiguity?.reason ?? "Deletion state is ambiguous. Recovery will not delete it.")
+        : "Deletion is already in progress. A preview cannot authorize another deletion.";
+      report.reasons.push(reason);
+      recoveryRequired.push({ digest, state: record.state, reason });
+    } else if (record?.state === "deleting") {
+      report.status = "deleting";
+      report.reasons.push("An existing deletion claim requires recovery or release.");
+    } else if (retentionRoots.length) {
+      report.status = "retained";
+      report.reasons.push("One or more persistent retention pins reference this object.");
+    } else if (ageMs < checked.gracePeriodMs) {
+      report.status = "grace-period";
+      report.reasons.push("The object has not reached the configured GC grace period.");
+    } else {
+      report.status = "candidate";
+      report.reasons.push("Verified package has no local or project retention pins and has passed the grace period.");
+    }
+    reports.push(report);
+  }
+  return {
+    lifecycle,
+    reports,
+    missingObjects: [...missingMap].map(([digest, releases]) => ({ digest, releases })),
+    ignoredEntries,
+    recoveryRequired,
+    completedDeletions,
+  };
+}
 export async function previewLocalStoreGarbageCollection(
   storeDirectory:string,options:StoreGcPreviewOptions={}
 ):Promise<StoreGcPreview>{
   const checked=checkedGcOptions(options);
   return withLocalStoreReadLock(storeDirectory,async root=>{
-    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
-    const ignoredEntries:string[]=[],names=packageObjectDirectoryNames(root,ignoredEntries);
-    const found=new Set(names),catalogByDigest=new Map<string,LocalCatalogEntry[]>();
-    for(const entry of catalog.entries){
-      const group=catalogByDigest.get(entry.packageTreeDigest)??[];
-      group.push(entry);catalogByDigest.set(entry.packageTreeDigest,group);
-    }
-    const missingMap=new Map<string,Array<{moduleId:string;version:string}>>();
-    for(const [digest,entries] of catalogByDigest)if(!found.has(digest.slice("sha256:".length))){
-      missingMap.set(digest,entries.map(x=>({moduleId:x.moduleId,version:x.version})));
-    }
-    const objectDigests=new Set(names.map(name=>"sha256:"+name));
-    for(const record of lifecycle.objects)if(!objectDigests.has(record.digest)&&!missingMap.has(record.digest)){
-      missingMap.set(record.digest,(catalogByDigest.get(record.digest)??[]).map(x=>({moduleId:x.moduleId,version:x.version})));
-    }
-    const reports:StoreGcObjectReport[]=[];
-    for(const name of names){
-      const digest="sha256:"+name,path=assertStoreObjectParents(root,digest),info=lstatSync(path);
-      const record=lifecycleObject(lifecycle,digest);
-      const createdAt=record?.createdAt??new Date(info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs).toISOString();
-      const ageMs=Math.max(0,checked.now.getTime()-Date.parse(createdAt));
-      const releases=(catalogByDigest.get(digest)??[]).map(x=>({moduleId:x.moduleId,version:x.version}));
-      const retentionRoots:string[]=[];
-      if(lifecycle.localPins.some(x=>x.digest===digest))retentionRoots.push("local-retention");
-      retentionRoots.push(...projectPinRootsDigest(lifecycle,digest));
-      const report:StoreGcObjectReport={
-        digest,state:record?.state??"untracked",status:"invalid",bytes:null,createdAt,ageMs,
-        releases,retentionRoots,reasons:[]
-      };
-      try{
-        const checkedPackage=await validateReleasePackageDirectory(path);
-        if(!checkedPackage.ok)throw new Error(checkedPackage.errors.join("; "));
-        if(checkedPackage.package.packageTreeDigest!==digest)throw new Error("Verified package-tree digest does not match the content-store directory name.");
-        const actual=toCatalogEntry(checkedPackage.package);
-        for(const entry of catalogByDigest.get(digest)??[])if(JSON.stringify(actual)!==JSON.stringify(entry)){
-          throw new Error("Verified package metadata disagrees with catalog release "+entry.moduleId+"@"+entry.version+".");
-        }
-        report.bytes=await measurePackageDirectory(path);
-      }catch(error){
-        report.reasons.push(error instanceof Error?error.message:String(error));
-        reports.push(report);continue;
-      }
-      if(record?.state==="deleting"){
-        report.status="deleting";report.reasons.push("An existing deletion claim requires recovery or release.");
-      }else if(retentionRoots.length){
-        report.status="retained";report.reasons.push("One or more persistent retention pins reference this object.");
-      }else if(ageMs<checked.gracePeriodMs){
-        report.status="grace-period";report.reasons.push("The object has not reached the configured GC grace period.");
-      }else{
-        report.status="candidate";report.reasons.push("Verified package has no local or project retention pins and has passed the grace period.");
-      }
-      reports.push(report);
-    }
+    const inspected=await inspectLockedStore(root,checked);
     const activeReaderMarkers=Math.max(0,readerMarkerPaths(root).length-1);
-    const candidates=reports.filter(x=>x.status==="candidate");
+    const candidates=inspected.reports.filter(x=>x.status==="candidate");
     return {
       schema:"cgp.store-gc-preview/1",dryRun:true,generatedAt:checked.now.toISOString(),
       gracePeriodMs:checked.gracePeriodMs,
-      rootsChecked:{localPins:lifecycle.localPins.length,projectPins:lifecycle.projectPins.length,activeReaderMarkers},
-      candidates,objects:reports,
-      missingObjects:[...missingMap].map(([digest,releases])=>({digest,releases})),
-      ignoredEntries,candidateBytes:candidates.reduce((sum,x)=>sum+(x.bytes??0),0)
+      rootsChecked:{
+        localPins:inspected.lifecycle.localPins.length,
+        projectPins:inspected.lifecycle.projectPins.length,
+        activeReaderMarkers,
+      },
+      candidates,objects:inspected.reports,
+      missingObjects:inspected.missingObjects,
+      ignoredEntries:inspected.ignoredEntries,
+      candidateBytes:candidates.reduce((sum,x)=>sum+(x.bytes??0),0),
+      recoveryRequired:inspected.recoveryRequired,
+      completedDeletions:inspected.completedDeletions,
     };
   });
+}
+
+let storeGcFault: StoreGcFaultPoint | null = null;
+let storeWriterLivenessProbe: ((pid: number) => boolean | "unknown") | null = null;
+
+/** Test-only interruption points. Production calls leave this unset. */
+export function setStoreGcFaultForTests(point: StoreGcFaultPoint | null): void {
+  storeGcFault = point;
+}
+/** Test-only replacement for the PID liveness half of stale-lock adoption. */
+export function setStoreWriterLivenessProbeForTests(
+  probe: ((pid: number) => boolean | "unknown") | null,
+): void {
+  storeWriterLivenessProbe = probe;
+}
+function consumeStoreGcFault(point: StoreGcFaultPoint): void {
+  if (storeGcFault !== point) return;
+  storeGcFault = null;
+  throw new Error("Injected store GC fault: " + point);
+}
+function replaceLifecycleObject(lifecycle: StoreLifecycle, object: StoreObjectLifecycle): void {
+  const index = lifecycle.objects.findIndex((item) => item.digest === object.digest);
+  if (index < 0) lifecycle.objects.push(object);
+  else lifecycle.objects[index] = object;
+}
+function digestHex(digest: string): string {
+  return digest.slice("sha256:".length);
+}
+function describeNamedChild(parent: string, name: string): "absent" | "directory" | "symlink" | "other" | "blocked" {
+  if (!existsByLstat(parent)) return "absent";
+  const parentInfo = lstatSync(parent);
+  if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) return "blocked";
+  const path = join(parent, name);
+  if (!existsByLstat(path)) return "absent";
+  const info = lstatSync(path);
+  if (info.isSymbolicLink()) return "symlink";
+  if (info.isDirectory()) return "directory";
+  return "other";
+}
+function classifyPresence(root: string, digest: string): "canonical" | "tombstone" | "both" | "neither" | "ambiguous" {
+  const hex = digestHex(digest);
+  const canonical = describeNamedChild(join(root, "objects", "cgp.package-tree", "1", "sha256"), hex);
+  const tombRoot = describeNamedChild(root, TOMBSTONE_DIRECTORY);
+  const tomb = tombRoot === "absent"
+    ? "absent"
+    : tombRoot === "directory"
+      ? describeNamedChild(join(root, TOMBSTONE_DIRECTORY), hex)
+      : "blocked";
+  const unsafe = (value: string) => value === "symlink" || value === "other" || value === "blocked";
+  if (unsafe(canonical) || unsafe(tomb)) return "ambiguous";
+  if (canonical === "directory" && tomb === "directory") return "both";
+  if (canonical === "directory") return "canonical";
+  if (tomb === "directory") return "tombstone";
+  return "neither";
+}
+function presenceReason(kind: "both" | "neither" | "ambiguous"): string {
+  if (kind === "both") return "Package object and quarantine tombstone both exist. Refusing to delete either.";
+  if (kind === "neither") return "Deletion intent has neither a package object nor a tombstone. Refusing to record a completed deletion.";
+  return "Package object or quarantine entry is a symlink or special file. Refusing to follow or delete it.";
+}
+function markAmbiguous(root: string, lifecycle: StoreLifecycle, current: StoreObjectLifecycle, reason: string, now: string): void {
+  replaceLifecycleObject(lifecycle, {
+    digest: current.digest,
+    state: "ambiguous",
+    createdAt: current.createdAt,
+    updatedAt: now,
+    ambiguity: { reason, detectedAt: now },
+  });
+  writeStoreLifecycleAtomically(root, lifecycle);
+}
+function ensureTombstoneRoot(root: string): string {
+  const path = join(root, TOMBSTONE_DIRECTORY);
+  if (!existsByLstat(path)) mkdirSync(path, { mode: 0o700 });
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error("Quarantine directory must be a real directory on the store filesystem.");
+  }
+  return path;
+}
+function moveCanonicalToTombstone(root: string, digest: string): void {
+  if (classifyPresence(root, digest) !== "canonical") {
+    throw new Error("Refusing to quarantine because the package object location is not an intact directory.");
+  }
+  const source = objectDirectory(root, digest);
+  const sourceInfo = lstatSync(source);
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isDirectory()) {
+    throw new Error("Refusing to move a package object that is not a real directory.");
+  }
+  const destination = join(ensureTombstoneRoot(root), digestHex(digest));
+  if (existsByLstat(destination)) throw new Error("Quarantine path already exists for " + digest + ".");
+  renameSync(source, destination);
+}
+function refuseSpecial(
+  path: string,
+  info: { isSymbolicLink(): boolean; isDirectory(): boolean; isFile(): boolean },
+): void {
+  if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+    throw new Error("Refusing to delete a symlink or special filesystem entry: " + path);
+  }
+}
+function thawRegularTree(directory: string): void {
+  const info = lstatSync(directory);
+  refuseSpecial(directory, info);
+  if (!info.isDirectory()) throw new Error("Refusing to delete a non-directory quarantine entry: " + directory);
+  for (const name of readdirSync(directory).sort()) {
+    const child = join(directory, name);
+    const childInfo = lstatSync(child);
+    refuseSpecial(child, childInfo);
+    if (childInfo.isDirectory()) thawRegularTree(child);
+    else chmodSync(child, 0o644);
+  }
+  chmodSync(directory, 0o755);
+}
+function removeRegularTree(directory: string): void {
+  thawRegularTree(directory);
+  const files: string[] = [];
+  const collect = (dir: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      const child = join(dir, name);
+      const info = lstatSync(child);
+      refuseSpecial(child, info);
+      if (info.isDirectory()) collect(child);
+      else files.push(child);
+    }
+  };
+  collect(directory);
+  let removed = 0;
+  for (const file of files) {
+    const info = lstatSync(file);
+    refuseSpecial(file, info);
+    unlinkSync(file);
+    removed += 1;
+    if (removed === 1) consumeStoreGcFault("during-removal");
+  }
+  const removeDirs = (dir: string): void => {
+    for (const name of readdirSync(dir).sort()) {
+      const child = join(dir, name);
+      const info = lstatSync(child);
+      refuseSpecial(child, info);
+      if (!info.isDirectory()) throw new Error("Quarantine entry changed during removal: " + child);
+      removeDirs(child);
+    }
+    rmdirSync(dir);
+  };
+  removeDirs(directory);
+}
+function readWriterMarker(root: string): { token: string; pid: number } {
+  const path = join(root, STORE_WRITER_LOCK);
+  if (!existsByLstat(path)) throw new Error("Package-store writer lock is not present.");
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error("Package-store writer lock is not a regular file.");
+  const parsed = parseStrictJson(new Uint8Array(readFileSync(path)), "package-store writer lock");
+  if (!parsed.ok || !isRecord(parsed.value) ||
+      Object.keys(parsed.value).sort().join(",") !== "createdAt,pid,schema,token" ||
+      parsed.value.schema !== "cgp.local-store-lock/1" ||
+      typeof parsed.value.token !== "string" || parsed.value.token.length < 16 ||
+      !Number.isSafeInteger(parsed.value.pid) || (parsed.value.pid as number) <= 0 ||
+      !validIsoDate(parsed.value.createdAt)) {
+    throw new Error("Package-store writer lock is malformed. Refusing to adopt it.");
+  }
+  return { token: parsed.value.token, pid: parsed.value.pid as number };
+}
+function requireWriterToken(root: string): string {
+  return readWriterMarker(root).token;
+}
+function writerPidIsAlive(pid: number): boolean | "unknown" {
+  if (storeWriterLivenessProbe) return storeWriterLivenessProbe(pid);
+  if (!existsSync("/proc")) return "unknown";
+  try { return existsSync("/proc/" + String(pid)); } catch { return "unknown"; }
+}
+function adoptInactiveDeletionLock(root: string): void {
+  const lockPath = join(root, STORE_WRITER_LOCK);
+  const marker = readWriterMarker(root);
+  const alive = writerPidIsAlive(marker.pid);
+  if (alive !== false) {
+    throw new Error(
+      "Package-store writer lock may still be active (pid " + marker.pid +
+      "). Refusing to adopt it. Confirm the owner is gone before removing " + lockPath + ".",
+    );
+  }
+  const lifecycle = readStoreLifecycle(root, readCatalog(root));
+  const match = lifecycle.objects.find((object) =>
+    (object.state === "intent" || object.state === "quarantined" || object.state === "removing") &&
+    object.deletionIntent?.writerToken === marker.token);
+  if (!match) {
+    throw new Error(
+      "Writer lock token does not match a durable in-progress deletion. Refusing to remove " +
+      lockPath + ". This recovery does not clear unrelated or idle writer locks.",
+    );
+  }
+  const again = readWriterMarker(root);
+  if (again.token !== marker.token || again.pid !== marker.pid) {
+    throw new Error("Writer lock changed while recovery checked it. Refusing to adopt it.");
+  }
+  const stillAlive = writerPidIsAlive(marker.pid);
+  if (stillAlive !== false) {
+    throw new Error("Package-store writer became active while recovery checked the lock. Refusing to adopt it.");
+  }
+  unlinkSync(lockPath);
+}
+async function advancePersistedDeletion(root: string, digest: string, now: string): Promise<void> {
+  const load = () => {
+    const lifecycle = readStoreLifecycle(root, readCatalog(root));
+    const current = lifecycleObject(lifecycle, digest);
+    if (!current) throw new Error("Deletion lifecycle record disappeared for " + digest + ".");
+    return { lifecycle, current };
+  };
+  let { lifecycle, current } = load();
+  if (current.state === "deleted") return;
+  if (current.state === "ambiguous") throw new Error(current.ambiguity?.reason ?? "Deletion state is ambiguous.");
+  if (current.state === "intent") {
+    const presence = classifyPresence(root, digest);
+    if (presence === "canonical") {
+      moveCanonicalToTombstone(root, digest);
+      consumeStoreGcFault("after-move");
+    } else if (presence !== "tombstone") {
+      const reason = presenceReason(presence);
+      markAmbiguous(root, lifecycle, current, reason, now);
+      throw new Error(reason);
+    }
+    ({ lifecycle, current } = load());
+    if (current.state !== "intent" || !current.deletionClaim || !current.deletionIntent) {
+      throw new Error("Deletion intent changed during quarantine.");
+    }
+    replaceLifecycleObject(lifecycle, {
+      digest,
+      state: "quarantined",
+      createdAt: current.createdAt,
+      updatedAt: now,
+      deletionClaim: current.deletionClaim,
+      deletionIntent: current.deletionIntent,
+      tombstone: { name: digestHex(digest), movedAt: now },
+    });
+    writeStoreLifecycleAtomically(root, lifecycle);
+  }
+  ({ lifecycle, current } = load());
+  if (current.state === "quarantined") {
+    const presence = classifyPresence(root, digest);
+    if (presence !== "tombstone") {
+      const reason = presence === "neither"
+        ? "Quarantine record has no tombstone. Refusing to record a completed deletion."
+        : presence === "canonical" || presence === "both"
+          ? "Quarantine record does not match a single tombstone. Refusing to delete the package object."
+          : presenceReason("ambiguous");
+      markAmbiguous(root, lifecycle, current, reason, now);
+      throw new Error(reason);
+    }
+    if (!current.deletionClaim || !current.deletionIntent || !current.tombstone) {
+      throw new Error("Quarantine record is missing its deletion intent.");
+    }
+    replaceLifecycleObject(lifecycle, {
+      digest,
+      state: "removing",
+      createdAt: current.createdAt,
+      updatedAt: now,
+      deletionClaim: current.deletionClaim,
+      deletionIntent: current.deletionIntent,
+      tombstone: current.tombstone,
+      removal: { startedAt: now },
+    });
+    writeStoreLifecycleAtomically(root, lifecycle);
+  }
+  ({ lifecycle, current } = load());
+  if (current.state !== "removing") {
+    throw new Error("Cannot advance deletion from state " + current.state + ".");
+  }
+  const presence = classifyPresence(root, digest);
+  if (presence === "tombstone") {
+    removeRegularTree(join(root, TOMBSTONE_DIRECTORY, digestHex(digest)));
+    consumeStoreGcFault("after-bytes-removed");
+  } else if (presence !== "neither") {
+    const reason = presence === "canonical" || presence === "both"
+      ? "Removal record exists while the canonical package object is still present. Refusing to delete it."
+      : presenceReason("ambiguous");
+    markAmbiguous(root, lifecycle, current, reason, now);
+    throw new Error(reason);
+  }
+  const claimToken = current.deletionClaim?.token;
+  if (!claimToken) throw new Error("Deletion record is missing its claim token.");
+  ({ lifecycle, current } = load());
+  if (current.state !== "removing") throw new Error("Deletion state changed while tombstone bytes were removed.");
+  replaceLifecycleObject(lifecycle, {
+    digest,
+    state: "deleted",
+    createdAt: current.createdAt,
+    updatedAt: now,
+    deletedAt: now,
+    deletionRecord: { claimToken, deletedAt: now },
+  });
+  writeStoreLifecycleAtomically(root, lifecycle);
+}
+async function recheckFreshDeletion(
+  root: string,
+  digest: string,
+  checked: { gracePeriodMs: number; now: Date },
+): Promise<{ createdAt: string } | { skip: string }> {
+  const catalog = readCatalog(root);
+  const lifecycle = readStoreLifecycle(root, catalog);
+  const roots: string[] = [];
+  if (lifecycle.localPins.some((pin) => pin.digest === digest)) roots.push("local-retention");
+  roots.push(...projectPinRootsDigest(lifecycle, digest));
+  if (roots.length) return { skip: "Package object " + digest + " is still retained by: " + roots.join(", ") + "." };
+  const current = lifecycleObject(lifecycle, digest);
+  if (current && current.state !== "ready") {
+    return { skip: "Package object " + digest + " is " + current.state + " and was not deleted." };
+  }
+  try {
+    await verifyPackageObjectForDigest(root, digest, catalog);
+    await measurePackageDirectory(assertStoreObjectParents(root, digest));
+  } catch (error) {
+    return { skip: error instanceof Error ? error.message : String(error) };
+  }
+  const path = assertStoreObjectParents(root, digest);
+  const info = lstatSync(path);
+  const createdAt = current?.createdAt ?? new Date(info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs).toISOString();
+  const ageMs = Math.max(0, checked.now.getTime() - Date.parse(createdAt));
+  if (ageMs < checked.gracePeriodMs) return { skip: "Package object " + digest + " has not reached its GC grace period." };
+  return { createdAt };
+}
+async function commitFreshDeletion(
+  root: string,
+  digest: string,
+  createdAt: string,
+  now: string,
+  claimToken: string,
+): Promise<void> {
+  consumeStoreGcFault("before-intent");
+  const lifecycle = readStoreLifecycle(root, readCatalog(root));
+  const writerToken = requireWriterToken(root);
+  replaceLifecycleObject(lifecycle, {
+    digest,
+    state: "intent",
+    createdAt,
+    updatedAt: now,
+    deletionClaim: { token: claimToken, pid: process.pid, createdAt: now },
+    deletionIntent: { claimToken, writerToken, packageTreeDigest: digest, createdAt: now },
+  });
+  writeStoreLifecycleAtomically(root, lifecycle);
+  consumeStoreGcFault("after-intent");
+  await advancePersistedDeletion(root, digest, now);
+}
+/**
+ * Deletes currently eligible objects under the writer gate.
+ * A previous preview is not an authorization. Retention, grace, and digest are rechecked.
+ * Catalog release rows are left in place.
+ */
+export async function applyLocalStoreGarbageCollection(
+  storeDirectory: string,
+  options: StoreGcCoordinationOptions = {},
+): Promise<StoreGcApplyReport> {
+  const checked = checkedGcOptions(options);
+  return withLocalStoreWriteLock(storeDirectory, async (root) => {
+    const inspected = await inspectLockedStore(root, checked);
+    const deleted: string[] = [];
+    const skipped: StoreGcApplyReport["skipped"] = inspected.reports
+      .filter((report) => report.status !== "candidate")
+      .map((report) => ({ digest: report.digest, status: report.status, reasons: report.reasons }));
+    const now = checked.now.toISOString();
+    for (const candidate of inspected.reports.filter((report) => report.status === "candidate")) {
+      const decision = await recheckFreshDeletion(root, candidate.digest, checked);
+      if ("skip" in decision) {
+        skipped.push({ digest: candidate.digest, status: "rechecked", reasons: [decision.skip] });
+        continue;
+      }
+      await commitFreshDeletion(root, candidate.digest, decision.createdAt, now, randomUUID());
+      deleted.push(candidate.digest);
+    }
+    return {
+      schema: "cgp.store-gc-apply/1",
+      appliedAt: now,
+      gracePeriodMs: checked.gracePeriodMs,
+      deleted,
+      skipped,
+    };
+  }, options.coordination);
+}
+/**
+ * Applies one existing deletion claim exactly once. A wrong token does not delete.
+ * The claim is revalidated under the writer gate before any bytes move.
+ */
+export async function applyClaimedPackageObjectDeletion(
+  storeDirectory: string,
+  digest: string,
+  claimToken: string,
+  options: StoreGcCoordinationOptions = {},
+): Promise<{ digest: string; deleted: true }> {
+  if (!isDigest(digest)) throw new Error("Invalid package-tree SHA-256 digest.");
+  if (typeof claimToken !== "string" || claimToken.length < 16) throw new Error("A valid deletion claim token is required.");
+  const checked = checkedGcOptions(options);
+  return withLocalStoreWriteLock(storeDirectory, async (root) => {
+    const catalog = readCatalog(root);
+    const lifecycle = readStoreLifecycle(root, catalog);
+    const current = lifecycleObject(lifecycle, digest);
+    if (current?.state === "deleted") throw new Error("Package object was already deleted: " + digest);
+    if (current?.state !== "deleting" || current.deletionClaim?.token !== claimToken) {
+      throw new Error("Deletion claim token does not own the deleting package object.");
+    }
+    assertNoRetentionRoots(lifecycle, digest);
+    await verifyPackageObjectForDigest(root, digest, catalog);
+    await measurePackageDirectory(assertStoreObjectParents(root, digest));
+    const path = assertStoreObjectParents(root, digest);
+    const info = lstatSync(path);
+    const createdAt = current.createdAt ?? new Date(info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs).toISOString();
+    const ageMs = Math.max(0, checked.now.getTime() - Date.parse(createdAt));
+    if (ageMs < checked.gracePeriodMs) throw new Error("Package object " + digest + " has not reached its GC grace period.");
+    const now = checked.now.toISOString();
+    await commitFreshDeletion(root, digest, createdAt, now, claimToken);
+    return { digest, deleted: true as const };
+  }, options.coordination);
+}
+/**
+ * Resumes interrupted deletions from durable lifecycle state.
+ * Idle deletion claims are not stolen. Unrelated writer locks are not removed.
+ * Ambiguous object/tombstone pairs are recorded and left on disk.
+ */
+export async function recoverInterruptedStoreDeletions(
+  storeDirectory: string,
+  options: { now?: Date; coordination?: StoreCoordinationOptions } = {},
+): Promise<StoreGcRecoveryReport> {
+  const nowDate = options.now ?? new Date();
+  if (!(nowDate instanceof Date) || !Number.isFinite(nowDate.getTime())) {
+    throw new Error("GC recovery clock must be a valid Date.");
+  }
+  const now = nowDate.toISOString();
+  const root = storeRoot(storeDirectory);
+  if (existsByLstat(join(root, STORE_WRITER_LOCK))) adoptInactiveDeletionLock(root);
+  return withLocalStoreWriteLock(storeDirectory, async (lockedRoot) => {
+    const lifecycle = readStoreLifecycle(lockedRoot, readCatalog(lockedRoot));
+    const completed: string[] = [];
+    const unchanged: string[] = [];
+    const ambiguous: Array<{ digest: string; reason: string }> = [];
+    const refused: Array<{ digest: string; error: string }> = [];
+    for (const object of [...lifecycle.objects].sort((a, b) => compareString(a.digest, b.digest))) {
+      if (object.state === "ready" || object.state === "deleting") {
+        unchanged.push(object.digest);
+        continue;
+      }
+      if (object.state === "ambiguous") {
+        ambiguous.push({ digest: object.digest, reason: object.ambiguity?.reason ?? "Deletion state is ambiguous." });
+        continue;
+      }
+      if (object.state === "deleted") {
+        const presence = classifyPresence(lockedRoot, object.digest);
+        if (presence === "neither") {
+          unchanged.push(object.digest);
+          continue;
+        }
+        if (presence === "tombstone") {
+          try {
+            removeRegularTree(join(lockedRoot, TOMBSTONE_DIRECTORY, digestHex(object.digest)));
+            completed.push(object.digest);
+          } catch (error) {
+            refused.push({ digest: object.digest, error: error instanceof Error ? error.message : String(error) });
+          }
+          continue;
+        }
+        const reason = presence === "both" || presence === "canonical"
+          ? "A deleted record still has a canonical package object. Refusing to delete it."
+          : presenceReason("ambiguous");
+        const fresh = readStoreLifecycle(lockedRoot, readCatalog(lockedRoot));
+        const current = lifecycleObject(fresh, object.digest) ?? object;
+        markAmbiguous(lockedRoot, fresh, current, reason, now);
+        ambiguous.push({ digest: object.digest, reason });
+        continue;
+      }
+      try {
+        await advancePersistedDeletion(lockedRoot, object.digest, now);
+        completed.push(object.digest);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const fresh = readStoreLifecycle(lockedRoot, readCatalog(lockedRoot));
+        const current = lifecycleObject(fresh, object.digest);
+        if (current?.state === "ambiguous") ambiguous.push({ digest: object.digest, reason: current.ambiguity?.reason ?? message });
+        else refused.push({ digest: object.digest, error: message });
+      }
+    }
+    return { schema: "cgp.store-gc-recovery/1", recoveredAt: now, completed, unchanged, ambiguous, refused };
+  }, options.coordination);
+}
+/**
+ * Returns idle deletion reservations to ready. It does not delete bytes and does not
+ * touch in-progress intent, quarantine, or removal records. Ordinary reads never call this.
+ */
+export async function reconcileIdleDeletionClaims(
+  storeDirectory: string,
+  options: { now?: Date; digest?: string; coordination?: StoreCoordinationOptions } = {},
+): Promise<StoreGcReconcileReport> {
+  if (options.digest !== undefined && !isDigest(options.digest)) throw new Error("Invalid package-tree SHA-256 digest.");
+  const nowDate = options.now ?? new Date();
+  if (!(nowDate instanceof Date) || !Number.isFinite(nowDate.getTime())) {
+    throw new Error("GC reconcile clock must be a valid Date.");
+  }
+  const now = nowDate.toISOString();
+  return withLocalStoreWriteLock(storeDirectory, (root) => {
+    const lifecycle = readStoreLifecycle(root, readCatalog(root));
+    const released: string[] = [];
+    const leftInProgress: string[] = [];
+    for (const object of lifecycle.objects) {
+      if (object.state === "intent" || object.state === "quarantined" || object.state === "removing" || object.state === "ambiguous") {
+        leftInProgress.push(object.digest);
+        continue;
+      }
+      if (object.state !== "deleting") continue;
+      if (options.digest && object.digest !== options.digest) continue;
+      replaceLifecycleObject(lifecycle, {
+        digest: object.digest,
+        state: "ready",
+        createdAt: object.createdAt,
+        updatedAt: now,
+      });
+      released.push(object.digest);
+    }
+    if (released.length > 0) writeStoreLifecycleAtomically(root, lifecycle);
+    return { schema: "cgp.store-gc-reconcile/1", reconciledAt: now, released, leftInProgress };
+  }, options.coordination);
 }

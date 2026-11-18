@@ -82,6 +82,8 @@ This milestone intentionally stops before destructive collection:
 
 A stale deletion claim blocks readers and new pin creation until a future recovery process or operator validates and releases it. This favors retention over unsafe deletion.
 
+Study 008 is the destructive continuation. It does not change the preview or claim behavior described above.
+
 ## Conformance coverage
 
 - New registrations default to a local-retention root.

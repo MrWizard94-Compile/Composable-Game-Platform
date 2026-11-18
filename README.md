@@ -73,9 +73,22 @@ Preview verified, unreferenced package objects without changing lifecycle state 
 npm run store:gc-preview -- --store ./out/cgp-store --dry-run --grace-hours 24
 ```
 
-The preview verifies package-tree digests, reports byte sizes, age and release associations, checks local/project pins, and applies the configured grace period. Catalog release metadata is not itself a retention root: an explicitly unpinned release may remain known in the catalog after its content is eventually collected. A dry run creates only its temporary reader-coordination marker; it does not write lifecycle metadata, create deletion claims, or delete package objects. The CLI has no apply mode.
+The preview verifies package-tree digests, reports byte sizes, age and release associations, checks local/project pins, and applies the configured grace period. Catalog release metadata is not itself a retention root: an explicitly unpinned release may remain known in the catalog after its content is deleted. A dry run creates only its temporary reader-coordination marker; it does not write lifecycle metadata, create deletion claims, or delete package objects.
 
-A guarded deletion-claim primitive can mark an unpinned, verified, old object as `deleting`, preventing new readers and pins. It does not remove bytes; a matching token can release an unapplied claim. Actual deletion, tombstones, interruption recovery, and automatic stale-claim reconciliation remain future work.
+Deletion is a separate command. It rechecks eligibility under the writer lock. A previous preview does not authorize it:
+
+```sh
+npm run store:gc-apply -- --store ./out/cgp-store --apply --grace-hours 24
+```
+
+Apply persists a deletion intent, renames the object into `.cgp-store-tombstones/`, then removes that tombstone. Catalog rows stay. Finish an interrupted deletion, or return an idle deletion claim to `ready` without deleting bytes:
+
+```sh
+npm run store:gc-recover -- --store ./out/cgp-store --apply
+npm run store:gc-reconcile -- --store ./out/cgp-store --apply
+```
+
+Recover and reconcile also require `--apply`. They do not run from preview, registration, verification, or project-lock commands. A writer lock is removed only when its token matches an in-progress deletion and its recorded pid is not alive. Unrelated stale locks and stale reader markers still have to be inspected by hand. See [Study 008](docs/studies/cgp/008-recoverable-destructive-garbage-collection.md).
 
 See [the CGP visual identity guide](assets/brand/README.md) for marks, icons, palette, and component usage.
 

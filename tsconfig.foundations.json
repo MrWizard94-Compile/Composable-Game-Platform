@@ -43,6 +43,11 @@
     "scripts/check-console.ts",
     "scripts/console-api.ts",
     "scripts/create-project-lock.ts",
-    "scripts/check-project-lock.ts"
+    "scripts/check-project-lock.ts",
+    "scripts/manage-store-retention.ts",
+    "scripts/preview-store-gc.ts",
+    "scripts/apply-store-gc.ts",
+    "scripts/recover-store-gc.ts",
+    "scripts/reconcile-store-claims.ts"
   ]
 }
