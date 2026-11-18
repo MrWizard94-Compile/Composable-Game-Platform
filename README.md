@@ -4,6 +4,22 @@ A minimal host for independently packaged game systems. The Foundations know how
 
 This repository is separate from STRATA.
 
+## CGP browser console
+
+Run the branded local console:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run console
+```
+
+Open the local URL printed by the server (default `http://127.0.0.1:4173`). The console reads the real bundled module catalog and composition profiles, calls the same Foundations `compose()` implementation, and displays actual module, slot, dependency, phase, and diagnostic results. The composition runner uses the browser WebAssembly worker for Wasm guests.
+
+The console currently demonstrates bundled examples only. It does not connect to the local content store, discover arbitrary folders, acquire packages, persist settings, or load untrusted JavaScript. JavaScript examples run in-process as trusted code; only WebAssembly guests use the worker isolation boundary. Run the browser smoke test with `npm run console:check`.
+
+See [the CGP visual identity guide](assets/brand/README.md) for marks, icons, palette, and component usage.
+
 ## Proof
 
 ```text
@@ -46,6 +62,7 @@ node --experimental-strip-types scripts/check-module-package.ts examples/javascr
 node --experimental-strip-types scripts/register-module-package.ts --staging ./out/staging/starter-1.0.0 --store ./out/cgp-store
 node --experimental-strip-types scripts/check-module-store.ts --store ./out/cgp-store
 node --experimental-strip-types scripts/browser-wasm.ts
+npm run console:check
 ```
 
 `npm ci` installs the development dependencies in `package.json`: TypeScript, `@types/node`, esbuild, and Playwright. Chromium is installed after that, and the typecheck runs only once those packages are present.
@@ -61,6 +78,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
 - `src/packages` — Node-side release validation, staging, local content storage, catalog, and content identity tooling. It is not part of the Foundations runtime.
 - `src/modules/*` — packaged proofs. One folder per module.
+- `apps/console` — maintained branded browser console.
 - `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
 - `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.
 - `examples/third-party-module` — a Wasm guest authored as `guest.json` and carrying a v1 release descriptor. Another toolchain can omit `guest.json` and still be checked.
@@ -70,7 +88,7 @@ node --experimental-strip-types src/modules/headless-demo.ts
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.
 
-The browser console is a viewer. It calls the same `compose()` function. It is not a second implementation.
+The console is a browser-facing viewer and development control surface. It calls the same `compose()` function as the headless host; it is not a second runtime implementation.
 
 ## Honest limits
 

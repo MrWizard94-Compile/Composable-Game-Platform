@@ -16,7 +16,7 @@ jobs:
         run: npm ci --no-fund --no-audit
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
-      - name: Typecheck foundations, the browser isolate, and the shared runtime
+      - name: Typecheck host, browser runtime, packages, and console
         run: npx tsc -p tsconfig.foundations.json --noEmit
       - name: Verify shipped WebAssembly
         run: node --experimental-strip-types scripts/verify-wasm.ts
@@ -37,5 +37,7 @@ jobs:
           node --experimental-strip-types scripts/register-module-package.ts --staging "$tmp/js-stage" --store "$tmp/store"
           node --experimental-strip-types scripts/register-module-package.ts --staging "$tmp/wasm-stage" --store "$tmp/store"
           node --experimental-strip-types scripts/check-module-store.ts --store "$tmp/store"
+      - name: Build and browser-test the CGP console
+        run: npm run console:check
       - name: Foundations, browser isolation, composition, and stress
         run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/packages/local-store.test.ts src/modules/composition.test.ts src/modules/sim.test.ts

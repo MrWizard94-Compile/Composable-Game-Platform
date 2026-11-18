@@ -12,7 +12,11 @@
     "package:build": "node --experimental-strip-types scripts/build-module-package.ts",
     "package:check": "node --experimental-strip-types scripts/check-module-package.ts",
     "store:register": "node --experimental-strip-types scripts/register-module-package.ts",
-    "store:check": "node --experimental-strip-types scripts/check-module-store.ts"
+    "store:check": "node --experimental-strip-types scripts/check-module-store.ts",
+    "console:build": "node --experimental-strip-types scripts/build-console.ts",
+    "console:serve": "node --experimental-strip-types scripts/serve-console.ts",
+    "console": "npm run console:build && npm run console:serve",
+    "console:check": "node --experimental-strip-types scripts/check-console.ts"
   },
   "engines": {
     "node": ">=22"
