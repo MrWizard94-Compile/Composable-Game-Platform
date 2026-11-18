@@ -1,0 +1,15 @@
+{
+  "profileId": "org.example.local-project",
+  "name": "Local Store Example",
+  "description": "Example project pins one Wasm package and one trusted JavaScript package.",
+  "modules": [
+    {
+      "moduleId": "org.example.beacon",
+      "version": "1.0.0"
+    },
+    {
+      "moduleId": "org.example.starter",
+      "version": "1.0.0"
+    }
+  ]
+}

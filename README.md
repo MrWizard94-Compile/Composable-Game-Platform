@@ -6,17 +6,47 @@ This repository is separate from STRATA.
 
 ## CGP browser console
 
-Run the branded local console:
+Run the branded local console against a local content store and a project profile:
 
 ```sh
 npm ci
 npx playwright install chromium
-npm run console
+npm run console -- --store ./out/cgp-store --staging ./out/staging --profile examples/project.json --lock ./out/local-project.cgp.lock.json
 ```
 
-Open the local URL printed by the server (default `http://127.0.0.1:4173`). The console reads the real bundled module catalog and composition profiles, calls the same Foundations `compose()` implementation, and displays actual module, slot, dependency, phase, and diagnostic results. The composition runner uses the browser WebAssembly worker for Wasm guests.
+Open the loopback URL printed by the server (default `http://127.0.0.1:4173`). The console has separate views for the bundled examples, the local content store, and a configured project lockfile. It uses the real local catalog, verifies referenced object bytes, registers validated staging snapshots, creates an immutable project lock from exact profile pins, and resolves that lock only when the profile, catalog entries, and stored package bytes all match.
 
-The console currently demonstrates bundled examples only. It does not connect to the local content store, discover arbitrary folders, acquire packages, persist settings, or load untrusted JavaScript. JavaScript examples run in-process as trusted code; only WebAssembly guests use the worker isolation boundary. Run the browser smoke test with `npm run console:check`.
+### Prepare the example project packages
+
+The sample project pins one Wasm package and one JavaScript ESM package. Build their release and staging snapshots:
+
+```sh
+node --experimental-strip-types scripts/build-module-package.ts --source examples/third-party-module --release ./out/releases/beacon-1.0.0 --stage ./out/staging/beacon-1.0.0
+node --experimental-strip-types scripts/build-module-package.ts --source examples/starter-module --release ./out/releases/starter-1.0.0 --stage ./out/staging/starter-1.0.0
+```
+
+Then start the console using the command above. In **Package Store**, register the two validated staging snapshots. Run **Verify all objects** to revalidate the bytes. In **Project**, generate the project lockfile, then use **Verify & resolve lock** to check each exact pin against the catalog and the content-addressed object.
+
+For an existing project, replace `examples/project.json` with your project profile and pass its path to `--profile`. Select an explicit output path with `--lock`. An existing lockfile is never overwritten by Generate; use the separate Update action when you intentionally want to refresh its recorded identities.
+
+The local API binds only to `127.0.0.1`, accepts same-origin browser writes, limits request size, and only accepts staging directory names below the configured staging root. The browser never receives arbitrary filesystem paths for use as requests.
+
+**Runtime boundary:** the lock resolver validates and returns exact package object locations and identities. This console currently does not dynamically load or execute packages from the local store. The Composition view still exercises the bundled proof modules. JavaScript package artifacts are trusted-in-process code and are not sandboxed by this interface; Wasm packages require the existing isolate runtime.
+
+Useful options:
+
+- `--store <directory>` selects the local content store (default: `.cgp-store`).
+- `--staging <directory>` enables registration from validated staged package subdirectories.
+- `--profile <file>` selects the exact-version project profile.
+- `--lock <file>` selects the generated project lockfile.
+- `--port <number>` changes the loopback port.
+
+The project lock tooling is also available from the command line:
+
+```sh
+npm run project:lock -- --profile examples/project.json --store ./out/cgp-store --output ./out/local-project.cgp.lock.json
+npm run project:check -- --profile examples/project.json --lock ./out/local-project.cgp.lock.json --store ./out/cgp-store
+```
 
 See [the CGP visual identity guide](assets/brand/README.md) for marks, icons, palette, and component usage.
 
@@ -55,12 +85,6 @@ node --experimental-strip-types scripts/build-wasm-module.ts
 node --experimental-strip-types scripts/verify-wasm.ts
 npm test
 npx tsc -p tsconfig.foundations.json --noEmit
-node --experimental-strip-types scripts/check-wasm-module.ts examples/third-party-module
-node --experimental-strip-types scripts/check-module-package.ts examples/third-party-module
-node --experimental-strip-types scripts/build-module-package.ts --source examples/starter-module --release ./out/starter-release --stage ./out/staging/starter-1.0.0
-node --experimental-strip-types scripts/check-module-package.ts examples/javascript-module
-node --experimental-strip-types scripts/register-module-package.ts --staging ./out/staging/starter-1.0.0 --store ./out/cgp-store
-node --experimental-strip-types scripts/check-module-store.ts --store ./out/cgp-store
 node --experimental-strip-types scripts/browser-wasm.ts
 npm run console:check
 ```
@@ -76,19 +100,20 @@ node --experimental-strip-types src/modules/headless-demo.ts
 ## Layout
 
 - `src/foundations` — host, manifest validator, semver, discovery. Import the barrel, `src/foundations/index.ts`, from a module.
-- `src/packages` — Node-side release validation, staging, local content storage, catalog, and content identity tooling. It is not part of the Foundations runtime.
+- `src/packages` — Node-side release validation, staging, local content storage, catalog, project locks, and content identity tooling. It is not part of the Foundations runtime.
 - `src/modules/*` — packaged proofs. One folder per module.
 - `apps/console` — maintained branded browser console.
+- `examples/project.json` — sample local-store project profile.
 - `examples/starter-module` — a copyable JavaScript package. See [docs/authoring.md](docs/authoring.md).
 - `examples/wasm-module` — a copyable WebAssembly guest. `module.wasm` only.
 - `examples/third-party-module` — a Wasm guest authored as `guest.json` and carrying a v1 release descriptor. Another toolchain can omit `guest.json` and still be checked.
 - `examples/javascript-module` — a self-contained JavaScript ESM v1 release example.
-- `profiles/*.json` — composition pins. A different packaged version refuses the chip. The host does not upgrade.
+- `profiles/*.json` — bundled composition pins. A different packaged version refuses the selection. The host does not upgrade.
 - `assets/brand` — CGP logo, platform mark, app icon, favicon, reusable concept icons, design tokens, and UI reference. See [the visual identity guide](assets/brand/README.md).
 - `docs/adr` — language, slots, and trust decisions.
 - `docs/STATUS.md` — what is real and what is not.
 
-The console is a browser-facing viewer and development control surface. It calls the same `compose()` function as the headless host; it is not a second runtime implementation.
+The console is a browser-facing control surface. It calls the same `compose()` function as the headless host for bundled proofs; local lock resolution is separate Node-side package tooling.
 
 ## Honest limits
 
