@@ -13,6 +13,8 @@ import {
   readLocalCatalog,
   withLocalStoreReadLock,
   resolveLocalPackage,
+  setProjectRetentionPin,
+  removeProjectRetentionPin,
   type LocalCatalogEntry,
 } from "./local-store.ts";
 
@@ -420,4 +422,20 @@ export async function snapshotWasmProjectLock(
       maxTotalBytes,
     ),
   );
+}
+
+
+/** Persist an exact validated project lock as a package-store retention root. */
+export async function pinProjectLock(
+  storeDirectory:string,projectId:string,lockInput:unknown
+):Promise<import("./local-store.ts").ProjectRetentionPin>{
+  const checked=validateProjectLock(lockInput);
+  if(!checked.ok)throw new Error("Project lock validation failed: "+checked.errors.join("; "));
+  return setProjectRetentionPin(storeDirectory,projectId,checked.lock);
+}
+/** Remove a project's persistent lock pin. Local-import pins remain independent. */
+export async function unpinProjectLock(
+  storeDirectory:string,projectId:string
+):Promise<{projectId:string;removed:boolean}>{
+  return removeProjectRetentionPin(storeDirectory,projectId);
 }

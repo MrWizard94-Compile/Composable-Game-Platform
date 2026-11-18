@@ -55,6 +55,49 @@ export type StoreVerification = {
   errors: Array<{ moduleId: string; version: string; error: string }>;
 };
 
+
+export type StoreObjectState = "ready" | "deleting";
+export type ProjectRetentionPinInput = {
+  profileId: string;
+  profileDigest: string;
+  modules: readonly Pick<LocalCatalogEntry, "moduleId" | "version" | "packageTreeDigest">[];
+};
+export type LocalRetentionPin = { digest: string; createdAt: string };
+export type ProjectRetentionPin = {
+  projectId: string; profileId: string; profileDigest: string;
+  modules: Array<{ moduleId: string; version: string; digest: string }>;
+  createdAt: string; updatedAt: string;
+};
+export type StoreObjectLifecycle = {
+  digest: string; state: StoreObjectState; createdAt: string; updatedAt: string;
+  deletionClaim?: { token: string; pid: number; createdAt: string };
+};
+export type StoreLifecycle = {
+  schema: "cgp.local-store-lifecycle/1";
+  objects: StoreObjectLifecycle[];
+  localPins: LocalRetentionPin[];
+  projectPins: ProjectRetentionPin[];
+};
+export type StoreGcPreviewOptions = {
+  gracePeriodMs?: number;
+  now?: Date;
+};
+export type StoreGcObjectReport = {
+  digest: string; state: StoreObjectState | "untracked";
+  status: "candidate" | "retained" | "grace-period" | "deleting" | "invalid";
+  bytes: number | null; createdAt: string; ageMs: number;
+  releases: Array<{ moduleId: string; version: string }>;
+  retentionRoots: string[]; reasons: string[];
+};
+export type StoreGcPreview = {
+  schema: "cgp.store-gc-preview/1"; dryRun: true; generatedAt: string; gracePeriodMs: number;
+  rootsChecked: { localPins: number; projectPins: number; activeReaderMarkers: number };
+  candidates: StoreGcObjectReport[]; objects: StoreGcObjectReport[];
+  missingObjects: Array<{ digest: string; releases: Array<{ moduleId: string; version: string }> }>;
+  ignoredEntries: string[]; candidateBytes: number;
+};
+
+
 const CATALOG_SCHEMA = "cgp.local-catalog/1";
 const TREE_PROFILE = "cgp.package-tree/1";
 
@@ -507,10 +550,228 @@ function objectDirectory(root: string, digest: string): string {
  * Returns the validated content-object directory for a package-tree digest.
  * This checks the store path itself but deliberately does not scan package files.
  */
+
+const LIFECYCLE_SCHEMA = "cgp.local-store-lifecycle/1";
+const LIFECYCLE_FILE = ".cgp-store-lifecycle.json";
+const DEFAULT_GC_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
+const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function validIsoDate(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+function projectIdIsValid(value: unknown): value is string {
+  return typeof value === "string" && PROJECT_ID_RE.test(value);
+}
+function lifecycleObject(lifecycle: StoreLifecycle, digest: string): StoreObjectLifecycle | undefined {
+  return lifecycle.objects.find((item) => item.digest === digest);
+}
+function assertObjectReady(lifecycle: StoreLifecycle, digest: string): void {
+  if (lifecycleObject(lifecycle, digest)?.state === "deleting") {
+    throw new Error("Package object " + digest + " is marked deleting; new readers and retention pins are refused.");
+  }
+}
+function compareString(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
+function sortLifecycle(lifecycle: StoreLifecycle): StoreLifecycle {
+  return {
+    schema: LIFECYCLE_SCHEMA,
+    objects: [...lifecycle.objects].sort((a,b)=>compareString(a.digest,b.digest)),
+    localPins: [...lifecycle.localPins].sort((a,b)=>compareString(a.digest,b.digest)),
+    projectPins: [...lifecycle.projectPins].sort((a,b)=>compareString(a.projectId,b.projectId)),
+  };
+}
+function validateStoreLifecycleValue(value: unknown): StoreLifecycle {
+  if (!isRecord(value) ||
+      Object.keys(value).sort().join(",") !== "localPins,objects,projectPins,schema" ||
+      value.schema !== LIFECYCLE_SCHEMA || !Array.isArray(value.objects) ||
+      !Array.isArray(value.localPins) || !Array.isArray(value.projectPins)) {
+    throw new Error(LIFECYCLE_FILE + " must use the closed cgp.local-store-lifecycle/1 schema.");
+  }
+  const objects: StoreObjectLifecycle[] = [];
+  const objectDigests = new Set<string>();
+  for (const raw of value.objects) {
+    if (!isRecord(raw)) throw new Error(LIFECYCLE_FILE + " contains an invalid object-state record.");
+    const keys = Object.keys(raw).sort().join(",");
+    if (keys !== "createdAt,digest,state,updatedAt" && keys !== "createdAt,deletionClaim,digest,state,updatedAt") {
+      throw new Error(LIFECYCLE_FILE + " object-state record has unknown or missing fields.");
+    }
+    if (!isDigest(raw.digest) || (raw.state !== "ready" && raw.state !== "deleting") ||
+        !validIsoDate(raw.createdAt) || !validIsoDate(raw.updatedAt) || objectDigests.has(raw.digest)) {
+      throw new Error(LIFECYCLE_FILE + " contains an invalid or duplicate object-state record.");
+    }
+    let deletionClaim: StoreObjectLifecycle["deletionClaim"];
+    if (raw.state === "deleting") {
+      if (!isRecord(raw.deletionClaim) ||
+          Object.keys(raw.deletionClaim).sort().join(",") !== "createdAt,pid,token" ||
+          typeof raw.deletionClaim.token !== "string" || raw.deletionClaim.token.length < 16 ||
+          !Number.isSafeInteger(raw.deletionClaim.pid) || (raw.deletionClaim.pid as number) <= 0 ||
+          !validIsoDate(raw.deletionClaim.createdAt)) {
+        throw new Error(LIFECYCLE_FILE + " contains an invalid deletion claim.");
+      }
+      deletionClaim = {token:raw.deletionClaim.token,pid:raw.deletionClaim.pid as number,createdAt:raw.deletionClaim.createdAt};
+    } else if (raw.deletionClaim !== undefined) {
+      throw new Error(LIFECYCLE_FILE + " ready objects must not carry a deletion claim.");
+    }
+    objectDigests.add(raw.digest);
+    objects.push({
+      digest:raw.digest,state:raw.state,createdAt:raw.createdAt,updatedAt:raw.updatedAt,
+      ...(deletionClaim?{deletionClaim}:{})
+    });
+  }
+  const localPins: LocalRetentionPin[] = [];
+  const localPinDigests = new Set<string>();
+  for (const raw of value.localPins) {
+    if (!isRecord(raw) || Object.keys(raw).sort().join(",") !== "createdAt,digest" ||
+        !isDigest(raw.digest) || !validIsoDate(raw.createdAt) || localPinDigests.has(raw.digest)) {
+      throw new Error(LIFECYCLE_FILE + " contains an invalid or duplicate local-retention pin.");
+    }
+    localPinDigests.add(raw.digest); localPins.push({digest:raw.digest,createdAt:raw.createdAt});
+  }
+  const projectPins: ProjectRetentionPin[] = [];
+  const projectIds = new Set<string>();
+  for (const raw of value.projectPins) {
+    if (!isRecord(raw) ||
+        Object.keys(raw).sort().join(",") !== "createdAt,modules,profileDigest,profileId,projectId,updatedAt" ||
+        !projectIdIsValid(raw.projectId) || typeof raw.profileId !== "string" || !raw.profileId ||
+        !isDigest(raw.profileDigest) || !validIsoDate(raw.createdAt) || !validIsoDate(raw.updatedAt) ||
+        !Array.isArray(raw.modules) || projectIds.has(raw.projectId)) {
+      throw new Error(LIFECYCLE_FILE + " contains an invalid or duplicate project-retention pin.");
+    }
+    const modules: ProjectRetentionPin["modules"] = [];
+    const seenModuleIds = new Set<string>();
+    for (const module of raw.modules) {
+      if (!isRecord(module) || Object.keys(module).sort().join(",") !== "digest,moduleId,version" ||
+          typeof module.moduleId !== "string" || !module.moduleId ||
+          typeof module.version !== "string" || !module.version || !isDigest(module.digest) ||
+          seenModuleIds.has(module.moduleId)) {
+        throw new Error(LIFECYCLE_FILE + " contains an invalid project pin module.");
+      }
+      seenModuleIds.add(module.moduleId);
+      modules.push({moduleId:module.moduleId,version:module.version,digest:module.digest});
+    }
+    projectIds.add(raw.projectId);
+    projectPins.push({
+      projectId:raw.projectId,profileId:raw.profileId,profileDigest:raw.profileDigest,modules,
+      createdAt:raw.createdAt,updatedAt:raw.updatedAt
+    });
+  }
+  const sorted=sortLifecycle({schema:LIFECYCLE_SCHEMA,objects,localPins,projectPins});
+  if (objects.some((x,i)=>x.digest!==sorted.objects[i]!.digest) ||
+      localPins.some((x,i)=>x.digest!==sorted.localPins[i]!.digest) ||
+      projectPins.some((x,i)=>x.projectId!==sorted.projectPins[i]!.projectId)) {
+    throw new Error(LIFECYCLE_FILE + " records must be sorted deterministically.");
+  }
+  for (const digest of localPinDigests) if (!objectDigests.has(digest)) {
+    throw new Error(LIFECYCLE_FILE + " local-retention pin references an unknown object.");
+  }
+  for (const pin of projectPins) for (const module of pin.modules) if (!objectDigests.has(module.digest)) {
+    throw new Error(LIFECYCLE_FILE + " project-retention pin references an unknown object.");
+  }
+  return sorted;
+}
+function legacyObjectCreatedAt(root: string, digest: string): string {
+  try {
+    const info=lstatSync(assertStoreObjectParents(root,digest));
+    const millis=Number.isFinite(info.birthtimeMs)&&info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs;
+    return new Date(millis).toISOString();
+  } catch { return new Date().toISOString(); }
+}
+/** Missing lifecycle data is migrated conservatively: every catalog package stays locally pinned. */
+function readStoreLifecycle(root: string, catalog: LocalCatalog): StoreLifecycle {
+  const path=join(root,LIFECYCLE_FILE);
+  if(!existsByLstat(path)){
+    const byDigest=new Map<string,StoreObjectLifecycle>();
+    for(const entry of catalog.entries) if(!byDigest.has(entry.packageTreeDigest)){
+      const createdAt=legacyObjectCreatedAt(root,entry.packageTreeDigest);
+      byDigest.set(entry.packageTreeDigest,{digest:entry.packageTreeDigest,state:"ready",createdAt,updatedAt:createdAt});
+    }
+    return sortLifecycle({
+      schema:LIFECYCLE_SCHEMA,objects:[...byDigest.values()],
+      localPins:[...byDigest.keys()].map(digest=>({digest,createdAt:byDigest.get(digest)!.createdAt})),
+      projectPins:[]
+    });
+  }
+  const info=lstatSync(path);
+  if(info.isSymbolicLink()||!info.isFile()) throw new Error(LIFECYCLE_FILE+" must be a regular file, not a symlink or special entry.");
+  if(info.size>16*1024*1024) throw new Error(LIFECYCLE_FILE+" exceeds the 16 MiB metadata limit.");
+  const parsed=parseStrictJson(new Uint8Array(readFileSync(path)),LIFECYCLE_FILE);
+  if(!parsed.ok) throw new Error(parsed.error);
+  const lifecycle=validateStoreLifecycleValue(parsed.value);
+  const known=new Set(lifecycle.objects.map(item=>item.digest));
+  for(const entry of catalog.entries) if(!known.has(entry.packageTreeDigest)){
+    throw new Error(LIFECYCLE_FILE+" is missing an object-state record for catalog digest "+entry.packageTreeDigest+".");
+  }
+  return lifecycle;
+}
+function writeStoreLifecycleAtomically(root:string,input:StoreLifecycle):void{
+  const lifecycle=sortLifecycle(input),target=join(root,LIFECYCLE_FILE);
+  const temporary=join(root,".cgp-store-lifecycle-"+randomUUID()+".tmp");
+  const descriptor=openSync(temporary,"wx",0o600);
+  try{
+    writeFileSync(descriptor,JSON.stringify(lifecycle,null,2)+"\n");
+    fsyncSync(descriptor);closeSync(descriptor);renameSync(temporary,target);
+  }catch(error){
+    try{closeSync(descriptor);}catch{}
+    rmSync(temporary,{force:true});throw error;
+  }
+}
+function setObjectReady(lifecycle:StoreLifecycle,digest:string,now:string,createdAt=now):void{
+  const existing=lifecycleObject(lifecycle,digest);
+  if(existing?.state==="deleting") throw new Error("Package object "+digest+" is marked deleting and cannot be registered.");
+  if(existing){existing.state="ready";existing.updatedAt=now;delete existing.deletionClaim;}
+  else lifecycle.objects.push({digest,state:"ready",createdAt,updatedAt:now});
+}
+function setLocalPin(lifecycle:StoreLifecycle,digest:string,now:string):boolean{
+  if(lifecycle.localPins.some(x=>x.digest===digest))return false;
+  lifecycle.localPins.push({digest,createdAt:now});return true;
+}
+function projectPinRootsDigest(lifecycle:StoreLifecycle,digest:string):string[]{
+  return lifecycle.projectPins.filter(p=>p.modules.some(m=>m.digest===digest)).map(p=>"project:"+p.projectId);
+}
+function assertNoRetentionRoots(lifecycle:StoreLifecycle,digest:string):void{
+  const roots:string[]=[];
+  if(lifecycle.localPins.some(p=>p.digest===digest))roots.push("local-retention");
+  roots.push(...projectPinRootsDigest(lifecycle,digest));
+  if(roots.length)throw new Error("Package object "+digest+" is still retained by: "+roots.join(", ")+".");
+}
+async function verifyPackageObjectForDigest(root:string,digest:string,catalog:LocalCatalog):Promise<ReleasePackageSummary>{
+  const path=assertStoreObjectParents(root,digest);
+  const result=await validateReleasePackageDirectory(path);
+  if(!result.ok)throw new Error("Package object "+digest+" failed validation: "+result.errors.join("; "));
+  if(result.package.packageTreeDigest!==digest)throw new Error("Package object directory digest does not match its verified package-tree digest: "+digest);
+  const actual=toCatalogEntry(result.package);
+  for(const entry of catalog.entries.filter(x=>x.packageTreeDigest===digest)){
+    if(JSON.stringify(actual)!==JSON.stringify(entry))throw new Error("Package object "+digest+" disagrees with its catalog release identity.");
+  }
+  return result.package;
+}
+async function measurePackageDirectory(path:string):Promise<number>{
+  let total=0;
+  function visit(directory:string):void{
+    for(const entry of readdirSync(directory,{withFileTypes:true})){
+      const childPath=join(directory,entry.name),info=lstatSync(childPath);
+      if(info.isSymbolicLink())throw new Error("Package object contains a symbolic link: "+childPath);
+      if(info.isDirectory())visit(childPath);
+      else if(info.isFile())total+=info.size;
+      else throw new Error("Package object contains a special filesystem entry: "+childPath);
+    }
+  }
+  visit(path);return total;
+}
+function checkedGcOptions(options:StoreGcPreviewOptions):{gracePeriodMs:number;now:Date}{
+  const gracePeriodMs=options.gracePeriodMs??DEFAULT_GC_GRACE_PERIOD_MS;
+  const now=options.now??new Date();
+  if(!Number.isSafeInteger(gracePeriodMs)||gracePeriodMs<0)throw new Error("GC gracePeriodMs must be a non-negative safe integer.");
+  if(!(now instanceof Date)||!Number.isFinite(now.getTime()))throw new Error("GC preview clock must be a valid Date.");
+  return {gracePeriodMs,now};
+}
+
 export function localPackageObjectDirectory(storeDirectory: string, digest: string): string {
   if (!isDigest(digest)) throw new Error("Invalid package-tree SHA-256 digest.");
-  const root = storeRoot(storeDirectory);
-  return assertStoreObjectParents(root, digest);
+  const root=storeRoot(storeDirectory),catalog=readCatalog(root);
+  assertObjectReady(readStoreLifecycle(root,catalog),digest);
+  return assertStoreObjectParents(root,digest);
 }
 
 
@@ -629,7 +890,8 @@ export async function registerStagedPackage(
       throw new Error("Staging directory and content-store root must not overlap.");
     }
     const entry = toCatalogEntry(staged.package);
-    const catalog = readCatalog(root);
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    assertObjectReady(lifecycle,entry.packageTreeDigest);
     const existingCoordinate = catalog.entries.find((item) =>
       item.moduleId === entry.moduleId && item.version === entry.version);
     if (existingCoordinate &&
@@ -683,6 +945,14 @@ export async function registerStagedPackage(
     if (!afterStage.ok || !summariesMatch(staged.package, afterStage.package)) {
       throw new Error("Staging directory changed during registration; catalog was not updated.");
     }
+    // Commit retention metadata first. An interrupted registration can leave a
+    // pinned orphan, never a catalog row pointing at immediately collectable bytes.
+    const now=new Date().toISOString(),objectInfo=lstatSync(target);
+    const createdAt=lifecycleObject(lifecycle,entry.packageTreeDigest)?.createdAt ??
+      new Date(objectInfo.birthtimeMs>0?objectInfo.birthtimeMs:objectInfo.mtimeMs).toISOString();
+    setObjectReady(lifecycle,entry.packageTreeDigest,now,createdAt);
+    setLocalPin(lifecycle,entry.packageTreeDigest,now);
+    writeStoreLifecycleAtomically(root,lifecycle);
     if (!existingCoordinate) {
       const entries = sortEntries([...catalog.entries, entry]);
       writeCatalogAtomically(root, { schema: CATALOG_SCHEMA, entries });
@@ -705,9 +975,10 @@ export async function resolveLocalPackage(
   version: string,
 ): Promise<{ entry: LocalCatalogEntry; objectDirectory: string } | undefined> {
   return withLocalStoreReadLock(storeDirectory, async (root) => {
-    const catalog = readCatalog(root);
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
     const entry = catalog.entries.find((item) => item.moduleId === moduleId && item.version === version);
     if (!entry) return undefined;
+    assertObjectReady(lifecycle,entry.packageTreeDigest);
     const path = assertStoreObjectParents(root, entry.packageTreeDigest);
     const result = await validateReleasePackageDirectory(path);
     if (!result.ok) throw new Error("Stored package failed validation: " + result.errors.join("; "));
@@ -721,12 +992,13 @@ export async function resolveLocalPackage(
 /** Revalidates every catalog-referenced object while a store read marker is held. */
 export async function verifyLocalStore(storeDirectory: string): Promise<StoreVerification> {
   return withLocalStoreReadLock(storeDirectory, async (root) => {
-    const catalog = readCatalog(root);
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
     const errors: StoreVerification["errors"] = [];
     let valid = 0;
     for (const entry of catalog.entries) {
       let path = objectDirectory(root, entry.packageTreeDigest);
       try {
+        assertObjectReady(lifecycle,entry.packageTreeDigest);
         path = assertStoreObjectParents(root, entry.packageTreeDigest);
         const result = await validateReleasePackageDirectory(path);
         if (!result.ok) throw new Error(result.errors.join("; "));
@@ -744,5 +1016,221 @@ export async function verifyLocalStore(storeDirectory: string): Promise<StoreVer
       }
     }
     return { checked: catalog.entries.length, valid, errors };
+  });
+}
+
+
+/** Add or restore a local-retention pin for a verified package object. */
+export async function addLocalRetentionPin(storeDirectory:string,digest:string):Promise<{digest:string;added:boolean}>{
+  if(!isDigest(digest))throw new Error("Invalid package-tree SHA-256 digest.");
+  return withLocalStoreWriteLock(storeDirectory,async root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    assertObjectReady(lifecycle,digest);
+    const objectPath=assertStoreObjectParents(root,digest),info=lstatSync(objectPath);
+    const now=new Date().toISOString(),existing=lifecycleObject(lifecycle,digest);
+    const createdAt=existing?.createdAt??new Date(info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs).toISOString();
+    if(!existing)setObjectReady(lifecycle,digest,now,createdAt);
+    await verifyPackageObjectForDigest(root,digest,catalog);
+    const added=setLocalPin(lifecycle,digest,now);
+    if(added||!existing)writeStoreLifecycleAtomically(root,lifecycle);
+    return {digest,added};
+  });
+}
+/** Remove only the local-import pin. Project pins, if any, remain independent roots. */
+export async function removeLocalRetentionPin(storeDirectory:string,digest:string):Promise<{digest:string;removed:boolean}>{
+  if(!isDigest(digest))throw new Error("Invalid package-tree SHA-256 digest.");
+  return withLocalStoreWriteLock(storeDirectory,root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    const previous=lifecycle.localPins.length;
+    lifecycle.localPins=lifecycle.localPins.filter(x=>x.digest!==digest);
+    const removed=lifecycle.localPins.length!==previous;
+    if(removed)writeStoreLifecycleAtomically(root,lifecycle);
+    return {digest,removed};
+  });
+}
+/** Atomically persist a project lock's exact package digests as one retention root. */
+export async function setProjectRetentionPin(
+  storeDirectory:string,projectId:string,input:ProjectRetentionPinInput
+):Promise<ProjectRetentionPin>{
+  if(!projectIdIsValid(projectId))throw new Error("projectId must start with an alphanumeric character and contain at most 128 safe identifier characters.");
+  if(!isRecord(input)||typeof input.profileId!=="string"||!input.profileId||!isDigest(input.profileDigest)||!Array.isArray(input.modules)){
+    throw new Error("Project retention pin input is invalid.");
+  }
+  return withLocalStoreWriteLock(storeDirectory,async root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    const modules:ProjectRetentionPin["modules"]=[],seen=new Set<string>();
+    for(const raw of input.modules){
+      if(!isRecord(raw)||typeof raw.moduleId!=="string"||!raw.moduleId||
+        typeof raw.version!=="string"||!raw.version||!isDigest(raw.packageTreeDigest)){
+        throw new Error("Project lock contains an invalid retention identity.");
+      }
+      if(seen.has(raw.moduleId))throw new Error("Project lock contains duplicate module IDs.");
+      seen.add(raw.moduleId);
+      const catalogEntry=catalog.entries.find(x=>x.moduleId===raw.moduleId&&x.version===raw.version);
+      if(!catalogEntry||catalogEntry.packageTreeDigest!==raw.packageTreeDigest){
+        throw new Error("Project lock does not match the local catalog for "+raw.moduleId+"@"+raw.version+".");
+      }
+      assertObjectReady(lifecycle,raw.packageTreeDigest);
+      const verified=await verifyPackageObjectForDigest(root,raw.packageTreeDigest,catalog);
+      if(JSON.stringify(toCatalogEntry(verified))!==JSON.stringify(catalogEntry)){
+        throw new Error("Project lock package bytes do not match the catalog for "+raw.moduleId+".");
+      }
+      modules.push({moduleId:raw.moduleId,version:raw.version,digest:raw.packageTreeDigest});
+    }
+    const now=new Date().toISOString(),previous=lifecycle.projectPins.find(x=>x.projectId===projectId);
+    const pin:ProjectRetentionPin={
+      projectId,profileId:input.profileId,profileDigest:input.profileDigest,modules,
+      createdAt:previous?.createdAt??now,updatedAt:now
+    };
+    lifecycle.projectPins=[...lifecycle.projectPins.filter(x=>x.projectId!==projectId),pin];
+    writeStoreLifecycleAtomically(root,lifecycle);
+    return pin;
+  });
+}
+/** Remove one project's persistent lock pin without changing local-import pins. */
+export async function removeProjectRetentionPin(storeDirectory:string,projectId:string):Promise<{projectId:string;removed:boolean}>{
+  if(!projectIdIsValid(projectId))throw new Error("projectId must start with an alphanumeric character and contain at most 128 safe identifier characters.");
+  return withLocalStoreWriteLock(storeDirectory,root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    const previous=lifecycle.projectPins.length;
+    lifecycle.projectPins=lifecycle.projectPins.filter(x=>x.projectId!==projectId);
+    const removed=lifecycle.projectPins.length!==previous;
+    if(removed)writeStoreLifecycleAtomically(root,lifecycle);
+    return {projectId,removed};
+  });
+}
+/**
+ * Atomically reserve an old verified unreferenced object for a future delete worker.
+ * This operation does not delete bytes. A matching release restores state to ready.
+ */
+export async function claimPackageObjectDeletion(
+  storeDirectory:string,digest:string,options:StoreGcPreviewOptions={}
+):Promise<{digest:string;claimToken:string;createdAt:string}>{
+  if(!isDigest(digest))throw new Error("Invalid package-tree SHA-256 digest.");
+  const checked=checkedGcOptions(options);
+  return withLocalStoreWriteLock(storeDirectory,async root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    assertNoRetentionRoots(lifecycle,digest);
+    const current=lifecycleObject(lifecycle,digest);
+    if(current?.state==="deleting")throw new Error("Package object already has an active deletion claim: "+digest);
+    const verified=await verifyPackageObjectForDigest(root,digest,catalog);
+    const path=assertStoreObjectParents(root,digest),info=lstatSync(path);
+    const createdAt=current?.createdAt??new Date(info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs).toISOString();
+    const ageMs=Math.max(0,checked.now.getTime()-Date.parse(createdAt));
+    if(ageMs<checked.gracePeriodMs)throw new Error("Package object "+digest+" has not reached its GC grace period.");
+    if(verified.packageTreeDigest!==digest)throw new Error("Package object failed its content-address verification.");
+    const now=checked.now.toISOString(),claimToken=randomUUID();
+    const objectState:StoreObjectLifecycle={
+      digest,state:"deleting",createdAt,updatedAt:now,
+      deletionClaim:{token:claimToken,pid:process.pid,createdAt:now}
+    };
+    lifecycle.objects=[...lifecycle.objects.filter(x=>x.digest!==digest),objectState];
+    writeStoreLifecycleAtomically(root,lifecycle);
+    return {digest,claimToken,createdAt};
+  });
+}
+/** Cancel a not-yet-applied deletion claim. This function never removes filesystem bytes. */
+export async function releasePackageObjectDeletionClaim(
+  storeDirectory:string,digest:string,claimToken:string
+):Promise<void>{
+  if(!isDigest(digest))throw new Error("Invalid package-tree SHA-256 digest.");
+  if(typeof claimToken!=="string"||claimToken.length<16)throw new Error("A valid deletion claim token is required.");
+  return withLocalStoreWriteLock(storeDirectory,root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    const current=lifecycleObject(lifecycle,digest);
+    if(current?.state!=="deleting"||current.deletionClaim?.token!==claimToken){
+      throw new Error("Deletion claim token does not own the deleting package object.");
+    }
+    current.state="ready";current.updatedAt=new Date().toISOString();delete current.deletionClaim;
+    writeStoreLifecycleAtomically(root,lifecycle);
+  });
+}
+function packageObjectDirectoryNames(root:string,ignoredEntries:string[]):string[]{
+  const parent=join(root,"objects","cgp.package-tree","1","sha256");
+  if(!existsByLstat(parent))return [];
+  const info=lstatSync(parent);
+  if(info.isSymbolicLink()||!info.isDirectory())throw new Error("Package object namespace must be a real directory.");
+  const names:string[]=[];
+  for(const name of readdirSync(parent).sort()){
+    if(!/^[0-9a-f]{64}$/.test(name)){ignoredEntries.push(name);continue;}
+    const child=lstatSync(join(parent,name));
+    if(child.isSymbolicLink()||!child.isDirectory()){ignoredEntries.push(name+" (not a regular object directory)");continue;}
+    names.push(name);
+  }
+  return names;
+}
+/**
+ * Read-only mark analysis. It verifies content-addressed packages, checks all
+ * persistent roots and applies a grace period. No lifecycle records or package
+ * objects are removed or claimed.
+ */
+export async function previewLocalStoreGarbageCollection(
+  storeDirectory:string,options:StoreGcPreviewOptions={}
+):Promise<StoreGcPreview>{
+  const checked=checkedGcOptions(options);
+  return withLocalStoreReadLock(storeDirectory,async root=>{
+    const catalog=readCatalog(root),lifecycle=readStoreLifecycle(root,catalog);
+    const ignoredEntries:string[]=[],names=packageObjectDirectoryNames(root,ignoredEntries);
+    const found=new Set(names),catalogByDigest=new Map<string,LocalCatalogEntry[]>();
+    for(const entry of catalog.entries){
+      const group=catalogByDigest.get(entry.packageTreeDigest)??[];
+      group.push(entry);catalogByDigest.set(entry.packageTreeDigest,group);
+    }
+    const missingMap=new Map<string,Array<{moduleId:string;version:string}>>();
+    for(const [digest,entries] of catalogByDigest)if(!found.has(digest.slice("sha256:".length))){
+      missingMap.set(digest,entries.map(x=>({moduleId:x.moduleId,version:x.version})));
+    }
+    const objectDigests=new Set(names.map(name=>"sha256:"+name));
+    for(const record of lifecycle.objects)if(!objectDigests.has(record.digest)&&!missingMap.has(record.digest)){
+      missingMap.set(record.digest,(catalogByDigest.get(record.digest)??[]).map(x=>({moduleId:x.moduleId,version:x.version})));
+    }
+    const reports:StoreGcObjectReport[]=[];
+    for(const name of names){
+      const digest="sha256:"+name,path=assertStoreObjectParents(root,digest),info=lstatSync(path);
+      const record=lifecycleObject(lifecycle,digest);
+      const createdAt=record?.createdAt??new Date(info.birthtimeMs>0?info.birthtimeMs:info.mtimeMs).toISOString();
+      const ageMs=Math.max(0,checked.now.getTime()-Date.parse(createdAt));
+      const releases=(catalogByDigest.get(digest)??[]).map(x=>({moduleId:x.moduleId,version:x.version}));
+      const retentionRoots:string[]=[];
+      if(lifecycle.localPins.some(x=>x.digest===digest))retentionRoots.push("local-retention");
+      retentionRoots.push(...projectPinRootsDigest(lifecycle,digest));
+      const report:StoreGcObjectReport={
+        digest,state:record?.state??"untracked",status:"invalid",bytes:null,createdAt,ageMs,
+        releases,retentionRoots,reasons:[]
+      };
+      try{
+        const checkedPackage=await validateReleasePackageDirectory(path);
+        if(!checkedPackage.ok)throw new Error(checkedPackage.errors.join("; "));
+        if(checkedPackage.package.packageTreeDigest!==digest)throw new Error("Verified package-tree digest does not match the content-store directory name.");
+        const actual=toCatalogEntry(checkedPackage.package);
+        for(const entry of catalogByDigest.get(digest)??[])if(JSON.stringify(actual)!==JSON.stringify(entry)){
+          throw new Error("Verified package metadata disagrees with catalog release "+entry.moduleId+"@"+entry.version+".");
+        }
+        report.bytes=await measurePackageDirectory(path);
+      }catch(error){
+        report.reasons.push(error instanceof Error?error.message:String(error));
+        reports.push(report);continue;
+      }
+      if(record?.state==="deleting"){
+        report.status="deleting";report.reasons.push("An existing deletion claim requires recovery or release.");
+      }else if(retentionRoots.length){
+        report.status="retained";report.reasons.push("One or more persistent retention pins reference this object.");
+      }else if(ageMs<checked.gracePeriodMs){
+        report.status="grace-period";report.reasons.push("The object has not reached the configured GC grace period.");
+      }else{
+        report.status="candidate";report.reasons.push("Verified package has no local or project retention pins and has passed the grace period.");
+      }
+      reports.push(report);
+    }
+    const activeReaderMarkers=Math.max(0,readerMarkerPaths(root).length-1);
+    const candidates=reports.filter(x=>x.status==="candidate");
+    return {
+      schema:"cgp.store-gc-preview/1",dryRun:true,generatedAt:checked.now.toISOString(),
+      gracePeriodMs:checked.gracePeriodMs,
+      rootsChecked:{localPins:lifecycle.localPins.length,projectPins:lifecycle.projectPins.length,activeReaderMarkers},
+      candidates,objects:reports,
+      missingObjects:[...missingMap].map(([digest,releases])=>({digest,releases})),
+      ignoredEntries,candidateBytes:candidates.reduce((sum,x)=>sum+(x.bytes??0),0)
+    };
   });
 }
