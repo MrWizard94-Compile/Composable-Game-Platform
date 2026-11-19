@@ -40,4 +40,21 @@ jobs:
       - name: Build and browser-test the CGP console
         run: npm run console:check
       - name: Foundations, browser isolation, composition, package store, and lockfile tests
-        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/packages/local-store.test.ts src/packages/project-lock.test.ts src/packages/activation-snapshot.test.ts src/packages/store-coordination.test.ts src/packages/store-retention.test.ts src/packages/wasm-activation.test.ts src/packages/project-activation.test.ts src/modules/composition.test.ts src/modules/sim.test.ts
+        run: node --experimental-strip-types --test src/foundations/semver.test.ts src/foundations/host.test.ts src/foundations/dispatch.test.ts src/foundations/save.test.ts src/foundations/authoring.test.ts src/foundations/profile.test.ts src/foundations/isolation.test.ts src/foundations/browser-isolation.test.ts src/foundations/browser-wasm.test.ts src/foundations/stress.test.ts src/packages/package.test.ts src/packages/release-pipeline.test.ts src/packages/local-store.test.ts src/packages/project-lock.test.ts src/packages/activation-snapshot.test.ts src/packages/store-coordination.test.ts src/packages/store-retention.test.ts src/packages/wasm-activation.test.ts src/packages/project-activation.test.ts src/packages/package-resources.test.ts src/modules/composition.test.ts src/modules/sim.test.ts
+
+  activation:
+    name: activation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install development dependencies
+        run: npm ci --no-fund --no-audit
+      - name: Activation cleanup and package resource tests
+        run: node --experimental-strip-types --test src/packages/project-activation.test.ts src/packages/package-resources.test.ts

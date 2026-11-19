@@ -2,7 +2,25 @@
 
 **Research date:** 2026-11-18  
 **Research baseline:** `main` at `89225fb` (Study 010 unified activation)  
-**Decision status:** Research and recommended design only. This study does not implement a resource API, change a package or lock schema, or add an execution backend.
+**Implementation date:** 2026-11-18  
+**Decision status:** Design A is implemented for opted-in JavaScript on Node. No package, lock, or catalog schema change. No new digest profile. No new execution backend. Wasm guests still have no resource import. Browser transport is not implemented.
+
+## Implementation status
+
+`snapshotReleasePackageDirectory` and `ProjectModuleSnapshot` keep every regular file from the verifying scan. The buffers are the scanned buffers. `artifactBytes` is the artifact entry in that set. `packageBytes` is unchanged and already includes every file, so the aggregate `maxSnapshotBytes` budget is not a second copy of the tree. The Wasm-only snapshot still returns the artifact and the byte count. It does not grow a file map, and a Wasm guest is not handed one.
+
+After a JavaScript module is imported from its snapshotted `module.mjs`, and before `compose`, activation calls optional `openResources(view)` if that function exists on the implementation. Foundations `RegisterContext` and `LifecycleContext` are unchanged. `ModuleImplementation` in Foundations was not extended; the package layer checks the method structurally. The view exposes `packageTreeDigest`, `read(path)`, and `list()`. `read` accepts only an exact `cgp.package-path/1` string, returns a new `Uint8Array`, and fails for a missing key. It does not decode, normalize, or case-fold. `list` returns the paths that were hashed. The object has no store path, host directory, or file URL. A module cannot name another package.
+
+The view stays open through Foundations shutdown hooks. Invalidation runs after that shutdown settles and before Wasm disposal, source removal, and lease release. A failed invalidation stays unfinished. A later shutdown retries it. The lease is not reported released when release throws. `already: true` is returned only after invalidation, source removal, backend disposal, and lease release have all succeeded.
+
+### Deviations from the research recommendation
+
+- Windows and macOS can host the JavaScript view. Their directory cleanup is the `lstat` walk documented in Study 010, not the Linux file-descriptor walk. The resource map itself has no directory inode to follow on any platform.
+- `read` copies with `new Uint8Array` and `set`. A `Buffer.slice` would alias the retained bytes, so that was not used.
+- Wasm-only activation does not retain the non-artifact map. Mixed and JavaScript project activation does, including for a Wasm package in that project, but only a JavaScript module is offered the view.
+- Test probes can fail removal, backend disposal, and resource invalidation without POSIX permission bits. They are not a caller API.
+
+Designs B and C stay rejected. The exclusions below the research text still apply to everything this slice did not build.
 
 ## Problem and architectural context
 
@@ -68,7 +86,7 @@ Budgets stay the existing ones. The activation `maxSnapshotBytes` cap is the agg
 
 Concurrent GC does not need a composition-lifetime reader. The snapshot is taken under the existing reader, the reader is dropped, and the composition lease remains the retention root for every locked digest. Unrelated unpinned objects can still be collected. Resource reads do not take the writer lock and do not wait on it. A store mutation after the snapshot does not change the handle. If the leased object is later replaced on disk, the running module still has the verified bytes.
 
-The temporary JavaScript directory is a loader detail. It is not the resource map. Cleanup of that directory refuses to follow symlinks and refuses a directory whose owner mode lacks write or execute, including when the process is root. Trusted code can still chmod it, replace it, or retain copies. Cleanup is not a confinement mechanism.
+The temporary JavaScript directory is a loader detail. It is not the resource map. Cleanup refuses to follow symlinks. On Linux and macOS it also refuses a directory whose owner mode lacks write or execute, including when the process is root. Windows does not use that POSIX check. Trusted code can still chmod the directory, replace it, or retain copies. Cleanup is not a confinement mechanism.
 
 ## Resource identity and versioning
 
@@ -116,34 +134,34 @@ Design B is rejected as the default because it brings back path ownership and a 
 
 ## Staged implementation proposal
 
-1. **This study.** No runtime change beyond the source-cleanup fix that landed with it. That fix is not a resource API.
-2. **Next slice.** Retain non-artifact bytes on the snapshot. Pass an opaque view to opted-in JavaScript through the package layer. Reads are exact keys and return copies. Shutdown invalidates the view. No Foundations type change. No Wasm import. No browser. No cross-package read.
+1. **Research record.** The comparison above is unchanged. Design A is the chosen model.
+2. **JavaScript slice.** Implemented. The project snapshot retains the scanned file buffers. Opted-in JavaScript receives an opaque per-package view through `openResources`. Reads are exact keys and return copies. Shutdown invalidates the view after Foundations hooks. No Foundations context change. No Wasm import. No browser. No cross-package read.
 3. **Wasm ABI slice.** One new `cgp.abi` import, manifest-gated like `cgp.log`, copying into guest memory under the existing memory limit. Unauthorized imports still fail before the guest runs.
 4. **Browser slice.** Send the same verified records over a bounded channel. Do not send local paths. Do not activate from the console until that transport exists.
 5. **Not scheduled.** Cross-package resource exports, hot reload, a remote registry, a dependency solver, or a new digest profile.
 
 ## Conformance and failure-injection tests
 
-When slice 2 is implemented, tests should show:
+The JavaScript slice is covered by `src/packages/package-resources.test.ts`:
 
 - A data file read after activation equals the bytes that were hashed into the package tree.
+- Changing that data file changes the package-tree digest and the project lock, not only the artifact digest.
 - `..`, an absolute path, a backslash, a percent-encoded dot segment, and a differently cased path are rejected.
 - The view's public values contain no store path and no host directory.
 - Package A cannot read a file that exists only in package B.
 - A missing key fails and does not fall open onto the store.
-- The snapshot budget still rejects the project before any import.
+- The snapshot budget still rejects the project before any import and releases the lease.
 - An unrelated unpinned object can be collected while the lease is held. The locked object cannot. The read result is unchanged.
-- After a successful shutdown, a read fails. A second shutdown is `already: true`.
+- A read works during a shutdown hook. After a successful shutdown, a read fails. A second shutdown is `already: true`.
 - If invalidating the view throws, shutdown rejects, the lease is not described as released, and a retry can finish.
 - A closed policy still does not import JavaScript, so the view is never handed out.
 - A Wasm package in the same project still has no filesystem import and no resource import.
-- The loader-directory tests from Study 010's cleanup fix still pass. Resource reads must not depend on that directory.
+- The loader-directory tests from Study 010 still pass. Resource reads do not use that directory.
 
 Slice 3 adds: a guest without the manifest permission is refused at validation; a permitted read copies the file; an oversized copy fails inside the guest limit; a symlink package is still refused before instantiation.
 
 ## Explicit non-goals
 
-- Implementing the resource API in this milestone.
 - Browser loading of stored packages.
 - Hot reload or active-generation publication.
 - A new execution backend, remote registry, or dependency solver.

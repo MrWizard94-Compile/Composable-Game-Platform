@@ -1,5 +1,6 @@
-import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, opendirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, opendirSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { platform as hostPlatform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -30,6 +31,10 @@ import {
   releaseCompositionLease,
   type LocalCatalogEntry,
 } from "./local-store.ts";
+import {
+  validatePackagePaths,
+  type PackageFile,
+} from "./package-format.ts";
 
 export type ProjectActivationBackendOptions = {
   maxHookMs?: number;
@@ -84,12 +89,13 @@ export type ProjectActivation = {
   modules: readonly ProjectActivationModuleIdentity[];
   composition: CompositionResult;
   /**
-   * Shuts down Foundations, disposes a Wasm backend when one was created, removes the
-   * owned JavaScript copies, then releases the composition lease. Each step is marked
-   * done only after it returns. A second call after every step has succeeded returns
-   * `already: true`. A failed cleanup rejects again until that step succeeds. The
-   * source path is kept until removal returns, and the lease is not reported released
-   * when release throws.
+   * Shuts down Foundations, invalidates package resource views, disposes a Wasm backend
+   * when one was created, removes the owned JavaScript copies, then releases the composition
+   * lease. Each step is marked done only after it returns. A second call after every step
+   * has succeeded returns `already: true`. A failed step rejects again until that step
+   * succeeds. The source path is kept until removal returns. Resource views stay readable
+   * through Foundations shutdown hooks and close only after that shutdown settles. The
+   * lease is not reported released when release throws.
    */
   shutdown: () => Promise<ShutdownReport>;
   /** Store lease held until shutdown finishes. The release token is not exposed. */
@@ -120,6 +126,42 @@ const JAVASCRIPT_OPT_IN =
   "Project activation refuses to import JavaScript until the caller opts in with javascript: \"trusted-in-process\". " +
   "JavaScript runs in this Node process and can use its filesystem, network, and operating-system access. " +
   "It is not sandboxed. A Wasm import allowlist does not cover it.";
+
+const UNSUPPORTED_JS_CLEANUP =
+  "Project activation cannot import JavaScript on this platform because activation source cleanup is not supported. " +
+  "No composition lease was acquired and JavaScript was not imported.";
+
+/**
+ * Opaque view of one verified package tree.
+ * `read` returns a copy. Nothing on this object is a store path, host directory, or file URL.
+ */
+export type PackageResourceView = {
+  readonly packageTreeDigest: string;
+  read(relativePath: string): Uint8Array;
+  list(): readonly string[];
+};
+
+/**
+ * Test-only failure injection. This is not a host API.
+ * Values follow the calling async context so concurrent tests do not share them.
+ */
+export type ProjectActivationTestProbes = {
+  beforeRemoveSources?: () => void;
+  beforeDisposeBackend?: () => void;
+  beforeCloseResources?: () => void;
+  /** `false` refuses JavaScript import before a lease. Omit to use the host platform. */
+  cleanupSupported?: boolean;
+};
+
+const probeStorage = new AsyncLocalStorage<ProjectActivationTestProbes>();
+
+export function setProjectActivationTestProbes(next: ProjectActivationTestProbes | undefined): void {
+  probeStorage.enterWith(next ?? {});
+}
+
+function probes(): ProjectActivationTestProbes {
+  return probeStorage.getStore() ?? {};
+}
 
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
@@ -223,7 +265,32 @@ function removeDirectoryContents(fd: number, label: string): void {
   }
 }
 
-function removeOwnedActivationDirectory(directory: string): void {
+function linuxFdCleanupAvailable(): boolean {
+  return typeof constants.O_NOFOLLOW === "number" &&
+    typeof constants.O_DIRECTORY === "number" &&
+    existsSync("/proc/self/fd");
+}
+
+/**
+ * Linux can remove an activation directory without following a symlink, including one
+ * swapped in after the walk starts, because the walk stays on the opened directory fd.
+ * Windows has neither `O_NOFOLLOW` nor `/proc/self/fd`. macOS has the open flags, but a
+ * path under `/dev/fd/N` is not a reliable `openat`. Those two platforms use an `lstat`
+ * walk that refuses symlink entries and a root path swapped for a symlink. That walk
+ * does not close the inode race an fd walk closes. Other platforms cannot clean up an
+ * owned JavaScript directory, so activation refuses the import before a lease.
+ */
+export function platformJavascriptCleanupSupported(host: NodeJS.Platform = hostPlatform()): boolean {
+  if (host === "linux") return linuxFdCleanupAvailable();
+  return host === "win32" || host === "darwin";
+}
+
+function javascriptCleanupAvailable(): boolean {
+  if (probes().cleanupSupported === false) return false;
+  return platformJavascriptCleanupSupported();
+}
+
+function removeLinuxOwnedDirectory(directory: string): void {
   if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_DIRECTORY !== "number") {
     throw new Error("Activation source cleanup requires O_NOFOLLOW and O_DIRECTORY.");
   }
@@ -264,6 +331,200 @@ function removeOwnedActivationDirectory(directory: string): void {
   } finally {
     closeSync(fd);
   }
+}
+
+function sameOpenedIdentity(beforeDev: number, beforeIno: number, afterDev: number, afterIno: number): boolean {
+  if (beforeIno === 0 || afterIno === 0) return true;
+  return beforeDev === afterDev && beforeIno === afterIno;
+}
+
+function removeSymlinkEntry(targetPath: string, label: string): void {
+  let info;
+  try {
+    info = lstatSync(targetPath);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (!info.isSymbolicLink()) refuseSymlink(label);
+  try {
+    unlinkSync(targetPath);
+    return;
+  } catch (error) {
+    const code = systemCode(error);
+    if (code === "ENOENT") return;
+    if (code !== "EPERM" && code !== "EISDIR" && code !== "EACCES") throw error;
+  }
+  let again;
+  try {
+    again = lstatSync(targetPath);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (!again.isSymbolicLink()) refuseSymlink(label);
+  rmdirSync(targetPath);
+}
+
+/**
+ * Non-following removal for Windows and macOS.
+ * A symlink is unlinked, or removed with a non-recursive `rmdir` when the platform
+ * requires that for a directory link. The target is not opened. Readdir results are
+ * discarded if the directory inode changed during the listing. This is not the Linux
+ * fd walk: a swap that returns to the original inode during `readdir` is still a race.
+ */
+function removeTreeWithoutFollowing(directory: string): void {
+  let before;
+  try {
+    before = lstatSync(directory);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (before.isSymbolicLink() || !before.isDirectory()) refuseSymlink(directory);
+  const names = readdirSync(directory);
+  let afterList;
+  try {
+    afterList = lstatSync(directory);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (afterList.isSymbolicLink() || !afterList.isDirectory() ||
+      !sameOpenedIdentity(before.dev, before.ino, afterList.dev, afterList.ino)) {
+    refuseSymlink(directory);
+  }
+  for (const name of names) {
+    if (name.length === 0 || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+      throw new Error("Activation source cleanup refuses an unsafe directory entry under " + directory + ".");
+    }
+    const child = join(directory, name);
+    let info;
+    try {
+      info = lstatSync(child);
+    } catch (error) {
+      if (systemCode(error) === "ENOENT") continue;
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      removeSymlinkEntry(child, child);
+      continue;
+    }
+    if (info.isDirectory()) {
+      if (hostPlatform() !== "win32") assertDirectoryRemovable(child, info.mode);
+      removeTreeWithoutFollowing(child);
+      let again;
+      try {
+        again = lstatSync(child);
+      } catch (error) {
+        if (systemCode(error) === "ENOENT") continue;
+        throw error;
+      }
+      if (again.isSymbolicLink() || !again.isDirectory() ||
+          !sameOpenedIdentity(info.dev, info.ino, again.dev, again.ino)) {
+        refuseSymlink(child);
+      }
+      rmdirSync(child);
+      continue;
+    }
+    if (hostPlatform() === "win32") {
+      try { chmodSync(child, 0o666); } catch { /* unlink reports the real failure */ }
+    }
+    unlinkSync(child);
+  }
+}
+
+function removeWithoutFollowing(directory: string): void {
+  let info;
+  try {
+    info = lstatSync(directory);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (info.isSymbolicLink()) refuseSymlink(directory);
+  if (!info.isDirectory()) {
+    throw new Error("Activation source cleanup expected a directory at " + directory + ".");
+  }
+  if (hostPlatform() !== "win32") assertDirectoryRemovable(directory, info.mode);
+  removeTreeWithoutFollowing(directory);
+  let again;
+  try {
+    again = lstatSync(directory);
+  } catch (error) {
+    if (systemCode(error) === "ENOENT") return;
+    throw error;
+  }
+  if (again.isSymbolicLink() || !again.isDirectory() ||
+      !sameOpenedIdentity(info.dev, info.ino, again.dev, again.ino)) {
+    refuseSymlink(directory);
+  }
+  rmdirSync(directory);
+}
+
+function removeOwnedActivationDirectory(directory: string): void {
+  if (hostPlatform() === "linux") {
+    if (!linuxFdCleanupAvailable()) {
+      throw new Error("Activation source cleanup requires O_NOFOLLOW, O_DIRECTORY, and /proc/self/fd.");
+    }
+    removeLinuxOwnedDirectory(directory);
+    return;
+  }
+  if (hostPlatform() === "win32" || hostPlatform() === "darwin") {
+    removeWithoutFollowing(directory);
+    return;
+  }
+  throw new Error("Activation source cleanup is not supported on " + hostPlatform() + ".");
+}
+
+function exactPackagePath(path: string): boolean {
+  return typeof path === "string" && validatePackagePaths([path]).length === 0;
+}
+
+function openPackageResources(packageTreeDigest: string, files: readonly PackageFile[]): {
+  view: PackageResourceView;
+  close(): void;
+} {
+  const retained = new Map<string, Uint8Array>();
+  const paths: string[] = [];
+  for (const file of files) {
+    retained.set(file.path, file.bytes);
+    paths.push(file.path);
+  }
+  const listed = Object.freeze(paths.slice());
+  let open = true;
+  const view: PackageResourceView = Object.freeze({
+    packageTreeDigest,
+    read(path: string): Uint8Array {
+      if (!open) throw new Error("Package resources are closed.");
+      if (!exactPackagePath(path)) throw new Error("Package resource path is not an exact package path.");
+      const bytes = retained.get(path);
+      if (bytes === undefined) throw new Error("Package resource is not in this snapshot.");
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      return copy;
+    },
+    list(): readonly string[] {
+      if (!open) throw new Error("Package resources are closed.");
+      return listed;
+    },
+  });
+  return {
+    view,
+    close() {
+      if (!open) return;
+      open = false;
+      retained.clear();
+    },
+  };
+}
+
+async function bindPackageResources(implementation: ModuleImplementation, view: PackageResourceView): Promise<void> {
+  const opener = (implementation as ModuleImplementation & {
+    openResources?: (resources: PackageResourceView) => void | Promise<void>;
+  }).openResources;
+  if (typeof opener !== "function") return;
+  await opener.call(implementation, view);
 }
 
 async function loadOwnedJavaScript(
@@ -344,14 +605,52 @@ async function runProjectActivation(
   if (hasJs && options.javascript !== "trusted-in-process") throw new Error(JAVASCRIPT_OPT_IN);
   if (digests.length === 0) throw new Error("A project activation requires at least one locked package.");
 
+  const policy = options.policy ?? (hasJs && hasWasm ? CROSS_POLICY : hasJs ? IN_PROCESS_POLICY : CLOSED_POLICY);
+  const wasmBackend = hasWasm ? createWasmBackend(options.backendOptions) : undefined;
+  const backend: ExecutionBackend = wasmBackend && hasJs
+    ? createCrossBackend(wasmBackend)
+    : wasmBackend ?? inProcessBackend;
+  const admitJavaScript = hasJs && policyConflict(backend, policy) === undefined;
+  const disposeWasm = async () => { if (wasmBackend) await wasmBackend.dispose(); };
+  const disposeBackend = async () => {
+    probes().beforeDisposeBackend?.();
+    await disposeWasm();
+  };
+  if (admitJavaScript && !javascriptCleanupAvailable()) {
+    try {
+      await disposeWasm();
+    } catch (error) {
+      throw cleanupError(
+        [new Error(UNSUPPORTED_JS_CLEANUP), error],
+        "Project activation failed and its backend cleanup also failed.",
+      );
+    }
+    throw new Error(UNSUPPORTED_JS_CLEANUP);
+  }
+
   const lease = await acquireCompositionLease(storeDirectory, digests);
   const releaseLease = () => releaseCompositionLease(storeDirectory, lease.leaseId, lease.token);
   let sourceRoot: string | undefined;
+  const sessions: Array<{ close(): void }> = [];
+  const closeResources = () => {
+    if (sessions.length === 0) return;
+    probes().beforeCloseResources?.();
+    for (const session of sessions) session.close();
+  };
   const removeSources = () => {
     const path = sourceRoot;
     if (path === undefined) return;
+    probes().beforeRemoveSources?.();
     removeOwnedActivationDirectory(path);
     sourceRoot = undefined;
+  };
+  const releaseAcquired = async (): Promise<{ resources?: unknown; dispose?: unknown; source?: unknown; lease?: unknown }> => {
+    const failures: { resources?: unknown; dispose?: unknown; source?: unknown; lease?: unknown } = {};
+    try { closeResources(); } catch (error) { failures.resources = error; }
+    try { await disposeBackend(); } catch (error) { failures.dispose = error; }
+    try { removeSources(); } catch (error) { failures.source = error; }
+    try { await releaseLease(); } catch (error) { failures.lease = error; }
+    return failures;
   };
 
   let snapshot;
@@ -382,24 +681,20 @@ async function runProjectActivation(
       );
     }
   } catch (error) {
-    let leaseError: unknown;
-    try { await releaseLease(); } catch (cleanup) { leaseError = cleanup; }
-    if (leaseError !== undefined) {
+    const failures = await releaseAcquired();
+    const present = [failures.resources, failures.dispose, failures.source, failures.lease].filter((item) => item !== undefined);
+    if (present.length > 0) {
       throw cleanupError(
-        [error, leaseError],
-        "Project activation failed and its composition lease was not released.",
+        [error, ...present],
+        failures.lease !== undefined
+          ? "Project activation failed and its composition lease was not released."
+          : failures.dispose !== undefined
+            ? "Project activation failed and its backend cleanup also failed."
+            : "Project activation failed while cleaning up a JavaScript import.",
       );
     }
     throw error;
   }
-
-  const policy = options.policy ?? (hasJs && hasWasm ? CROSS_POLICY : hasJs ? IN_PROCESS_POLICY : CLOSED_POLICY);
-  const wasmBackend = hasWasm ? createWasmBackend(options.backendOptions) : undefined;
-  const backend: ExecutionBackend = wasmBackend && hasJs
-    ? createCrossBackend(wasmBackend)
-    : wasmBackend ?? inProcessBackend;
-  const disposeBackend = async () => { if (wasmBackend) await wasmBackend.dispose(); };
-  const admitJavaScript = hasJs && policyConflict(backend, policy) === undefined;
 
   let packages: ModulePackage[];
   try {
@@ -415,23 +710,24 @@ async function runProjectActivation(
         packages.push({ manifest: module.manifest });
         continue;
       }
-      packages.push({
-        manifest: module.manifest,
-        implementation: await loadOwnedJavaScript(sourceRoot!, index, module.entry.moduleId, module.artifactBytes),
-      });
+      const files = (module as { files?: readonly PackageFile[] }).files;
+      if (!files) throw new Error("JavaScript activation is missing its verified package snapshot.");
+      const session = openPackageResources(module.entry.packageTreeDigest, files);
+      sessions.push(session);
+      const implementation = await loadOwnedJavaScript(sourceRoot!, index, module.entry.moduleId, module.artifactBytes);
+      await bindPackageResources(implementation, session.view);
+      packages.push({ manifest: module.manifest, implementation });
     }
   } catch (error) {
-    let sourceError: unknown;
-    let disposeError: unknown;
-    let leaseError: unknown;
-    try { removeSources(); } catch (cleanup) { sourceError = cleanup; }
-    try { await disposeBackend(); } catch (cleanup) { disposeError = cleanup; }
-    try { await releaseLease(); } catch (cleanup) { leaseError = cleanup; }
-    const message = leaseError !== undefined
-      ? "Project activation failed and its composition lease was not released."
-      : "Project activation failed while cleaning up a JavaScript import.";
-    if (sourceError !== undefined || disposeError !== undefined || leaseError !== undefined) {
-      throw cleanupError([error, sourceError, disposeError, leaseError], message);
+    const failures = await releaseAcquired();
+    const present = [failures.resources, failures.source, failures.dispose, failures.lease].filter((item) => item !== undefined);
+    if (present.length > 0) {
+      throw cleanupError(
+        [error, ...present],
+        failures.lease !== undefined
+          ? "Project activation failed and its composition lease was not released."
+          : "Project activation failed while cleaning up a JavaScript import.",
+      );
     }
     throw error;
   }
@@ -444,32 +740,31 @@ async function runProjectActivation(
       policy,
     });
   } catch (error) {
-    let sourceError: unknown;
-    let disposeError: unknown;
-    let leaseError: unknown;
-    try { removeSources(); } catch (cleanup) { sourceError = cleanup; }
-    try { await disposeBackend(); } catch (cleanup) { disposeError = cleanup; }
-    try { await releaseLease(); } catch (cleanup) { leaseError = cleanup; }
-    const message = leaseError !== undefined
-      ? "Project activation failed and its composition lease was not released."
-      : disposeError !== undefined
-        ? "Project activation failed and its backend cleanup also failed."
-        : "Project activation failed while cleaning up a JavaScript import.";
-    if (sourceError !== undefined || disposeError !== undefined || leaseError !== undefined) {
-      throw cleanupError([error, sourceError, disposeError, leaseError], message);
+    const failures = await releaseAcquired();
+    const present = [failures.resources, failures.source, failures.dispose, failures.lease].filter((item) => item !== undefined);
+    if (present.length > 0) {
+      throw cleanupError(
+        [error, ...present],
+        failures.lease !== undefined
+          ? "Project activation failed and its composition lease was not released."
+          : failures.dispose !== undefined
+            ? "Project activation failed and its backend cleanup also failed."
+            : "Project activation failed while cleaning up a JavaScript import.",
+      );
     }
     throw error;
   }
 
   const foundationsShutdown = composition.shutdown;
   let foundationsDone = false;
+  let resourcesDone = false;
   let disposeDone = false;
   let sourcesDone = false;
   let leaseDone = false;
   let report: ShutdownReport | undefined;
   let inFlight: Promise<ShutdownReport> | undefined;
   const shutdown = (): Promise<ShutdownReport> => {
-    if (foundationsDone && disposeDone && sourcesDone && leaseDone && report) {
+    if (foundationsDone && resourcesDone && disposeDone && sourcesDone && leaseDone && report) {
       return Promise.resolve({ already: true, order: [], diagnostics: [] });
     }
     if (inFlight) return inFlight;
@@ -479,6 +774,12 @@ async function runProjectActivation(
         try {
           report = await foundationsShutdown();
           foundationsDone = true;
+        } catch (error) { failures.push(error); }
+      }
+      if (!resourcesDone) {
+        try {
+          closeResources();
+          resourcesDone = true;
         } catch (error) { failures.push(error); }
       }
       if (!disposeDone) {

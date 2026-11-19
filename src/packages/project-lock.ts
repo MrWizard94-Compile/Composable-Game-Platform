@@ -4,6 +4,7 @@ import { formatSemVer, parseSemVer } from "../foundations/semver.ts";
 import { validateProfile, type CompositionProfile } from "../foundations/profile.ts";
 import {
   validatePackagePaths,
+  type PackageFile,
 } from "./package-format.ts";
 import {
   snapshotReleasePackageDirectory,
@@ -469,6 +470,11 @@ export type ProjectModuleSnapshot = {
   /** Owned runtime artifact from the verifying scan. Wasm bytes or module.mjs bytes. */
   artifactBytes: Uint8Array;
   packageBytes: number;
+  /**
+   * Every regular file hashed into this module's package-tree digest.
+   * The buffers are the scanned buffers. `artifactBytes` is one of them.
+   */
+  files: readonly PackageFile[];
 };
 
 export type ProjectSnapshot = {
@@ -528,6 +534,7 @@ async function snapshotProjectLockWithReadLockHeld(
       manifest: result.snapshot.manifest,
       artifactBytes: result.snapshot.artifactBytes,
       packageBytes: result.snapshot.packageBytes,
+      files: result.snapshot.files,
     });
     totalBytes += result.snapshot.packageBytes;
   }

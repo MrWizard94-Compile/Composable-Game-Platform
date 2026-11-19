@@ -400,6 +400,12 @@ export type ReleasePackageSnapshot = {
   /** Owned bytes of the runtime artifact from the same scan that produced the digests. */
   artifactBytes: Uint8Array;
   packageBytes: number;
+  /**
+   * Every regular file that contributed to the package-tree digest.
+   * Each `bytes` buffer is the buffer from that scan. `artifactBytes` is one of them.
+   * This array is not a second copy of the tree.
+   */
+  files: readonly PackageFile[];
 };
 
 export type ReleasePackageSnapshotValidation =
@@ -426,6 +432,8 @@ export async function snapshotReleasePackageDirectory(
   }
   freezeSnapshotMetadata(checked.package);
   freezeSnapshotMetadata(checked.manifest);
+  for (const file of scanned.files) Object.freeze(file);
+  Object.freeze(scanned.files);
   return {
     ok: true,
     snapshot: Object.freeze({
@@ -433,6 +441,7 @@ export async function snapshotReleasePackageDirectory(
       manifest: checked.manifest,
       artifactBytes: checked.artifactBytes,
       packageBytes: checked.packageBytes,
+      files: scanned.files,
     }),
   };
 }

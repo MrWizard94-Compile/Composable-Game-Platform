@@ -22,7 +22,7 @@ Package management stays outside Foundations. The host still does not compile Ty
 
 `activateWasmProject` still refuses JavaScript with `Wasm-only project snapshot refuses ... javascript-esm` before that lease. It then uses the existing Wasm-only snapshot.
 
-The snapshot copies artifact bytes into memory and drops its reader marker. It does not keep a store path. JavaScript is later imported from those owned bytes written to a private temporary file. The lockfile has no path, and the store path is not the import URL.
+The snapshot copies every regular file that contributed to the package-tree digest into memory and drops its reader marker. It does not keep a store path. `packageBytes` already counts those files, and the retained buffers are the scanned buffers, not a second copy of the tree. JavaScript is later imported from the owned artifact bytes written to a private temporary file. The lockfile has no path, and the store path is not the import URL. Non-artifact files are not written into that directory. An opted-in JavaScript module can read them only through the package resource view in Study 011.
 
 ## Trust
 
@@ -44,13 +44,24 @@ Importing trusted JavaScript runs its top-level code. That can happen before `in
 
 ## Lease and shutdown
 
-The lease covers every locked package, of either runtime. It is acquired before the snapshot and released only after Foundations shutdown, Wasm backend disposal when a Wasm backend exists, and removal of the owned JavaScript copies. It does not hold a reader marker, so unrelated objects can still be collected.
+The lease covers every locked package, of either runtime. It is acquired before the snapshot and released only after Foundations shutdown, invalidation of package resource views, Wasm backend disposal when a Wasm backend exists, and removal of the owned JavaScript copies. It does not hold a reader marker, so unrelated objects can still be collected.
 
-Shutdown is idempotent after every cleanup step has succeeded (`already: true`). Foundations shutdown, Wasm disposal, source-directory removal, and lease release are each marked done only after that step returns. The source path is kept until removal returns, so a failed `rm` is not treated as a finished step on the next call.
+Shutdown is idempotent after every cleanup step has succeeded (`already: true`). Foundations shutdown, resource invalidation, Wasm disposal, source-directory removal, and lease release are each marked done only after that step returns. The source path is kept until removal returns, so a failed removal is not treated as a finished step on the next call. Resource views stay open through Foundations shutdown hooks. They are invalidated only after that shutdown settles. A failed invalidation is retried and is not described as a released lease.
 
-Removal walks the directory file descriptor and does not follow symlinks. A symlink entry is unlinked and its target is left in place. A directory whose owner mode lacks write or execute is refused, including when the process is root, so `CAP_DAC_OVERRIDE` cannot hide the failure. A later shutdown retries only the unfinished steps. If lease release throws, the error is that failure. The call does not report the lease released.
+## Cleanup platforms
 
-Trusted JavaScript can still read its temporary module URL, change permissions, replace the directory, or copy bytes out. This cleanup does not contain that code. Top-level side effects are not rolled back.
+| Platform | JavaScript import | Removal | What CI runs |
+|---|---|---|---|
+| Linux, when `O_NOFOLLOW`, `O_DIRECTORY`, and `/proc/self/fd` exist | After the usual opt-in | Directory file descriptor. No symlink is followed. Owner write and execute are required before a directory is walked, including when the process is root. | Full foundations workflow on `ubuntu-latest` |
+| Windows | After the usual opt-in | `lstat` walk. Symlink entries are removed without opening the target. A root path replaced by a symlink is refused. POSIX owner bits are not consulted. A read-only file bit is cleared before unlink because Windows otherwise rejects the delete. | `src/packages/project-activation.test.ts` and `src/packages/package-resources.test.ts` on `windows-latest` |
+| macOS | After the usual opt-in | The same `lstat` walk as Windows, plus the POSIX owner-mode check | Those same two files on `macos-latest` |
+| Anything else | Refused before a composition lease and before import, when JavaScript would actually be imported | Not attempted | Not claimed |
+
+The Windows and macOS walk re-checks the directory after `readdir` and discards the names if the inode changed. It does not close the race the Linux descriptor walk closes: a swap that returns to the original inode during `readdir` can still be observed. That limitation is why those platforms are not described as equivalent to Linux. A closed policy does not import JavaScript, so it does not need this cleanup and is not refused for lack of it. Wasm-only activation does not create the directory.
+
+A symlink entry is unlinked, or removed with a non-recursive `rmdir` when the platform requires that for a directory link. Its target is left in place. A later shutdown retries only the unfinished steps. If lease release throws, the error is that failure. The call does not report the lease released.
+
+Trusted JavaScript can still read its temporary module URL, change permissions, replace the directory, or copy bytes out. This cleanup does not contain that code. Top-level side effects are not rolled back. Permission failures that Windows cannot represent as POSIX modes are injected in tests. Those probes are not a host API.
 
 A failed activation releases what it acquired. An import failure releases the lease before a backend is left running. An initialization or Wasm budget failure returns the Foundations result when Foundations does, then shuts the activation down. If that cleanup also fails, both failures are reported.
 
@@ -70,4 +81,4 @@ Separate from activation: `store:gc-reconcile --apply` no longer drops token-own
 
 ## Conformance coverage
 
-Opt-in refusal, verification before import, closed-policy refusal, import and initialization cleanup, mixed cross-backend activation, live retention, Wasm budget cleanup, lock rejection, and a visible lease-release retry are covered from `src/packages/project-activation.test.ts`. That file also covers a source directory whose mode blocks removal, a symlink swapped in for that directory, repeated shutdown while cleanup is still failing, and a lease release that succeeds while source cleanup is still failing. Existing Wasm activation tests still cover `activateWasmProject`. Claim ownership is covered from `src/packages/store-retention.test.ts`.
+Opt-in refusal, verification before import, closed-policy refusal, import and initialization cleanup, mixed cross-backend activation, live retention, Wasm budget cleanup, lock rejection, and a visible lease-release retry are covered from `src/packages/project-activation.test.ts`. That file also covers a source directory whose mode blocks removal on POSIX, a symlink swapped in for that directory, symlink entries whose targets stay in place, repeated shutdown while cleanup is still failing, a lease release that succeeds while source cleanup is still failing, injected removal and disposal failures that do not depend on POSIX modes, concurrent shutdown, and a platform that refuses JavaScript before a lease. Package resource reads are covered from `src/packages/package-resources.test.ts`. Existing Wasm activation tests still cover `activateWasmProject`. Claim ownership is covered from `src/packages/store-retention.test.ts`.
