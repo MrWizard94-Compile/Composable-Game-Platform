@@ -13,6 +13,9 @@ import { CLOSED_POLICY } from "../foundations/index.ts";
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const wasmPackage = join(repositoryRoot, "examples/third-party-module");
 const javascriptPackage = join(repositoryRoot, "examples/javascript-module");
+const skipWithoutPinnedCleanup: string | false = platformJavascriptCleanupSupported()
+  ? false
+  : "JavaScript activation is refused on this platform because cleanup cannot pin the directory against a symlink swap.";
 const limits = { maxHookMs: 1000, maxMemoryBytes: 65536, maxBinaryBytes: 65536 };
 const later = () => new Date(Date.now() + 60_000);
 
@@ -109,7 +112,7 @@ test("refuses JavaScript until the caller opts into trusted in-process execution
   assert.deepEqual(leaseNames(store), []);
 });
 
-test("imports JavaScript only after every locked package verifies", async (t) => {
+test("imports JavaScript only after every locked package verifies", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const marker = join(root, "marker");
@@ -143,7 +146,7 @@ test("imports JavaScript only after every locked package verifies", async (t) =>
   assert.equal(existsSync(registeredFirst.objectDirectory), true);
 });
 
-test("runs opted-in JavaScript, shuts it down once, and releases the lease", async (t) => {
+test("runs opted-in JavaScript, shuts it down once, and releases the lease", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const marker = join(root, "marker");
@@ -213,7 +216,7 @@ test("a closed policy does not import opted-in JavaScript", async (t) => {
   assert.equal(repeated.already, true);
 });
 
-test("releases the lease when JavaScript import or initialization fails", async (t) => {
+test("releases the lease when JavaScript import or initialization fails", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const boom = await stageJavaScript(root, "org.example.boom", "export const implementation = {};\nthrow new Error(\"import-boom\");\n");
@@ -237,7 +240,7 @@ test("releases the lease when JavaScript import or initialization fails", async 
   assert.equal((await activation.shutdown()).already, true);
 });
 
-test("activates a mixed project on the cross backend without sandboxing JavaScript", async (t) => {
+test("activates a mixed project on the cross backend without sandboxing JavaScript", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const wasm = await registerStagedPackage(wasmPackage, store);
@@ -319,7 +322,7 @@ test("rejects a bad lock before leasing and reports a failed Wasm budget without
   assert.equal(existsSync(wasm.objectDirectory), true);
 });
 
-test("a failed lease release stays visible and can be retried", async (t) => {
+test("a failed lease release stays visible and can be retried", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const staging = await stageJavaScript(root, "org.example.retry", "export const implementation = {};\n");
@@ -345,7 +348,7 @@ test("a failed lease release stays visible and can be retried", async (t) => {
   assert.equal((await activation.shutdown()).already, true);
 });
 
-test("retries source cleanup until the owned directory is removable and does not follow symlinks", { skip: process.platform === "win32" ? "Windows does not implement POSIX owner mode bits; removal failure is injected separately" : false }, async (t) => {
+test("retries source cleanup until the owned directory is removable and does not follow symlinks", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const dirMarker = join(root, "source-dir");
@@ -442,7 +445,7 @@ test("retries source cleanup until the owned directory is removable and does not
   }
 });
 
-test("source cleanup does not follow a symlink swapped in for the activation directory", async (t) => {
+test("source cleanup does not follow a symlink swapped in for the activation directory", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const dirMarker = join(root, "source-dir");
@@ -501,15 +504,15 @@ test("source cleanup does not follow a symlink swapped in for the activation dir
   }
 });
 
-test("reports the cleanup platforms without treating Windows or macOS as an fd walk", () => {
-  assert.equal(platformJavascriptCleanupSupported("win32"), true);
-  assert.equal(platformJavascriptCleanupSupported("darwin"), true);
+test("reports that only a pinned Linux cleanup admits JavaScript", () => {
+  assert.equal(platformJavascriptCleanupSupported("win32"), false);
+  assert.equal(platformJavascriptCleanupSupported("darwin"), false);
   assert.equal(platformJavascriptCleanupSupported("freebsd"), false);
   assert.equal(platformJavascriptCleanupSupported("aix"), false);
-  assert.equal(platformJavascriptCleanupSupported(process.platform), true);
+  assert.equal(platformJavascriptCleanupSupported(), process.platform === "linux");
 });
 
-test("an injected source-removal failure stays retryable and does not report already", async (t) => {
+test("an injected source-removal failure stays retryable and does not report already", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const dirMarker = join(root, "source-dir");
@@ -557,7 +560,7 @@ test("an injected source-removal failure stays retryable and does not report alr
   }
 });
 
-test("removes symlink entries inside the activation directory without deleting their targets", async (t) => {
+test("removes symlink entries inside the activation directory without deleting their targets", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const dirMarker = join(root, "source-dir");
@@ -615,7 +618,7 @@ test("removes symlink entries inside the activation directory without deleting t
   }
 });
 
-test("concurrent shutdown shares one cleanup and does not double-release", async (t) => {
+test("concurrent shutdown shares one cleanup and does not double-release", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const marker = join(root, "shutdown");
@@ -659,7 +662,7 @@ test("concurrent shutdown shares one cleanup and does not double-release", async
   }
 });
 
-test("backend disposal and lease release failures stay independent and retryable", async (t) => {
+test("backend disposal and lease release failures stay independent and retryable", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const staging = await stageJavaScript(root, "org.example.dispose", "export const implementation = {};\n");
@@ -750,5 +753,223 @@ test("refuses JavaScript before import when source cleanup cannot be supported",
     assert.deepEqual(leaseNames(store), []);
   } finally {
     setProjectActivationTestProbes(undefined);
+  }
+});
+
+test("this platform refuses JavaScript before a lease when cleanup cannot pin a directory", async (t) => {
+  if (platformJavascriptCleanupSupported()) return;
+  const root = fixture(t);
+  const store = join(root, "store");
+  const marker = join(root, "marker");
+  const source = [
+    "import { writeFileSync } from \"node:fs\";",
+    "const marker = process.env.CGP_PLATFORM_REFUSAL_MARKER;",
+    "if (marker) writeFileSync(marker, \"top\");",
+    "export const implementation = {",
+    "  openResources() { if (marker) writeFileSync(marker, \"view\"); },",
+    "};",
+    "",
+  ].join("\n");
+  const staging = await stageJavaScript(root, "org.example.platform-refusal", source);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.platform-refusal", name: "Refusal", modules: [{ moduleId: "org.example.platform-refusal", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_PLATFORM_REFUSAL_MARKER = marker;
+  try {
+    await assert.rejects(
+      activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" }),
+      /cannot pin the directory against a symlink swap/,
+    );
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(leaseNames(store), []);
+    const closed = await activateProject(store, project, lock, {
+      maxSnapshotBytes: 1024 * 1024,
+      javascript: "trusted-in-process",
+      policy: CLOSED_POLICY,
+    });
+    assert.equal(closed.ok, false);
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(leaseNames(store), []);
+    assert.equal((await closed.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_PLATFORM_REFUSAL_MARKER;
+  }
+  const wasm = await registerStagedPackage(wasmPackage, store);
+  const wasmProject = { profileId: "org.example.platform-wasm", name: "Wasm", modules: [{ moduleId: "org.example.beacon", version: "1.0.0" }] };
+  const wasmLock = await createProjectLock(store, wasmProject);
+  const activation = await activateProject(store, wasmProject, wasmLock, { maxSnapshotBytes: 8 * 1024 * 1024 });
+  assert.equal(activation.ok, true, activation.composition.diagnostics.map((item) => item.message).join("\n"));
+  await activation.shutdown();
+  assert.deepEqual(leaseNames(store), []);
+  assert.equal(existsSync(wasm.objectDirectory), true);
+});
+
+function outsideTree(root: string): string {
+  const outside = join(root, "outside");
+  mkdirSync(join(outside, "nested"), { recursive: true });
+  writeFileSync(join(outside, "keep.txt"), "keep");
+  writeFileSync(join(outside, "nested", "keep.txt"), "keep-nested");
+  return outside;
+}
+
+function swapForSymlink(path: string, outside: string, parked = path + "-parked"): string {
+  renameSync(path, parked);
+  symlinkSync(outside, path, "dir");
+  return parked;
+}
+
+const nestedSource = [
+  "import { mkdirSync, writeFileSync } from \"node:fs\";",
+  "import { dirname, join } from \"node:path\";",
+  "import { fileURLToPath } from \"node:url\";",
+  "const here = dirname(fileURLToPath(import.meta.url));",
+  "const marker = process.env.CGP_RACE_DIR;",
+  "if (marker) writeFileSync(marker, here);",
+  "mkdirSync(join(here, \"nested\"));",
+  "writeFileSync(join(here, \"nested\", \"owned.txt\"), \"owned\");",
+  "export const implementation = {};",
+  "",
+].join("\n");
+
+test("a symlink swapped in after the root is validated is not followed", { skip: skipWithoutPinnedCleanup }, async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const dirMarker = join(root, "source-dir");
+  const outside = outsideTree(root);
+  const staging = await stageJavaScript(root, "org.example.race-root", nestedSource);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.race-root", name: "Race", modules: [{ moduleId: "org.example.race-root", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_RACE_DIR = dirMarker;
+  let tempDir = "";
+  let parked = "";
+  let activation: Awaited<ReturnType<typeof activateProject>> | undefined;
+  try {
+    activation = await activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" });
+    tempDir = readFileSync(dirMarker, "utf8");
+    setProjectActivationTestProbes({
+      afterValidateRoot(directory) { parked = swapForSymlink(directory, outside); },
+    });
+    const first = await rejectedShutdown(activation.shutdown);
+    assert.match(first, /refuses to follow a symlink/);
+    assert.equal(lstatSync(tempDir).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "keep-nested");
+    assert.equal(existsSync(join(parked, "nested", "owned.txt")), false);
+    const second = await rejectedShutdown(activation.shutdown);
+    assert.match(second, /refuses to follow a symlink/);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    setProjectActivationTestProbes(undefined);
+    removeSymlink(tempDir);
+    renameSync(parked, tempDir);
+    parked = "";
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.equal(existsSync(tempDir), false);
+    tempDir = "";
+    assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "keep-nested");
+    assert.equal((await activation.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_RACE_DIR;
+    setProjectActivationTestProbes(undefined);
+    if (tempDir && existsSync(tempDir)) {
+      if (lstatSync(tempDir).isSymbolicLink()) removeSymlink(tempDir);
+      else rmSync(tempDir, { recursive: true, force: true });
+    }
+    if (parked && existsSync(parked)) rmSync(parked, { recursive: true, force: true });
+    if (activation) await activation.shutdown().catch(() => undefined);
+  }
+});
+
+test("a nested directory swapped for a symlink after it was checked is not traversed", { skip: skipWithoutPinnedCleanup }, async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const dirMarker = join(root, "source-dir");
+  const outside = outsideTree(root);
+  const staging = await stageJavaScript(root, "org.example.race-nested", nestedSource);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.race-nested", name: "Nested", modules: [{ moduleId: "org.example.race-nested", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_RACE_DIR = dirMarker;
+  let tempDir = "";
+  let parkedNested = "";
+  let activation: Awaited<ReturnType<typeof activateProject>> | undefined;
+  try {
+    activation = await activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" });
+    tempDir = readFileSync(dirMarker, "utf8");
+    setProjectActivationTestProbes({
+      beforeOpenDirectory(label) {
+        if (!label.endsWith("/nested")) return;
+        parkedNested = swapForSymlink(label, outside, join(root, "parked-nested"));
+      },
+    });
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.equal(existsSync(tempDir), false);
+    tempDir = "";
+    assert.equal(readFileSync(join(parkedNested, "owned.txt"), "utf8"), "owned");
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "keep-nested");
+    assert.deepEqual(leaseNames(store), []);
+    assert.equal((await activation.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_RACE_DIR;
+    setProjectActivationTestProbes(undefined);
+    if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+    if (parkedNested && existsSync(parkedNested)) rmSync(parkedNested, { recursive: true, force: true });
+    if (activation) await activation.shutdown().catch(() => undefined);
+  }
+});
+
+test("an ancestor swapped for a symlink after a child is pinned is not used for deletion", { skip: skipWithoutPinnedCleanup }, async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const dirMarker = join(root, "source-dir");
+  const outside = outsideTree(root);
+  const staging = await stageJavaScript(root, "org.example.race-ancestor", nestedSource);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.race-ancestor", name: "Ancestor", modules: [{ moduleId: "org.example.race-ancestor", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_RACE_DIR = dirMarker;
+  let tempDir = "";
+  let parked = "";
+  let activation: Awaited<ReturnType<typeof activateProject>> | undefined;
+  try {
+    activation = await activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" });
+    tempDir = readFileSync(dirMarker, "utf8");
+    setProjectActivationTestProbes({
+      beforeDeleteDirectoryEntries(label) {
+        if (!label.endsWith("/nested") || parked) return;
+        parked = swapForSymlink(tempDir, outside);
+      },
+    });
+    const first = await rejectedShutdown(activation.shutdown);
+    assert.match(first, /refuses to follow a symlink/);
+    assert.equal(lstatSync(tempDir).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "keep-nested");
+    assert.equal(existsSync(join(parked, "nested", "owned.txt")), false);
+    const second = await rejectedShutdown(activation.shutdown);
+    assert.match(second, /refuses to follow a symlink/);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    setProjectActivationTestProbes(undefined);
+    removeSymlink(tempDir);
+    renameSync(parked, tempDir);
+    parked = "";
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.equal(existsSync(tempDir), false);
+    tempDir = "";
+    assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "keep-nested");
+    assert.equal((await activation.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_RACE_DIR;
+    setProjectActivationTestProbes(undefined);
+    if (tempDir && existsSync(tempDir)) {
+      if (lstatSync(tempDir).isSymbolicLink()) removeSymlink(tempDir);
+      else rmSync(tempDir, { recursive: true, force: true });
+    }
+    if (parked && existsSync(parked)) rmSync(parked, { recursive: true, force: true });
+    if (activation) await activation.shutdown().catch(() => undefined);
   }
 });

@@ -8,7 +8,11 @@ import { CLOSED_POLICY, inspectWasm } from "../foundations/index.ts";
 import { applyLocalStoreGarbageCollection, registerStagedPackage, removeLocalRetentionPin } from "./local-store.ts";
 import { createProjectLock } from "./project-lock.ts";
 import { buildReleasePackage } from "./release-pipeline.ts";
-import { activateProject, setProjectActivationTestProbes, type PackageResourceView } from "./project-activation.ts";
+import { activateProject, platformJavascriptCleanupSupported, setProjectActivationTestProbes, type PackageResourceView } from "./project-activation.ts";
+
+const skipWithoutPinnedCleanup: string | false = platformJavascriptCleanupSupported()
+  ? false
+  : "JavaScript activation is refused on this platform because cleanup cannot pin the directory against a symlink swap.";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const wasmPackage = join(repositoryRoot, "examples/third-party-module");
@@ -98,7 +102,7 @@ async function rejected(shutdown: () => Promise<{ already: boolean }>): Promise<
   }
 }
 
-test("a module reads exact package-tree bytes and cannot mutate the retained snapshot", async (t) => {
+test("a module reads exact package-tree bytes and cannot mutate the retained snapshot", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const shutdownMarker = join(root, "shutdown");
@@ -181,7 +185,7 @@ test("changing a data file changes the package-tree identity and not only the ar
   assert.notEqual(JSON.stringify(lockA), JSON.stringify(lockB));
 });
 
-test("rejects paths that are not the exact package key and hides the other package", async (t) => {
+test("rejects paths that are not the exact package key and hides the other package", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const slotA = "__cgpResourceA";
@@ -316,7 +320,9 @@ test("one bad package prevents activation before any JavaScript import or resour
   try {
     await assert.rejects(
       activateProject(store, project, lock, { maxSnapshotBytes: 2 * 1024 * 1024, javascript: "trusted-in-process" }),
-      /failed validation|snapshot failed|malformed|JavaScript/i,
+      platformJavascriptCleanupSupported()
+        ? /failed validation|snapshot failed|malformed/
+        : /cannot pin the directory against a symlink swap/,
     );
   } finally {
     delete process.env.CGP_RESOURCE_BAD;
@@ -343,7 +349,9 @@ test("snapshot budget failure happens before import and releases the lease", asy
   try {
     await assert.rejects(
       activateProject(store, project, lock, { maxSnapshotBytes: 1, javascript: "trusted-in-process" }),
-      /byte limit/,
+      platformJavascriptCleanupSupported()
+        ? /byte limit/
+        : /cannot pin the directory against a symlink swap/,
     );
   } finally {
     delete process.env.CGP_RESOURCE_BUDGET;
@@ -352,7 +360,7 @@ test("snapshot budget failure happens before import and releases the lease", asy
   assert.deepEqual(leaseNames(store), []);
 });
 
-test("an unrelated unpinned object can be collected while leased resource bytes stay unchanged", async (t) => {
+test("an unrelated unpinned object can be collected while leased resource bytes stay unchanged", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const slot = "__cgpResourceKeep";
@@ -381,7 +389,7 @@ test("an unrelated unpinned object can be collected while leased resource bytes 
   }
 });
 
-test("resource invalidation failure stays visible and retryable without reporting the lease released", async (t) => {
+test("resource invalidation failure stays visible and retryable without reporting the lease released", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const slot = "__cgpResourceClose";
@@ -426,7 +434,7 @@ test("resource invalidation failure stays visible and retryable without reportin
   }
 });
 
-test("a Wasm package in the same project gains no resource or filesystem import", async (t) => {
+test("a Wasm package in the same project gains no resource or filesystem import", { skip: skipWithoutPinnedCleanup }, async (t) => {
   const root = fixture(t);
   const store = join(root, "store");
   const slot = "__cgpResourceWasm";

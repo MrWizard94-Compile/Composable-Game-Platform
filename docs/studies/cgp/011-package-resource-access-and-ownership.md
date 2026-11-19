@@ -3,7 +3,7 @@
 **Research date:** 2026-11-18  
 **Research baseline:** `main` at `89225fb` (Study 010 unified activation)  
 **Implementation date:** 2026-11-18  
-**Decision status:** Design A is implemented for opted-in JavaScript on Node. No package, lock, or catalog schema change. No new digest profile. No new execution backend. Wasm guests still have no resource import. Browser transport is not implemented.
+**Decision status:** Design A is implemented for opted-in JavaScript where Linux file-descriptor cleanup can pin the activation directory. Windows and macOS refuse that import before a lease. No package, lock, or catalog schema change. No new digest profile. No new execution backend. Wasm guests still have no resource import. Browser transport is not implemented.
 
 ## Implementation status
 
@@ -15,7 +15,7 @@ The view stays open through Foundations shutdown hooks. Invalidation runs after 
 
 ### Deviations from the research recommendation
 
-- Windows and macOS can host the JavaScript view. Their directory cleanup is the `lstat` walk documented in Study 010, not the Linux file-descriptor walk. The resource map itself has no directory inode to follow on any platform.
+- Windows and macOS do not host the JavaScript view. Node's public filesystem API cannot pin a directory against a symlink swap there: it does not expose `openat`, `fdopendir` of an existing descriptor, or a Windows handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`, and macOS `/dev/fd` is not that walk. Repeating `lstat` does not close the race, so that walk was removed. `activateProject` throws before a composition lease, before import, before top-level module code, and before `openResources`. The error says no lease was acquired. No activation directory is created. A closed policy and Wasm-only activation still run. The resource map itself has no directory inode to follow on any platform. The view API is unchanged and is reached only where the Linux file-descriptor cleanup is available.
 - `read` copies with `new Uint8Array` and `set`. A `Buffer.slice` would alias the retained bytes, so that was not used.
 - Wasm-only activation does not retain the non-artifact map. Mixed and JavaScript project activation does, including for a Wasm package in that project, but only a JavaScript module is offered the view.
 - Test probes can fail removal, backend disposal, and resource invalidation without POSIX permission bits. They are not a caller API.
@@ -86,7 +86,7 @@ Budgets stay the existing ones. The activation `maxSnapshotBytes` cap is the agg
 
 Concurrent GC does not need a composition-lifetime reader. The snapshot is taken under the existing reader, the reader is dropped, and the composition lease remains the retention root for every locked digest. Unrelated unpinned objects can still be collected. Resource reads do not take the writer lock and do not wait on it. A store mutation after the snapshot does not change the handle. If the leased object is later replaced on disk, the running module still has the verified bytes.
 
-The temporary JavaScript directory is a loader detail. It is not the resource map. Cleanup refuses to follow symlinks. On Linux and macOS it also refuses a directory whose owner mode lacks write or execute, including when the process is root. Windows does not use that POSIX check. Trusted code can still chmod the directory, replace it, or retain copies. Cleanup is not a confinement mechanism.
+The temporary JavaScript directory is a loader detail. It is not the resource map. Linux cleanup opens it with `O_NOFOLLOW` and `O_DIRECTORY`, walks `/proc/self/fd`, unlinks a symlink entry without following it, and refuses a directory whose owner mode lacks write or execute, including when the process is root. Windows and macOS never create that directory: JavaScript activation is refused before a lease. Trusted code on Linux can still chmod the directory, replace it, or retain copies. Cleanup is not a confinement mechanism for trusted in-process JavaScript.
 
 ## Resource identity and versioning
 

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, opendirSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, opendirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { platform as hostPlatform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -128,7 +128,7 @@ const JAVASCRIPT_OPT_IN =
   "It is not sandboxed. A Wasm import allowlist does not cover it.";
 
 const UNSUPPORTED_JS_CLEANUP =
-  "Project activation cannot import JavaScript on this platform because activation source cleanup is not supported. " +
+  "Project activation cannot import JavaScript on this platform because activation source cleanup cannot pin the directory against a symlink swap. " +
   "No composition lease was acquired and JavaScript was not imported.";
 
 /**
@@ -151,6 +151,12 @@ export type ProjectActivationTestProbes = {
   beforeCloseResources?: () => void;
   /** `false` refuses JavaScript import before a lease. Omit to use the host platform. */
   cleanupSupported?: boolean;
+  /** After the owned root is opened and checked, before its entries are removed. */
+  afterValidateRoot?: (directory: string) => void;
+  /** After a child is observed to be a real directory, before that child is opened. */
+  beforeOpenDirectory?: (label: string) => void;
+  /** After a directory is pinned, before its entries are removed. */
+  beforeDeleteDirectoryEntries?: (label: string) => void;
 };
 
 const probeStorage = new AsyncLocalStorage<ProjectActivationTestProbes>();
@@ -206,6 +212,7 @@ function procDirectory(fd: number, name?: string): string {
  * this directory, or chmod it again after a successful retry.
  */
 function removeDirectoryContents(fd: number, label: string): void {
+  probes().beforeDeleteDirectoryEntries?.(label);
   const listing = opendirSync(procDirectory(fd));
   const names: string[] = [];
   try {
@@ -235,6 +242,7 @@ function removeDirectoryContents(fd: number, label: string): void {
       continue;
     }
     if (info.isDirectory()) {
+      probes().beforeOpenDirectory?.(childLabel);
       let childFd: number;
       try {
         childFd = openSync(childPath, DIRECTORY_OPEN_FLAGS);
@@ -272,17 +280,16 @@ function linuxFdCleanupAvailable(): boolean {
 }
 
 /**
- * Linux can remove an activation directory without following a symlink, including one
- * swapped in after the walk starts, because the walk stays on the opened directory fd.
- * Windows has neither `O_NOFOLLOW` nor `/proc/self/fd`. macOS has the open flags, but a
- * path under `/dev/fd/N` is not a reliable `openat`. Those two platforms use an `lstat`
- * walk that refuses symlink entries and a root path swapped for a symlink. That walk
- * does not close the inode race an fd walk closes. Other platforms cannot clean up an
- * owned JavaScript directory, so activation refuses the import before a lease.
+ * JavaScript activation is admitted only where removal cannot be retargeted onto
+ * another directory after the check. Linux does that by opening with `O_NOFOLLOW`
+ * and `O_DIRECTORY` and walking `/proc/self/fd`. Node's public filesystem API does
+ * not expose `openat`, `fdopendir` of an existing descriptor, or a Windows handle
+ * opened with `FILE_FLAG_OPEN_REPARSE_POINT`. Repeating `lstat` does not close the
+ * swap. macOS `/dev/fd` does not provide that walk. Those platforms refuse the import.
  */
 export function platformJavascriptCleanupSupported(host: NodeJS.Platform = hostPlatform()): boolean {
-  if (host === "linux") return linuxFdCleanupAvailable();
-  return host === "win32" || host === "darwin";
+  if (host !== "linux") return false;
+  return linuxFdCleanupAvailable();
 }
 
 function javascriptCleanupAvailable(): boolean {
@@ -322,6 +329,7 @@ function removeLinuxOwnedDirectory(directory: string): void {
     if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== opened.dev || current.ino !== opened.ino) {
       refuseSymlink(directory);
     }
+    probes().afterValidateRoot?.(directory);
     removeDirectoryContents(fd, directory);
     const again = lstatSync(directory);
     if (again.isSymbolicLink() || !again.isDirectory() || again.dev !== opened.dev || again.ino !== opened.ino) {
@@ -333,148 +341,13 @@ function removeLinuxOwnedDirectory(directory: string): void {
   }
 }
 
-function sameOpenedIdentity(beforeDev: number, beforeIno: number, afterDev: number, afterIno: number): boolean {
-  if (beforeIno === 0 || afterIno === 0) return true;
-  return beforeDev === afterDev && beforeIno === afterIno;
-}
-
-function removeSymlinkEntry(targetPath: string, label: string): void {
-  let info;
-  try {
-    info = lstatSync(targetPath);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (!info.isSymbolicLink()) refuseSymlink(label);
-  try {
-    unlinkSync(targetPath);
-    return;
-  } catch (error) {
-    const code = systemCode(error);
-    if (code === "ENOENT") return;
-    if (code !== "EPERM" && code !== "EISDIR" && code !== "EACCES") throw error;
-  }
-  let again;
-  try {
-    again = lstatSync(targetPath);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (!again.isSymbolicLink()) refuseSymlink(label);
-  rmdirSync(targetPath);
-}
-
-/**
- * Non-following removal for Windows and macOS.
- * A symlink is unlinked, or removed with a non-recursive `rmdir` when the platform
- * requires that for a directory link. The target is not opened. Readdir results are
- * discarded if the directory inode changed during the listing. This is not the Linux
- * fd walk: a swap that returns to the original inode during `readdir` is still a race.
- */
-function removeTreeWithoutFollowing(directory: string): void {
-  let before;
-  try {
-    before = lstatSync(directory);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (before.isSymbolicLink() || !before.isDirectory()) refuseSymlink(directory);
-  const names = readdirSync(directory);
-  let afterList;
-  try {
-    afterList = lstatSync(directory);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (afterList.isSymbolicLink() || !afterList.isDirectory() ||
-      !sameOpenedIdentity(before.dev, before.ino, afterList.dev, afterList.ino)) {
-    refuseSymlink(directory);
-  }
-  for (const name of names) {
-    if (name.length === 0 || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
-      throw new Error("Activation source cleanup refuses an unsafe directory entry under " + directory + ".");
-    }
-    const child = join(directory, name);
-    let info;
-    try {
-      info = lstatSync(child);
-    } catch (error) {
-      if (systemCode(error) === "ENOENT") continue;
-      throw error;
-    }
-    if (info.isSymbolicLink()) {
-      removeSymlinkEntry(child, child);
-      continue;
-    }
-    if (info.isDirectory()) {
-      if (hostPlatform() !== "win32") assertDirectoryRemovable(child, info.mode);
-      removeTreeWithoutFollowing(child);
-      let again;
-      try {
-        again = lstatSync(child);
-      } catch (error) {
-        if (systemCode(error) === "ENOENT") continue;
-        throw error;
-      }
-      if (again.isSymbolicLink() || !again.isDirectory() ||
-          !sameOpenedIdentity(info.dev, info.ino, again.dev, again.ino)) {
-        refuseSymlink(child);
-      }
-      rmdirSync(child);
-      continue;
-    }
-    if (hostPlatform() === "win32") {
-      try { chmodSync(child, 0o666); } catch { /* unlink reports the real failure */ }
-    }
-    unlinkSync(child);
-  }
-}
-
-function removeWithoutFollowing(directory: string): void {
-  let info;
-  try {
-    info = lstatSync(directory);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (info.isSymbolicLink()) refuseSymlink(directory);
-  if (!info.isDirectory()) {
-    throw new Error("Activation source cleanup expected a directory at " + directory + ".");
-  }
-  if (hostPlatform() !== "win32") assertDirectoryRemovable(directory, info.mode);
-  removeTreeWithoutFollowing(directory);
-  let again;
-  try {
-    again = lstatSync(directory);
-  } catch (error) {
-    if (systemCode(error) === "ENOENT") return;
-    throw error;
-  }
-  if (again.isSymbolicLink() || !again.isDirectory() ||
-      !sameOpenedIdentity(info.dev, info.ino, again.dev, again.ino)) {
-    refuseSymlink(directory);
-  }
-  rmdirSync(directory);
-}
-
 function removeOwnedActivationDirectory(directory: string): void {
-  if (hostPlatform() === "linux") {
-    if (!linuxFdCleanupAvailable()) {
-      throw new Error("Activation source cleanup requires O_NOFOLLOW, O_DIRECTORY, and /proc/self/fd.");
-    }
-    removeLinuxOwnedDirectory(directory);
-    return;
+  if (hostPlatform() !== "linux" || !linuxFdCleanupAvailable()) {
+    throw new Error(
+      "Activation source cleanup cannot pin " + directory + " against a symlink swap on this platform.",
+    );
   }
-  if (hostPlatform() === "win32" || hostPlatform() === "darwin") {
-    removeWithoutFollowing(directory);
-    return;
-  }
-  throw new Error("Activation source cleanup is not supported on " + hostPlatform() + ".");
+  removeLinuxOwnedDirectory(directory);
 }
 
 function exactPackagePath(path: string): boolean {
