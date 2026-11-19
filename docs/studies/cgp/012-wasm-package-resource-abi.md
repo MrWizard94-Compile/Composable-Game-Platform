@@ -1,7 +1,8 @@
 # CGP Study 012 — Wasm Package Resource ABI and Memory Ownership
 
 **Research date:** 2026-11-19
-**Research baseline:** `main` at `ac9736f` (JavaScript activation refused unless cleanup can pin the directory; Study 011 JavaScript view implemented)
+**Revised:** 2026-11-19, same baseline. Delivery is one transferred pack per guest. Scanner `Buffer`s are not cloned. `BAD_PATH` is grammar, not a case miss. Overlapping `out` and `written` is `BAD_RANGE`.
+**Research baseline:** `main` at `65180d1` (Study 012 recorded; resource import not implemented)
 **Decision status:** Recommended. Not implemented. This study does not change the package format, the lock schema, the ABI allowlist, the guest runtime, or any execution backend.
 
 ## Problem
@@ -129,7 +130,9 @@ Ordinary resource failures return a status. They do not throw. A throw aborts th
 
 `TOO_SMALL` means the key exists and `out_cap` is smaller than the file. The host writes the required length and does not write the destination, even one byte. A size query is this call with `out_cap = 0` and any `out`, including 0. An empty file does not take that path: capacity 0 is enough, so the result is `OK` and `*written` is 0. A non-empty file returns `TOO_SMALL` and `*written` is the length. The guest can tell those apart. There is no second import.
 
-`NOT_FOUND` is a path that passes `validatePackagePaths` and is not a key in this guest's map. `BAD_PATH` is anything else: invalid UTF-8, a length above 240 bytes, an empty path, an absolute path, `..`, a backslash, a percent-encoded segment, a different case, or any other string `validatePackagePaths` rejects. The host does not decode, case-fold, or normalize. It does not search the store.
+`NOT_FOUND` is a path whose grammar `validatePackagePaths` accepts and whose exact string is not a key in this guest's map. `BAD_PATH` is a string that is not a package path: invalid UTF-8, a length above 240 bytes, more than 16 components, an empty path, or any string `validatePackagePaths` rejects (absolute, `..`, backslash, a component outside `[A-Za-z0-9._-]`, and the other grammar failures). The host does not decode percent-escapes, does not case-fold, and does not normalize. It does not search the store.
+
+A different case is not `BAD_PATH`. `validatePackagePaths` checks grammar, and case collision only when several paths are validated together. One guest string in a different case is grammatical and then misses the map, so the status is `NOT_FOUND`. Do not pass the guest string together with the package's paths into `validatePackagePaths`. That would turn a case difference into a collision error.
 
 `BAD_RANGE` is a pointer or length that is outside the current memory, or that would overflow the unsigned range check. `UNAVAILABLE` is a missing memory export at the moment of the call, a missing resource map, or a map that has been dropped. The browser case below is `UNAVAILABLE` at instantiate time as well, so a browser guest should not get as far as the call.
 
@@ -141,10 +144,10 @@ Ordinary resource failures return a status. They do not throw. A throw aborts th
 4. If `path_len > 240`, return `BAD_PATH` and write nothing. Do not allocate a path buffer of the guest's claimed length.
 5. If `path_len > 0`, range-check the path. On failure return `BAD_RANGE` and write nothing. If `path_len` is 0, return `BAD_PATH` without reading `path`.
 6. Copy the path bytes out. Decode UTF-8 with a fatal decoder. Replacement characters are not a successful decode. Invalid UTF-8 is `BAD_PATH`.
-7. If `validatePackagePaths` rejects the string, return `BAD_PATH`. Look up the exact string. A miss is `NOT_FOUND`.
-8. Let `n` be the file's byte length. If `n > out_cap`, write `n` to `written` as a little-endian `u32` and return `TOO_SMALL`. Do not read or write `out`.
-9. If `n > 0`, range-check `out` for `n` bytes. On failure return `BAD_RANGE` and do not write `written` either.
-10. Copy all `n` bytes into `out`, then write `n` to `written`, then return `OK`. A zero-length file skips the destination copy and still writes 0.
+7. If `validatePackagePaths` rejects the string, or the path has more than 16 components, return `BAD_PATH` and write nothing. Look the exact string up in a `Map`. A miss is `NOT_FOUND`. Do not use a plain object. `__proto__` and `constructor` match the path-component grammar.
+8. Let `n` be the file's byte length. If `n > out_cap`, write `n` to `written` as a little-endian `u32` and return `TOO_SMALL`. Do not read or write `out`. Overlap with `out` does not matter, because `out` is not written.
+9. If `n > 0`, range-check `out` for `n` bytes. On failure return `BAD_RANGE` and do not write `written` either. If the half-open ranges `[out, out+n)` and `[written, written+4)` overlap, return `BAD_RANGE` and write neither. Ranges that only touch at an edge do not overlap.
+10. Copy all `n` bytes into `out`, then write `n` to `written`, then return `OK`. A zero-length file skips the destination copy and the overlap check, and still writes 0 to `written`.
 
 The destination range is checked before either write. There is no partial copy. The host does not call `memory.grow`. It does not allocate a `Uint8Array` of length `out_cap`. The copy is `new Uint8Array(buffer, out, n).set(fileBytes)` for the exact file length, into memory the guest already has.
 
@@ -170,44 +173,71 @@ The refusal is before `WebAssembly.Instance`. A start function runs before the h
 
 ## Transport
 
-The worker cannot ask the parent during the import. The map has to be in the worker before `WebAssembly.Instance`, or the import is not linked.
+The worker cannot ask the parent during the import. The bytes have to be in the worker before `WebAssembly.Instance`, or the import is not linked. The parent snapshot buffers are not that delivery.
 
-### A. Structured clone on the load message (recommended)
+### Confirmed: `readFileSync` buffers are not safe to clone or transfer
 
-`loadGuest` already posts the artifact as `wasm: Uint8Array`. Add a `resources` value only when this guest's binary imports `resource_read` and both grants are present: a dictionary of exact package paths to the scanned `Uint8Array` views for that one package. Do not put the dictionary in the `postMessage` transfer list.
+`scanDirectory` stores the `Buffer` from `readFileSync`. On Node v22.23.3 in this workspace, `Buffer.poolSize` is 8192. Reads of 1, 8, 64, and 1024 bytes came back as views into that pool: `byteOffset` was not 0, the backing `ArrayBuffer` was 8192 bytes, and `worker_threads.isMarkedAsUntransferable` was true on that slab. A 4096-byte read in the same process happened to be an exact buffer. That cutoff is not a contract. Small files use the pool; the implementation must not guess which ones.
 
-Node `worker_threads` and a browser `Worker` both structured-clone a `Uint8Array` by copying the view's bytes into a new `ArrayBuffer` in the receiver. The parent view stays usable. That matters because the scanned buffers may be `Buffer` views over a pool slab. Transferring that slab can throw, or detach memory the parent still needs. Cloning the view copies `byteLength` bytes, not the whole pool.
+The Node 22 `worker_threads` documentation says a pooled `Buffer` cannot be transferred, and cloning it copies the entire pool. Node marks those slabs with `markAsUntransferable`. A `MessageChannel` post of a 64-byte `readFileSync` view arrived as a `Uint8Array` whose `byteLength` was 64 and whose backing store was still 8192, at a non-zero offset. Transferring that view's `ArrayBuffer` threw `DataCloneError`. Copying those 64 bytes into a fresh `ArrayBuffer` and transferring that copy left the original snapshot readable and delivered a backing store of exactly 64 bytes.
 
-The parent keeps its snapshot until the existing invalidation step, which is after Foundations shutdown and before `dispose`. The worker's clone lives until the worker is terminated, which is disposal, after shutdown hook `2`. Guest shutdown can read. After disposal the map is gone with the worker. A failed `postMessage` leaves the parent buffers attached. `loadGuest` already refunds the reservation and calls `stopGuest` when start or load fails. `stopGuest` terminates the worker, which drops the clone. There is no transferred buffer to put back.
+So a structured clone of the scanner views can copy pool bytes that are not part of any selected file, including bytes from other reads in the same process. The worker-visible view length is not the amount of memory delivered. Design A is not the delivery mechanism.
 
-### B. Transfer the parent's ArrayBuffers (rejected)
+`GuestProcess.postMessage` in `src/foundations/wasm-backend.ts` and `src/foundations/wasm-browser.ts` takes only the message. `performCall` in `src/foundations/wasm-isolate.ts` calls it that way. A transfer needs an optional transfer-list argument on that abstraction. The Node adapter passes it to `worker.postMessage(message, transfer)`. The browser adapter passes it to the same `Worker.postMessage` form. Messages that do not move a buffer pass an empty list. This study does not change those functions.
 
-Transferring the snapshot buffers would avoid a second resident copy, and it is the wrong ownership model here.
+### A. Structured-clone the scanned views (rejected)
 
-- The parent bytes are often Node `Buffer` views. Their backing store is not a safe transfer.
-- Mixed activation still needs the parent bytes. JavaScript `openResources` reads them through shutdown hooks. Transfer detaches that view.
-- `postMessage` detaches when it accepts the transfer list. If the worker then fails `assertGuestBinary` or instantiation, the parent no longer has the bytes and the worker is about to be terminated. Cleanup cannot reconstruct them without reading the store again, which this design forbids.
-- Guests are not restarted after `stopGuest`. A later retry of activation would have to snapshot again anyway. That does not make a detached failure path acceptable.
+Post the scanner `Buffer`s and let the structured clone algorithm copy them. The parent snapshot stays attached, which is necessary, but the worker receives the pool slab behind each small view. Several files that share one slab still deliver that whole slab, including bytes outside those files. There is no per-file upper bound tighter than the pool, and the extra bytes are not the guest's package. Rejected.
 
-Copying into a fresh `ArrayBuffer` and transferring that copy is one copy, same as a structured clone, plus a detach step that clone does not need. It is not a better first implementation.
+### B. Copy each file into an exact `Uint8Array`, then structured-clone (not chosen)
 
-### C. Ask the parent, or bake the files into the binary (rejected)
+For each selected file, `new Uint8Array(length)` and `set` the scanner bytes, then post those exact views with no transfer list. The clone copies `byteLength` and nothing beside it. The parent snapshot is untouched. A failed post leaves both the snapshot and the staging copies attached; drop the staging copies.
 
-A synchronous import cannot round-trip to the parent. The host does not call `Atomics.wait`, and the worker message channel is asynchronous. Shared memory is already refused.
+Cost for one guest whose files sum to `S`: the parent keeps `S`, the staging arrays are another `S`, and the worker clone is a third `S`. The staging arrays can be dropped after `postMessage` returns, so steady state is two copies, with a peak of three. This is correct and does not need a transfer list. It is rejected as the default because the extra clone is unnecessary once the staging buffers are already exact and safe to transfer.
 
-Embedding the files in a Wasm data segment would change `module.wasm`, change the artifact digest, and still leave the guest to know every offset. The package-tree digest already names the files. A second copy inside the binary is a format change, not an import.
+### C. Copy each file into its own `ArrayBuffer`, then transfer those (acceptable, not chosen)
 
-WASI preview 1 and any host filesystem import stay refused.
+Same exact staging copies as B, then pass those `ArrayBuffer`s in the transfer list. The worker owns them. There is no second copy of the staging bytes. The scanner buffers are not in the list, so they stay usable. A `postMessage` that throws before accepting the list leaves the staging buffers attached; drop them. After a successful post, they are detached on the parent and die with the worker if initialization fails.
 
-### What the extra copy costs
+This meets the ownership rules. A package may contain 4096 files, which is 4096 transfer-list entries and 4096 small allocations. That is legal and worse than one buffer. Chosen only if a single packed buffer proves harder to index than this study expects. It does not.
 
-`maxSnapshotBytes` already includes `packageBytes` for every locked module. Retaining the wasm-only file buffers does not add a second number to that budget. It does keep RAM that `snapshotWasmReleasePackageDirectory` currently drops. That retention is required only for a guest that imports `resource_read`. A guest that does not import it keeps today's wasm-only snapshot shape.
+### D. Pack one guest's files into one `ArrayBuffer` and transfer it (chosen)
 
-The worker clone is additional host memory. It is not guest linear memory and it is not part of the declared-memory reservation. Bound it by sending only that guest's own files, and only when the import will be linked. The ceiling is the package limit: 128 MiB for the tree, 64 MiB for one file, 4096 files. The artifact is already cloned as `wasm` on the same message, and it is also in the map if the guest is allowed to read `module.wasm`. That transient second copy of the artifact is accepted. Omitting it would make the guest's tree differ from the digest.
+Allocate one `ArrayBuffer` of length `S`, the sum of that guest's verified file lengths, including `module.wasm`. Copy each file in at an offset. Send the bytes by transfer, and send the index by structured clone as an array of `{ path, offset, length }` records, not as an object keyed by path.
 
-Node may apply `isolateHeapMb` / `resourceLimits` to the worker process. That cap is optional and is not a substitute for the package limits. The browser cannot apply it. Do not raise `maxMemoryBytes` so a file will fit. If the guest's current memory is smaller than the file, the result is `TOO_SMALL` with no growth and no host allocation of `out_cap` bytes.
+The worker builds `new Map(entries)`. Lookup is `Map.prototype.get`. `__proto__` and `constructor` are legal path components (`PATH_COMPONENT` is `[A-Za-z0-9._-]+`), and a plain object would treat them as prototype operations. The map contains only this guest's paths. A miss is `NOT_FOUND`.
 
-The parent still holds the project snapshot for the JavaScript view in a mixed activation. A mixed project therefore has the parent copy of each package plus, for a Wasm guest that imports the capability, one worker copy of that guest's package. JavaScript-only projects do not send a worker map. The lease stays the GC root. No reader marker is held for the composition.
+The worker compiles the guest from `new Uint8Array(pack, wasmOffset, wasmLength)`. It does not also post the scanner's `module.wasm` `Buffer`. That second post would clone a pool slab on top of the pack. The artifact bytes inside the pack are the verified bytes.
+
+Parent snapshot buffers are never transferred. After a successful post the pack's `byteLength` on the parent is 0 and the worker holds exactly `S` resource bytes plus the small index. `stopGuest` terminates the worker and drops that copy. Shutdown hook `2` still runs before disposal, so the pack is alive during guest shutdown.
+
+| Design | Parent snapshot | Pool bytes in the worker | Extra bytes beyond the parent | Transfer-list size |
+|---|---|---|---|---|
+| A. Clone scanner views | Intact | Yes, the whole slab | Unbounded by the file length | None |
+| B. Exact copy, then clone | Intact | No | `2S` at peak, `S` after the staging copy is dropped | None |
+| C. Exact copy per file, then transfer | Intact | No | `S` | One entry per file |
+| D. One pack, then transfer | Intact | No | `S` | One entry |
+
+Asking the parent during the call stays rejected. The import is synchronous, and the host does not call `Atomics.wait`. Embedding the files in the Wasm binary stays rejected. It would change the artifact digest. WASI stays rejected.
+
+### Memory accounting
+
+Four piles, not one.
+
+| Pile | What it holds | Bound | Already inside `maxSnapshotBytes`? |
+|---|---|---|---|
+| Verified parent snapshot | Scanner buffers kept for the activation. JavaScript `openResources` reads these. Wasm-only keeps them only for a guest that imports `resource_read`. | Sum of `packageBytes` for retained modules. That sum is what `maxSnapshotBytes` already counts. | Yes, as a count. Wasm-only previously dropped the RAM after counting it. Retaining it spends that count. |
+| Staging pack | One `ArrayBuffer` of length `S` for the guest being posted. | `S` equals that guest's file-byte sum. | No. It is a second RAM copy of bytes the budget already counted. |
+| Worker-owned pack | The same buffer after transfer, plus the index. | `S` for that guest. Sum over guests is below. | No. Transfer moves the staging allocation. It does not free the parent snapshot. |
+| Guest linear memory | The declared Wasm memory. | `maxMemoryBytes` and the declared maximum, unchanged. | No. |
+
+`S` includes `module.wasm`. There is not a further artifact copy beside the pack.
+
+A composition's worker-owned total is the sum of `S` for guests that import `resource_read`. Each such guest gets only its own package, so that sum is at most the snapshot total, which is at most `maxSnapshotBytes`. A guest that does not import the function adds nothing. A JavaScript module adds nothing on the worker side. Mixed activation still keeps the parent snapshot for `openResources`, so host RAM for resources settles at most at parent snapshot plus worker packs, which is at most twice the snapshot total. The in-flight staging buffer is the pack that transfer is about to hand off, not a fourth long-lived copy.
+
+Before `new ArrayBuffer(S)`, if this guest's `S` would make the composition's worker-owned total exceed the activation's `maxSnapshotBytes`, fail closed. Do not spawn the worker and do not post. A correct pack of one snapshotted package passes that check. The check is there so a second pack of the same tree, or a pack of another guest's files, does not go out anyway. Do not raise `maxMemoryBytes`. Do not raise `isolateHeapMb`. A file that does not fit in the guest's current memory is `TOO_SMALL`.
+
+Failed `postMessage` before the transfer is accepted: the parent snapshot is intact, the staging pack is still owned by the parent, and the parent drops it. Failed load after a successful transfer: the parent snapshot is intact, the pack is detached there, and `stopGuest` drops the worker's copy. Do not read the store again to rebuild it. The lease is not reported released when release throws. Existing activation cleanup already covers that.
 
 ## Permission and policy
 
@@ -252,7 +282,7 @@ The browser worker shares the guest runtime and has no verified snapshot. `resou
 
 The package layer may set a structural field on the implementation object that already carries `wasm`. `createCrossBackend` forwards that object. Do not add the map to `RegisterContext`, `LifecycleContext`, or the public `ModuleImplementation` type in the first slice. The isolate reads the field only after `refuseBinary` has accepted the import. If the import is accepted and the field is missing, refuse before spawn returns a loaded guest.
 
-Shutdown hook `2` runs before resource invalidation and before disposal, so the worker map is still there. Invalidation drops the parent JavaScript views. Disposal terminates the worker and drops the clone. The lease is still held across both. `already: true` stays the existing rule: only after those steps have succeeded. A throw from worker construction refunds the reservation and terminates the worker. Because the parent buffers were not transferred, that failure does not destroy the snapshot. A throw while posting the load message does the same.
+Shutdown hook `2` runs before resource invalidation and before disposal, so the worker pack is still there. Invalidation drops the parent JavaScript views. Disposal terminates the worker and drops the pack. The lease is still held across both. `already: true` stays the existing rule: only after those steps have succeeded. A throw from worker construction refunds the reservation and terminates the worker if one was spawned. The parent snapshot buffers are not in the transfer list, so that failure does not destroy them. If `postMessage` throws before the transfer is accepted, the parent drops the staging pack. If it throws after the pack was detached, the worker owns the only transferred copy and termination drops it.
 
 ## Memory edge cases
 
@@ -262,8 +292,9 @@ Shutdown hook `2` runs before resource invalidation and before disposal, so the 
 | `path_len` of 0 | `BAD_PATH`. Do not read `path`. |
 | `out_cap` of 0 and an empty file | `OK`, write 0 to `written`, do not read `out`. |
 | `out_cap` of 0 and a non-empty file | `TOO_SMALL`, write the length, do not read `out`. |
-| Output ends on the last memory byte | In range. Copy succeeds when the file fits. |
+| Output ends on the last memory byte | In range. Copy succeeds when the file fits and `written` does not overlap that range. |
 | Output would pass the last byte | `BAD_RANGE` before any write. |
+| `out` overlaps `written` on a non-empty copy | `BAD_RANGE` before either write. Adjacent edges are not an overlap. |
 | `written` would pass the last byte, or has fewer than 4 bytes | `BAD_RANGE`. Do not write the destination. |
 | File larger than the declared memory maximum | `TOO_SMALL` if the guest's capacity is short. Do not grow memory. Do not allocate `out_cap` on the host. |
 | File at the 64 MiB package limit | Same rule. The host already holds the scanned bytes. |
@@ -301,8 +332,12 @@ Refusal before instantiation:
 Path and pointer failures, after a permitted guest is running:
 
 - Missing key returns `NOT_FOUND`.
-- Invalid UTF-8, empty path, absolute path, `..`, backslash, percent-encoded dot segment, and a different case return `BAD_PATH` and do not write.
-- A path length above 240 returns `BAD_PATH` without allocating that many host bytes.
+- Invalid UTF-8, empty path, absolute path, `..`, backslash, a percent-encoded segment, a path longer than 240 bytes, and a path deeper than 16 components return `BAD_PATH` and do not write.
+- A grammatical path in a different case returns `NOT_FOUND` and does not write. The lookup is not case-folded.
+- A file whose path is `__proto__` or `constructor` is read by exact `Map` key when it is in the package, and is `NOT_FOUND` when it is not. The index is not a plain object.
+- `out` and `written` that overlap exactly, or partially, on a non-empty `OK` path return `BAD_RANGE` and leave both ranges unchanged.
+- The same ranges placed so they only touch at an edge succeed.
+- A destination that ends on the last byte of memory succeeds when the file fits, and `written` placed in the last four bytes succeeds when that range does not overlap the destination.
 - An out-of-range path pointer or `written` pointer returns `BAD_RANGE` and does not write the other buffer.
 - Another package's path is `NOT_FOUND` or `BAD_PATH`. It is never a successful read. The guest has no argument for a package digest.
 
@@ -314,7 +349,10 @@ Lifecycle and budgets:
 - The leased object's resource bytes do not change if the store object is rewritten after the snapshot.
 - A read from shutdown hook `2` succeeds.
 - After backend disposal, the worker is gone and a further read is impossible.
-- Worker `spawn` failure, `postMessage` failure, instantiation failure, and disposal failure leave no detached parent buffers and do not report the lease released.
+- Worker `spawn` failure, `postMessage` failure, instantiation failure, and disposal failure leave the parent snapshot bytes readable at their original lengths. They do not report the lease released.
+- After a successful delivery the worker's pack `byteLength` equals `S`, every index length matches the verified file, and no backing store larger than its view is part of the payload. Bytes from a `Buffer` pool slab are not delivered.
+- The pack contains only that guest's package. Another package's path is absent.
+- A worker that fails after the transfer is terminated, and that termination drops the pack. The parent snapshot is still readable.
 - JavaScript `openResources` behavior from Study 011 is unchanged.
 - Windows and macOS still refuse JavaScript activation before a lease. Wasm-only activation, including a permitted resource read, still runs there.
 - The host does not call `memory.grow` for a read. A guest that grows and then reads sees the new memory, not a detached view.
@@ -323,7 +361,7 @@ Lifecycle and budgets:
 
 1. **This study.** No runtime change.
 2. **Allowlist agreement.** Teach `inspectWasm` about the start section. Teach `validateWasm`, `refuseBinary`, and `assertGuestBinary` the new names and the start refusal. Build one `cgp.abi` object. Existing guests stay green. No successful read yet.
-3. **Worker map and status codes.** Retain wasm-only files in memory when the import is present. Structured-clone that one package on `op: "load"`. Implement the check order above. Do not transfer parent buffers.
+3. **Pack and status codes.** Retain wasm-only files in memory when the import is present. Pack that one package into one exact `ArrayBuffer`, transfer it, and build a `Map` from the cloned index. Compile `module.wasm` from that pack. Implement the check order above, including overlap. Do not post scanner `Buffer`s and do not transfer parent snapshot buffers. Add the optional transfer list to `GuestProcess.postMessage`.
 4. **Activation.** Wire `activateProject` and `activateWasmProject`. Keep JavaScript `openResources`. Cover shutdown, disposal, and the failure-injection cases.
 5. **Not this work.** Browser transport, WASI, a filesystem import, cross-package reads, a new digest, an ABI version bump, a native addon, and any weakening of the JavaScript platform refusal.
 
@@ -343,5 +381,4 @@ Lifecycle and budgets:
 These are narrow. They do not block the recommendation above.
 
 - Whether a later write import should be `cgp.abi.resource_write` with `cgp.resource.write`, or should stay out of `cgp.abi/1` entirely. This slice does not add it.
-- Whether `isolateHeapMb` should grow automatically by the cloned tree size. Recommendation for the first slice: no. The package limits and the existing worker cap stay independent, and a file that does not fit in guest memory is `TOO_SMALL` rather than a larger heap.
-- Whether wasm-only snapshots should always retain `files`, or only when `resource_read` is imported. Recommendation: only when the import is present, so guests that do not read pay today's memory cost. The scan still has to see the import list, which `validateWasm` already does.
+- Whether wasm-only snapshots should always retain `files`, or only when `resource_read` is imported. Recommendation: only when the import is present, so guests that do not read pay today's memory cost. The scan still has to see the import list, which `validateWasm` already does. `isolateHeapMb` does not grow to fit the pack.
