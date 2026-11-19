@@ -5,9 +5,10 @@
  * The host copies bytes in and copies bytes out. It links `cgp.abi.log`
  * when the manifest lists `cgp.log` and the policy allows that capability.
  * It also recognizes `cgp.abi.resource_read` when the manifest lists
- * `cgp.resource.read` and the policy allows that capability. That import
- * does not read package bytes. Calling it fails the hook. A module that
- * imports it and has a start section is refused before instantiation.
+ * `cgp.resource.read` and the policy allows that capability. With that guest's
+ * own transferred package pack, the import copies one file into guest memory
+ * and returns a status. Without the pack it is refused before instantiation.
+ * A module that imports it and has a start section is refused before instantiation.
  * Any other import is refused before the guest runs.
  *
  * Guest exports:

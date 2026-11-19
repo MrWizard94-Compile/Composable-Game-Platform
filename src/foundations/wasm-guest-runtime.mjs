@@ -14,6 +14,10 @@ export function createGuestRuntime(reply) {
   let instance = null;
   /** @type {WebAssembly.Memory | null} */
   let memory = null;
+  /** @type {ArrayBuffer | null} */
+  let pack = null;
+  /** @type {Map<string, { offset: number, length: number }> | null} */
+  let resources = null;
   /** @type {string[]} */
   let logs = [];
   let logBytes = 0;
@@ -87,10 +91,32 @@ export function createGuestRuntime(reply) {
         return;
       }
       if (record.op === "load") {
-        const bytes = record.wasm instanceof Uint8Array ? record.wasm : new Uint8Array();
+        pack = null;
+        resources = null;
+        /** @type {Uint8Array} */
+        let bytes;
+        if (record.pack instanceof ArrayBuffer || record.index !== undefined) {
+          if (!(record.pack instanceof ArrayBuffer)) throw new Error("Resource index is malformed.");
+          const indexError = acceptResourceIndex(record.pack, record.index);
+          if (indexError) throw new Error(indexError);
+          const index = /** @type {ResourceIndex} */ (record.index);
+          resources = new Map(
+            index.map(({ path, offset, length }) => [
+              path,
+              { offset, length },
+            ]),
+          );
+          const wasm = resources.get("module.wasm");
+          if (!wasm) throw new Error("Resource index is malformed.");
+          bytes = new Uint8Array(record.pack, wasm.offset, wasm.length);
+          pack = record.pack;
+        } else {
+          bytes = record.wasm instanceof Uint8Array ? record.wasm : new Uint8Array();
+        }
         const maxBytes = typeof record.maxBytes === "number" ? record.maxBytes : 0;
         const maxBinaryBytes = typeof record.maxBinaryBytes === "number" ? record.maxBinaryBytes : maxBytes;
-        assertGuestBinary(bytes, maxBytes, maxBinaryBytes, record.allowLog === true, record.allowResource === true);
+        const importsResource = assertGuestBinary(bytes, maxBytes, maxBinaryBytes, record.allowLog === true, record.allowResource === true);
+        if (importsResource && !resources) throw new Error("Package resources are not available.");
         const mod = new WebAssembly.Module(bytes);
         const imports = WebAssembly.Module.imports(mod);
         /** @type {WebAssembly.Imports} */
@@ -115,10 +141,10 @@ export function createGuestRuntime(reply) {
               pushLog(textDecode.decode(copyOut(ptr, size)));
             };
           } else if (item.name === "resource_read") {
-            if (record.allowResource !== true) throw new Error("Capability cgp.resource.read is not granted.");
-            abi.resource_read = () => {
+            if (record.allowResource !== true || !resources || !pack) {
               throw new Error("Package resources are not available.");
-            };
+            }
+            abi.resource_read = readResource;
           } else {
             throw new Error(`Unauthorized import ${item.module}.${item.name}`);
           }
@@ -174,6 +200,53 @@ export function createGuestRuntime(reply) {
     } catch (error) {
       reply(id, false, error instanceof Error ? error.message : "Guest failed.");
     }
+  }
+
+  /**
+   * @param {number} pathPtr
+   * @param {number} pathLen
+   * @param {number} out
+   * @param {number} outCap
+   * @param {number} written
+   */
+  function readResource(pathPtr, pathLen, out, outCap, written) {
+    if (!memory || !resources || !(pack instanceof ArrayBuffer)) return 5;
+    const buffer = memory.buffer;
+    if (typeof SharedArrayBuffer === "function" && buffer instanceof SharedArrayBuffer) return 5;
+    if (!(buffer instanceof ArrayBuffer)) return 5;
+    if (/** @type {{ detached?: boolean }} */ (buffer).detached === true) return 5;
+    const writtenAt = written >>> 0;
+    if (outOfRange(buffer.byteLength, writtenAt, 4)) return 4;
+    const pathSize = pathLen >>> 0;
+    if (pathSize > 240) return 3;
+    const pathAt = pathPtr >>> 0;
+    if (pathSize === 0) return 3;
+    if (outOfRange(buffer.byteLength, pathAt, pathSize)) return 4;
+    /** @type {string} */
+    let key;
+    try {
+      key = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(buffer, pathAt, pathSize));
+    } catch {
+      return 3;
+    }
+    if (guestPathRejected(key)) return 3;
+    const hit = resources.get(key);
+    if (!hit) return 2;
+    const n = hit.length;
+    const cap = outCap >>> 0;
+    const dest = out >>> 0;
+    const view = new DataView(buffer);
+    if (n > cap) {
+      view.setUint32(writtenAt, n, true);
+      return 1;
+    }
+    if (n > 0) {
+      if (outOfRange(buffer.byteLength, dest, n)) return 4;
+      if (rangesOverlap(dest, n, writtenAt, 4)) return 4;
+      new Uint8Array(buffer, dest, n).set(new Uint8Array(pack, hit.offset, n));
+    }
+    view.setUint32(writtenAt, n, true);
+    return 0;
   }
 
   return { onMessage };
@@ -281,6 +354,7 @@ function readStartIndex(bytes, at, end) {
  * @param {number} maxBinaryBytes
  * @param {boolean} allowLog
  * @param {boolean} allowResource
+ * @returns {boolean}
  */
 function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResource) {
   if (!(bytes instanceof Uint8Array)) throw new Error("Guest binary is missing.");
@@ -361,6 +435,7 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
     throw new Error("Guest imports cgp.abi.resource_read and has a start section.");
   }
   if (!sawMemory) throw new Error("Guest exports no memory limit.");
+  return importsResource;
 }
 
 /**
@@ -374,4 +449,186 @@ function assertMemory(guestMemory, maxBytes) {
   if (guestMemory.buffer.byteLength > maxBytes) {
     throw new Error(`Guest memory is ${guestMemory.buffer.byteLength} bytes. The limit is ${maxBytes}.`);
   }
+}
+
+/**
+ * @typedef {{ path: string, offset: number, length: number }} ResourceRecord
+ * @typedef {ResourceRecord[]} ResourceIndex
+ */
+
+/**
+ * @param {number} byteLength
+ * @param {number} start
+ * @param {number} size
+ */
+function outOfRange(byteLength, start, size) {
+  return size > byteLength || start > byteLength - size;
+}
+
+/**
+ * @param {number} start
+ * @param {number} size
+ * @param {number} other
+ * @param {number} otherSize
+ */
+function rangesOverlap(start, size, other, otherSize) {
+  if (size === 0 || otherSize === 0) return false;
+  return start < other + otherSize && other < start + size;
+}
+
+/** @param {string} path */
+function guestPathRejected(path) {
+  if (utf8Bytes(path) > 240) return true;
+  if (path.split("/").length > 16) return true;
+  return packagePathErrors([path]) !== undefined;
+}
+
+const PATH_COMPONENT = /^[A-Za-z0-9._-]+$/;
+const WINDOWS_DEVICE = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
+
+/** @param {readonly string[]} paths */
+function packagePathErrors(paths) {
+  const exact = new Set();
+  const folded = new Set();
+  /** @type {Map<string, string>} */
+  const componentSpellings = new Map();
+  for (const path of paths) {
+    if (typeof path !== "string" || path.length === 0) return "empty";
+    if (utf8Bytes(path) > 240) return "length";
+    if (path.startsWith("/") || path.includes("\\") || path.includes(":")) return "absolute";
+    const components = path.split("/");
+    if (components.length > 16) return "depth";
+    if (components.some((part) => part.length === 0 || part === "." || part === "..")) return "component";
+    if (components.some((part) => !PATH_COMPONENT.test(part) || part.endsWith("."))) return "grammar";
+    if (components.some((part) => WINDOWS_DEVICE.test(part))) return "device";
+    if (components.some((part) => part.toLowerCase() === "node_modules")) return "forbidden";
+    const basename = components[components.length - 1]?.toLowerCase();
+    if (basename === "package.json" || basename === "module.ts") return "forbidden";
+    const key = path.toLowerCase();
+    if (exact.has(path) || folded.has(key)) return "collision";
+    let prefix = "";
+    for (const part of components) {
+      prefix = prefix ? prefix + "/" + part : part;
+      const foldedPrefix = prefix.toLowerCase();
+      const previous = componentSpellings.get(foldedPrefix);
+      if (previous !== undefined && previous !== prefix) return "collision";
+      componentSpellings.set(foldedPrefix, prefix);
+    }
+    exact.add(path);
+    folded.add(key);
+  }
+  for (const path of exact) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i += 1) {
+      const parent = parts.slice(0, i).join("/");
+      if (exact.has(parent)) return "collision";
+    }
+  }
+  return undefined;
+}
+
+/** @param {unknown} value */
+function safeNonNegative(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Reject a resource index. Returns a stable error, or undefined when the index
+ * is an exact partition of the pack and includes `module.wasm`.
+ * @param {ArrayBuffer | number} pack
+ * @param {unknown} index
+ */
+export function acceptResourceIndex(pack, index) {
+  const byteLength = typeof pack === "number" ? pack : pack instanceof ArrayBuffer ? pack.byteLength : null;
+  if (byteLength === null || !safeNonNegative(byteLength)) return "Resource index is malformed.";
+  if (!Array.isArray(index)) return "Resource index is malformed.";
+  if (index.length > 4096) return "Resource index is malformed.";
+  /** @type {string[]} */
+  const paths = [];
+  /** @type {{ offset: number, length: number }[]} */
+  const ranges = [];
+  let sum = 0;
+  let sawWasm = false;
+  for (const record of index) {
+    if (!record || typeof record !== "object") return "Resource index is malformed.";
+    const path = /** @type {{ path?: unknown, offset?: unknown, length?: unknown }} */ (record).path;
+    const offset = /** @type {{ offset?: unknown }} */ (record).offset;
+    const length = /** @type {{ length?: unknown }} */ (record).length;
+    if (typeof path !== "string") return "Resource index is malformed.";
+    if (!safeNonNegative(offset) || !safeNonNegative(length)) return "Resource index is malformed.";
+    if (outOfRange(byteLength, offset, length)) return "Resource index is malformed.";
+    paths.push(path);
+    ranges.push({ offset, length });
+    if (sum > Number.MAX_SAFE_INTEGER - length) return "Resource index is malformed.";
+    sum += length;
+    if (path === "module.wasm") sawWasm = true;
+  }
+  if (packagePathErrors(paths) !== undefined) return "Resource index is malformed.";
+  const ordered = [...ranges].sort((a, b) => a.offset - b.offset || a.length - b.length);
+  let cursor = 0;
+  for (const range of ordered) {
+    if (range.offset < cursor) return "Resource index is malformed.";
+    if (range.offset > cursor) return "Resource index is malformed.";
+    cursor = range.offset + range.length;
+  }
+  if (cursor !== byteLength || sum !== byteLength) return "Resource index is malformed.";
+  if (!sawWasm) return "Resource index is malformed.";
+  return undefined;
+}
+
+/**
+ * Copy one guest's files into one exact ArrayBuffer. The source views are not transferred.
+ * @param {readonly { path: string, bytes: Uint8Array }[]} files
+ * @param {Uint8Array} artifact
+ * @param {{ maxSnapshotBytes: number, packedBytes?: number, allocate?: (size: number) => ArrayBuffer }} options
+ */
+export function packPackageFiles(files, artifact, options) {
+  if (!Array.isArray(files) || !(artifact instanceof Uint8Array)) throw new Error("Resource index is malformed.");
+  const budget = options.maxSnapshotBytes;
+  const already = options.packedBytes ?? 0;
+  if (!safeNonNegative(budget) || !safeNonNegative(already) || already > budget) {
+    throw new Error("Resource pack exceeds the snapshot budget.");
+  }
+  /** @type {{ path: string, bytes: Uint8Array }[]} */
+  const ordered = [];
+  for (const file of files) {
+    if (!file || typeof file.path !== "string" || !(file.bytes instanceof Uint8Array)) {
+      throw new Error("Resource index is malformed.");
+    }
+    ordered.push({ path: file.path, bytes: file.bytes });
+  }
+  ordered.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  if (ordered.length > 4096) throw new Error("Resource index is malformed.");
+  let total = 0;
+  /** @type {Uint8Array | null} */
+  let wasmBytes = null;
+  /** @type {ResourceIndex} */
+  const index = [];
+  for (const file of ordered) {
+    const n = file.bytes.byteLength;
+    if (!safeNonNegative(n) || total > Number.MAX_SAFE_INTEGER - n) throw new Error("Resource index is malformed.");
+    index.push({ path: file.path, offset: total, length: n });
+    total += n;
+    if (file.path === "module.wasm") wasmBytes = file.bytes;
+  }
+  if (!wasmBytes || wasmBytes.byteLength !== artifact.byteLength) throw new Error("Resource index is malformed.");
+  for (let i = 0; i < artifact.byteLength; i += 1) {
+    if (wasmBytes[i] !== artifact[i]) throw new Error("Resource index is malformed.");
+  }
+  if (packagePathErrors(ordered.map((file) => file.path)) !== undefined) throw new Error("Resource index is malformed.");
+  const preview = acceptResourceIndex(total, index);
+  if (preview) throw new Error(preview);
+  if (total > budget - already) throw new Error("Resource pack exceeds the snapshot budget.");
+  const allocate = options.allocate ?? ((size) => new ArrayBuffer(size));
+  const pack = allocate(total);
+  if (!(pack instanceof ArrayBuffer) || pack.byteLength !== total) throw new Error("Could not allocate the resource pack.");
+  const dest = new Uint8Array(pack);
+  for (const record of index) {
+    const file = ordered.find((item) => item.path === record.path && item.bytes.byteLength === record.length);
+    if (!file) throw new Error("Resource index is malformed.");
+    dest.set(file.bytes, record.offset);
+  }
+  const checked = acceptResourceIndex(pack, index);
+  if (checked) throw new Error(checked);
+  return { pack, index, bytes: total };
 }

@@ -7,7 +7,7 @@ import { createLogBuffer, clipUtf8, utf8Bytes, type GuestProcess } from "./wasm-
 import { attachBrowserGuest } from "./wasm-worker-browser.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import type { ExecutionPolicy } from "./backend.ts";
-import { logGuest, resourceStartGuest, storeGuest, wasiGuest } from "./wasm-build.ts";
+import { logGuest, resourceGuest, resourceStartGuest, storeGuest, wasiGuest } from "./wasm-build.ts";
 
 function manifest(moduleId: string, extra: Record<string, unknown> = {}) {
   return {
@@ -409,6 +409,36 @@ describe("browser guest runtime", () => {
     assert.match(reply.text ?? "", /Guest imports cgp\.abi\.resource_read and has a start section/);
     assert.doesNotMatch(reply.text ?? "", /Package resources are not available/);
   });
+
+  it("refuses resource_read in the browser worker when no pack is attached", () => {
+    const sent: unknown[] = [];
+    const slot: { handler: ((event: MessageEvent) => void) | null } = { handler: null };
+    attachBrowserGuest({
+      postMessage(data) {
+        sent.push(data);
+      },
+      set onmessage(value) {
+        slot.handler = value;
+      },
+      get onmessage() {
+        return slot.handler;
+      },
+    });
+    slot.handler?.({
+      data: {
+        id: 9,
+        op: "load",
+        wasm: resourceGuest(),
+        allowLog: false,
+        allowResource: true,
+        maxBytes: 65536,
+        maxBinaryBytes: 65536,
+      },
+    } as MessageEvent);
+    const reply = sent[0] as { ok?: boolean; text?: string };
+    assert.equal(reply.ok, false);
+    assert.match(reply.text ?? "", /^Package resources are not available\.$/);
+  });
 });
 
 async function overlap(budget: boolean): Promise<number> {
@@ -602,8 +632,8 @@ function nodeSpawn(): GuestProcess {
     for (const listener of [...errors]) listener(error);
   });
   return {
-    postMessage(message) {
-      worker.postMessage(message);
+    postMessage(message, transfer) {
+      worker.postMessage(message, transfer ? [...transfer] : []);
     },
     addMessageListener(listener) {
       listeners.add(listener);

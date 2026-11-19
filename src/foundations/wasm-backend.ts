@@ -48,8 +48,8 @@ export function createWasmBackend(options?: {
 
 function nodeProcess(worker: Worker): GuestProcess {
   return {
-    postMessage(message) {
-      worker.postMessage(message);
+    postMessage(message, transfer) {
+      worker.postMessage(message, transfer ? [...transfer] : []);
     },
     addMessageListener(listener) {
       worker.on("message", listener as (message: WorkerMessage) => void);

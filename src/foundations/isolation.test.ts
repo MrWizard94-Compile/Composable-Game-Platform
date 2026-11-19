@@ -11,7 +11,7 @@ import { callService, publish, runPipeline } from "./dispatch.ts";
 import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { ABI_ID, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, materializeAbiValue, mintAbiHandle } from "./abi.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
-import { createGuestRuntime } from "./wasm-guest-runtime.mjs";
+import { createGuestRuntime, packPackageFiles } from "./wasm-guest-runtime.mjs";
 import {
   counterGuest,
   echoGuest,
@@ -177,7 +177,7 @@ describe("isolated wasm execution", () => {
     await live.shutdown();
   });
 
-  it("requires both grants before resource_read is linked, and the link does not read", async () => {
+  it("requires both grants, and refuses resource_read before instantiation when no pack is attached", async () => {
     const policyOnly = createWasmBackend();
     const noManifest = await compose([pkg("org.example.resource", resourceGuest())], {
       backend: policyOnly,
@@ -216,13 +216,20 @@ describe("isolated wasm execution", () => {
 
   it("links log and resource_read on one namespace", async () => {
     const backend = createWasmBackend();
+    const wasm = resourceLogGuest();
     const result = await compose(
-      [pkg("org.example.both", resourceLogGuest(), { permissions: ["cgp.log", "cgp.resource.read"] })],
+      [pkg("org.example.both", wasm, { permissions: ["cgp.log", "cgp.resource.read"] }, {
+        packageFiles: [
+          { path: "module.wasm", bytes: wasm },
+          { path: "note.txt", bytes: new TextEncoder().encode("hello") },
+        ],
+        maxSnapshotBytes: 1024 * 1024,
+      })],
       { backend, policy: wasmPolicy({ allowCapabilities: ["cgp.log", "cgp.resource.read"] }) },
     );
-    assert.equal(result.runtimeActive, false);
-    assert.match(messages(result), /Initialize of "org\.example\.both" threw: Package resources are not available/);
+    assert.equal(result.runtimeActive, true, messages(result));
     assert.ok(backend.takeLogs().some((line) => line === "[org.example.both] ping"));
+    await result.shutdown();
     assert.equal(backend.openSessions(), 0);
     backend.dispose();
   });
@@ -1081,29 +1088,41 @@ describe("wasm start section and resource allowlist", () => {
     assert.equal(plain?.ok, true);
   });
 
-  it("keeps both imports after a resource refusal inside the worker", () => {
+  it("keeps both imports when a pack is attached and refuses a missing pack before instantiation", () => {
+    const bare = loadGuest(resourceLogGuest(), { allowLog: true, allowResource: true });
+    assert.equal(bare?.ok, false);
+    assert.match(bare?.text ?? "", /^Package resources are not available\.$/);
+
+    const wasm = resourceLogGuest();
+    const packed = packPackageFiles(
+      [
+        { path: "module.wasm", bytes: wasm },
+        { path: "note.txt", bytes: new TextEncoder().encode("hello") },
+      ],
+      wasm,
+      { maxSnapshotBytes: 1024 * 1024 },
+    );
     const sent: Array<{ id?: number; ok?: boolean; text?: string }> = [];
     const runtime = createGuestRuntime((id, ok, text) => {
       sent.push({ id, ok, text });
     });
-    const load = {
+    runtime.onMessage({
       id: 1,
       op: "load",
-      wasm: resourceLogGuest(),
+      pack: packed.pack,
+      index: packed.index,
       allowLog: true,
       allowResource: true,
       maxBytes: 65536,
       maxBinaryBytes: 65536,
-    };
-    runtime.onMessage(load);
+    });
     assert.equal(sent[0]?.ok, true, sent[0]?.text);
     runtime.onMessage({ id: 2, op: "hook", hook: 0, json: "{}", maxBytes: 65536 });
     const registered = JSON.parse(sent[1]?.text ?? "{}") as { ok?: boolean; logs?: string[] };
     assert.equal(registered.ok, true);
     assert.deepEqual(registered.logs, ["ping"]);
     runtime.onMessage({ id: 3, op: "hook", hook: 1, json: "{}", maxBytes: 65536 });
-    assert.equal(sent[2]?.ok, false);
-    assert.match(sent[2]?.text ?? "", /^Package resources are not available\.$/);
+    assert.equal(sent[2]?.ok, true, sent[2]?.text);
     runtime.onMessage({ id: 4, op: "hook", hook: 0, json: "{}", maxBytes: 65536 });
     const again = JSON.parse(sent[3]?.text ?? "{}") as { ok?: boolean; logs?: string[] };
     assert.equal(again.ok, true);

@@ -1,4 +1,5 @@
 import { ABI_HOOK, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, mintAbiHandle } from "./abi.ts";
+import { packPackageFiles } from "./wasm-guest-runtime.mjs";
 import type {
   ExecutionBackend,
   ExecutionPolicy,
@@ -88,7 +89,7 @@ type WorkerMessage = { id?: number; ok?: boolean; text?: string };
 
 /** A worker the session can terminate and then wait on. */
 export type GuestProcess = {
-  postMessage(message: Record<string, unknown>): void;
+  postMessage(message: Record<string, unknown>, transfer?: readonly ArrayBuffer[]): void;
   addMessageListener(listener: (message: WorkerMessage) => void): void;
   removeMessageListener(listener: (message: WorkerMessage) => void): void;
   addErrorListener(listener: (error: Error) => void): void;
@@ -109,6 +110,7 @@ type Guest = {
   worker: GuestProcess | null;
   dead: boolean;
   stopped?: Promise<void>;
+  packBytes: number;
 };
 
 type GuestAnswer = { ok: true; value: unknown } | { ok: false; error: string };
@@ -366,6 +368,33 @@ function wasmBytes(implementation: HookCall["implementation"] | undefined): Uint
   return wasm instanceof Uint8Array ? wasm : undefined;
 }
 
+function packageFilesOf(implementation: HookCall["implementation"] | undefined): { path: string; bytes: Uint8Array }[] | undefined {
+  if (!implementation || typeof implementation !== "object" || !("packageFiles" in implementation)) return undefined;
+  const files = (implementation as { packageFiles?: unknown }).packageFiles;
+  if (!Array.isArray(files)) return undefined;
+  const out: { path: string; bytes: Uint8Array }[] = [];
+  for (const file of files) {
+    if (!file || typeof file !== "object") return undefined;
+    const path = (file as { path?: unknown }).path;
+    const bytes = (file as { bytes?: unknown }).bytes;
+    if (typeof path !== "string" || !(bytes instanceof Uint8Array)) return undefined;
+    out.push({ path, bytes });
+  }
+  return out;
+}
+
+function snapshotBudgetOf(implementation: HookCall["implementation"] | undefined): number | undefined {
+  if (!implementation || typeof implementation !== "object" || !("maxSnapshotBytes" in implementation)) return undefined;
+  const value = (implementation as { maxSnapshotBytes?: unknown }).maxSnapshotBytes;
+  return typeof value === "number" ? value : undefined;
+}
+
+function allocatePackOf(implementation: HookCall["implementation"] | undefined): ((size: number) => ArrayBuffer) | undefined {
+  if (!implementation || typeof implementation !== "object" || !("allocatePack" in implementation)) return undefined;
+  const allocate = (implementation as { allocatePack?: unknown }).allocatePack;
+  return typeof allocate === "function" ? (allocate as (size: number) => ArrayBuffer) : undefined;
+}
+
 /**
  * One implementation of the isolating session.
  * Node and the browser both use it. The only difference is `spawn` and whether a worker heap cap can be applied.
@@ -498,9 +527,16 @@ export function createIsolateBackend(options: {
         });
       }
 
+      let packedBytes = 0;
+
       function stopGuest(guest: Guest): Promise<void> {
         if (guest.stopped) return guest.stopped;
         guest.dead = true;
+        if (guest.packBytes > 0) {
+          packedBytes -= guest.packBytes;
+          guest.packBytes = 0;
+          if (packedBytes < 0) throw new Error("Resource pack ledger went negative.");
+        }
         guest.stopped = guest.worker ? guest.worker.terminate() : Promise.resolve();
         return guest.stopped;
       }
@@ -562,8 +598,8 @@ export function createIsolateBackend(options: {
       }
 
       async function loadAndRun(call: HookCall, bytes: Uint8Array): Promise<HookResult> {
-        const loaded = await loadGuest(call.moduleId, call.permissions ?? [], bytes);
-        const remembered = loaded.guest ?? { worker: null, dead: true };
+        const loaded = await loadGuest(call.moduleId, call.permissions ?? [], bytes, call.implementation);
+        const remembered = loaded.guest ?? { worker: null, dead: true, packBytes: 0 };
         if (!loaded.ok || released) {
           remembered.dead = true;
           if (loaded.ok) await stopGuest(remembered);
@@ -620,12 +656,45 @@ export function createIsolateBackend(options: {
         moduleId: string,
         permissions: readonly string[],
         bytes: Uint8Array,
+        implementation: HookCall["implementation"],
       ): Promise<{ ok: true; guest: Guest } | { ok: false; error: string; guest?: Guest }> {
         const refused = refuseBinary(moduleId, bytes, captured, permissions);
         if (refused) return { ok: false, error: refused };
-        const memoryBytes = declaredMemory(inspectWasm(bytes), captured);
+        const inspected = inspectWasm(bytes);
+        const wantsResource = inspected.imports.some(
+          (item) => item.module === "cgp.abi" && item.name === "resource_read" && item.kind === "func",
+        );
+        let staged: { pack: ArrayBuffer; index: { path: string; offset: number; length: number }[]; bytes: number } | undefined;
+        let packCharged = 0;
+        const releasePackCharge = () => {
+          if (packCharged === 0) return;
+          packedBytes -= packCharged;
+          packCharged = 0;
+          if (packedBytes < 0) throw new Error("Resource pack ledger went negative.");
+        };
+        if (wantsResource) {
+          const files = packageFilesOf(implementation);
+          if (!files) return { ok: false, error: "Package resources are not available." };
+          const maxSnapshotBytes = snapshotBudgetOf(implementation);
+          if (maxSnapshotBytes === undefined) return { ok: false, error: "Resource pack exceeds the snapshot budget." };
+          try {
+            staged = packPackageFiles(files, bytes, {
+              maxSnapshotBytes,
+              packedBytes,
+              allocate: allocatePackOf(implementation),
+            });
+          } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : "Could not pack package resources." };
+          }
+          packedBytes += staged.bytes;
+          packCharged = staged.bytes;
+        }
+        const memoryBytes = declaredMemory(inspected, captured);
         const reserved = reserve(moduleId, bytes.byteLength, memoryBytes);
-        if (typeof reserved === "string") return { ok: false, error: reserved };
+        if (typeof reserved === "string") {
+          releasePackCharge();
+          return { ok: false, error: reserved };
+        }
         const allowLog = permissions.includes("cgp.log") && captured.allow.has("cgp.log");
         const allowResource = permissions.includes("cgp.resource.read") && captured.allow.has("cgp.resource.read");
         const heapMb = captured.isolateHeapMb ?? Math.max(8, Math.ceil(captured.maxMemoryBytes / (1024 * 1024)) + 8);
@@ -634,16 +703,30 @@ export function createIsolateBackend(options: {
           worker = options.spawn(heapMb);
         } catch (error) {
           refund(reserved);
+          releasePackCharge();
           return { ok: false, error: error instanceof Error ? error.message : "Could not start the isolate." };
         }
-        const guest: Guest = { worker, dead: false };
+        const guest: Guest = { worker, dead: false, packBytes: packCharged };
+        packCharged = 0;
         guests.set(moduleId, guest);
-        const loaded = await callGuest(guest, moduleId, { op: "load", wasm: bytes, allowLog, allowResource });
+        const loaded = await callGuest(
+          guest,
+          moduleId,
+          staged
+            ? { op: "load", allowLog, allowResource, pack: staged.pack, index: staged.index }
+            : { op: "load", wasm: bytes, allowLog, allowResource },
+          staged ? [staged.pack] : [],
+        );
         if (!loaded.ok || released) {
           refund(reserved);
           await stopGuest(guest);
           const message = !loaded.ok ? loaded.error : "This composition has been released.";
           return { ok: false, error: message, guest };
+        }
+        if (staged && staged.pack.byteLength !== 0) {
+          refund(reserved);
+          await stopGuest(guest);
+          return { ok: false, error: "Resource pack was not transferred.", guest };
         }
         return { ok: true, guest };
       }
@@ -693,8 +776,13 @@ export function createIsolateBackend(options: {
         }
       }
 
-      function callGuest(guest: Guest, moduleId: string, message: Record<string, unknown>): Promise<GuestAnswer> {
-        const perform = () => performCall(guest, moduleId, message);
+      function callGuest(
+        guest: Guest,
+        moduleId: string,
+        message: Record<string, unknown>,
+        transfer?: readonly ArrayBuffer[],
+      ): Promise<GuestAnswer> {
+        const perform = () => performCall(guest, moduleId, message, transfer);
         if (host.budget.maxHookMs !== undefined && captured.maxTotalHookMs !== undefined) {
           return host.admit(() => admitComposition(perform));
         }
@@ -703,7 +791,12 @@ export function createIsolateBackend(options: {
         return perform();
       }
 
-      function performCall(guest: Guest, moduleId: string, message: Record<string, unknown>): Promise<GuestAnswer> {
+      function performCall(
+        guest: Guest,
+        moduleId: string,
+        message: Record<string, unknown>,
+        transfer?: readonly ArrayBuffer[],
+      ): Promise<GuestAnswer> {
         if (released) return Promise.resolve({ ok: false, error: "This composition has been released." });
         if (guest.dead || !guest.worker) return Promise.resolve({ ok: false, error: "The isolate was stopped." });
         if (captured.maxTotalHookMs !== undefined && spentMs >= captured.maxTotalHookMs) {
@@ -744,15 +837,18 @@ export function createIsolateBackend(options: {
           worker.addMessageListener(onMessage);
           worker.addErrorListener(onError);
           try {
-            worker.postMessage({
-              ...message,
-              id,
-              maxBytes: captured.maxMemoryBytes,
-              maxBinaryBytes: captured.maxBinaryBytes,
-              maxLogBytes: logBudget.maxBytes,
-              maxLogLines: logBudget.maxLines,
-              maxLogLine: logBudget.maxLine,
-            });
+            worker.postMessage(
+              {
+                ...message,
+                id,
+                maxBytes: captured.maxMemoryBytes,
+                maxBinaryBytes: captured.maxBinaryBytes,
+                maxLogBytes: logBudget.maxBytes,
+                maxLogLines: logBudget.maxLines,
+                maxLogLine: logBudget.maxLine,
+              },
+              transfer,
+            );
           } catch (error) {
             finish({
               ok: false,

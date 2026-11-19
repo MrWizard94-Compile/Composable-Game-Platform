@@ -3,7 +3,7 @@
 **Research date:** 2026-11-19
 **Revised:** 2026-11-19. Delivery remains one transferred pack per guest. Scanner `Buffer`s are not cloned. `BAD_PATH` is grammar, not a case miss. Overlapping `out` and `written` is `BAD_RANGE`. The index stays an array of `{ path, offset, length }` records; the worker converts those records into `[path, { offset, length }]` pairs before `new Map`, then rejects a malformed index before instantiation. Resource-byte accounting is per activation, not process-wide.
 **Research baseline:** `main` at `e4ef0c4` (transport correction recorded; resource import not implemented)
-**Decision status:** Phase 1 is implemented. `inspectWasm` records `hasStart`. `validateWasm`, `refuseBinary`, and `assertGuestBinary` accept `cgp.abi.resource_read` only with the matching grant, and they refuse that import when a start section is present, before instantiation. The worker builds one `cgp.abi` object. `resource_read` throws `Package resources are not available.` and does not read bytes. Packing, transfer, status codes, resource maps, and activation integration are not implemented. Later phases in this study are unchanged.
+**Decision status:** Phase 1 is implemented. Phase 3's pack and status codes are implemented in the isolate. A guest that imports `cgp.abi.resource_read`, holds both grants, and carries `packageFiles` plus `maxSnapshotBytes` on its implementation gets one exact `ArrayBuffer` of its own files. The parent validates the `{ path, offset, length }` index, transfers that buffer, and does not post the scanner's `module.wasm` `Buffer`. The worker builds `new Map(index.map(({ path, offset, length }) => [path, { offset, length }]))`, validates again, and compiles `module.wasm` from that slice. `resource_read` follows the status check order. A missing pack is refused before instantiation. `activateProject` and `activateWasmProject` do not attach the pack yet.
 
 ## Problem
 
@@ -25,7 +25,7 @@ The composition lease is the GC root. The store reader ends when the snapshot ex
 
 ### Where an import is refused
 
-The same allowlist is enforced three times. Phase 1 accepts `cgp.abi.log` and `cgp.abi.resource_read`, and only when the matching grant is present at that layer. A granted `resource_read` still does not copy file bytes.
+The same allowlist is enforced three times. Phase 1 accepts `cgp.abi.log` and `cgp.abi.resource_read`, and only when the matching grant is present at that layer. Phase 3 copies file bytes when that guest's pack was transferred with the load. A granted import with no pack still does not copy.
 
 | Layer | Where | What it sees | What it does not see |
 |---|---|---|---|
@@ -58,7 +58,7 @@ instance = new WebAssembly.Instance(mod, importObject);
 memory = exported.memory;
 ```
 
-Assigning `importObject["cgp.abi"]` inside the loop replaces the whole namespace on every import. With only `log` that is harmless. A second function on `cgp.abi` would leave whichever import was seen last. Phase 1 builds one `cgp.abi` object and adds `log` and `resource_read` onto it. `resource_read` throws `Package resources are not available.` Both must be present when the module imports both. A later phase replaces the throw with the copy described below. There is still no resource map, so the throw is not a successful read.
+Assigning `importObject["cgp.abi"]` inside the loop replaces the whole namespace on every import. With only `log` that is harmless. A second function on `cgp.abi` would leave whichever import was seen last. The worker builds one `cgp.abi` object and adds `log` and `resource_read` onto it. When the load carries a validated pack, `resource_read` copies from that pack. When the map is missing it refuses before instantiation with `Package resources are not available.` Both imports stay on that one object when the module imports both.
 
 `log` is `(ptr: i32, len: i32) -> ()`. The worker reads guest memory with `copyOut`, which treats both arguments as unsigned (`>>> 0`) and rejects `start + size` past `memory.buffer.byteLength`. A bad pointer throws. That throw fails the hook, and the isolate then stops the guest. `log` has no status code to return.
 
@@ -183,7 +183,7 @@ The Node 22 `worker_threads` documentation says a pooled `Buffer` cannot be tran
 
 So a structured clone of the scanner views can copy pool bytes that are not part of any selected file, including bytes from other reads in the same process. The worker-visible view length is not the amount of memory delivered. Design A is not the delivery mechanism.
 
-`GuestProcess.postMessage` in `src/foundations/wasm-backend.ts` and `src/foundations/wasm-browser.ts` takes only the message. `performCall` in `src/foundations/wasm-isolate.ts` calls it that way. A transfer needs an optional transfer-list argument on that abstraction. The Node adapter passes it to `worker.postMessage(message, transfer)`. The browser adapter passes it to the same `Worker.postMessage` form. Messages that do not move a buffer pass an empty list. This study does not change those functions.
+`GuestProcess.postMessage` takes the message and an optional transfer list. The Node and browser adapters pass that list to `Worker.postMessage`. Messages that do not move a buffer pass an empty list.
 
 ### A. Structured-clone the scanned views (rejected)
 
@@ -320,7 +320,7 @@ A module that imports neither function stays valid. Existing `cgp.abi/1` guests 
 
 Windows and macOS can run this import. It does not use the JavaScript activation directory, so Study 010's refusal of JavaScript on those platforms stays as it is. `activateWasmProject` of a wasm-only lock is the path that must work on Linux, Windows, and macOS. A mixed lock still refuses JavaScript before a lease on Windows and macOS, which means that mixed lock does not start there. The Wasm half is not given a special exception that would also import JavaScript.
 
-The browser worker shares the guest runtime and has no verified snapshot. `resource_read` is refused before instantiation even when the manifest lists `cgp.resource.read` and the browser policy lists it too. The browser backend must not open a filesystem, a file URL, or a store path. A later slice can send the same verified records over a bounded channel. That transport is not this study.
+The browser worker shares the guest runtime and does not open a filesystem, a file URL, or a store path. With no verified pack on the load message, `resource_read` is refused before instantiation even when the manifest lists `cgp.resource.read` and the browser policy lists it too. The same worker copies from a pack when the parent has already attached one. Project activation still does not do that.
 
 ## Lifecycle
 

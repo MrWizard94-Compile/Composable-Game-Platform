@@ -70,7 +70,12 @@ const op = {
   i32DivU: [0x6e],
   i32RemU: [0x70],
   i32Load8U: [0x2d, 0x00, 0x00],
+  i32Load: [0x28, 0x02, 0x00],
   i32Store8: [0x3a, 0x00, 0x00],
+  i32Store: [0x36, 0x02, 0x00],
+  i32And: [0x71],
+  i32ShrU: [0x76],
+  memorySize: [0x3f, 0x00],
   memoryGrow: [0x40, 0x00],
 };
 
@@ -1014,4 +1019,272 @@ export function missingAbiGuest(): Uint8Array {
       { name: "cg_out_len", kind: "func", index: 2 },
     ],
   });
+}
+
+export type ResourceScenario = {
+  id: number;
+  name: string;
+  path: Uint8Array;
+  pathAddr: number;
+  pathLen?: number;
+  out: number;
+  outCap: number;
+  written: number;
+  watch: number;
+  grow: boolean;
+};
+
+/** Reads package files through `cgp.abi.resource_read` and reports status plus hex dumps. */
+export function resourceProbeGuest(): { wasm: Uint8Array; scenarios: ResourceScenario[]; noteAddr: number; notePathLength: number } {
+  const encode = (value: string) => text(value);
+  let cursor = 256;
+  const data: { offset: number; bytes: Uint8Array }[] = [];
+  const place = (bytes: Uint8Array) => {
+    const addr = cursor;
+    data.push({ offset: addr, bytes });
+    cursor = addr + bytes.byteLength + 1;
+    return addr;
+  };
+  const notePath = encode("note.txt");
+  const noteAddr = place(notePath);
+  const paths = {
+    note: { bytes: notePath, addr: noteAddr },
+    empty: { bytes: encode("empty.txt"), addr: 0 },
+    wasm: { bytes: encode("module.wasm"), addr: 0 },
+    wrong: { bytes: encode("Note.txt"), addr: 0 },
+    proto: { bytes: encode("__proto__"), addr: 0 },
+    ctor: { bytes: encode("constructor"), addr: 0 },
+    bad: { bytes: Uint8Array.of(0xff), addr: 0 },
+    dotdot: { bytes: encode("../nope"), addr: 0 },
+    slash: { bytes: encode("a\\b"), addr: 0 },
+    absolute: { bytes: encode("/abs"), addr: 0 },
+    percent: { bytes: encode("a/%2e"), addr: 0 },
+    deep16: { bytes: encode(Array.from({ length: 16 }, () => "a").join("/")), addr: 0 },
+    deep17: { bytes: encode(Array.from({ length: 17 }, () => "a").join("/")), addr: 0 },
+    long: { bytes: encode("a".repeat(241)), addr: 0 },
+    missing: { bytes: encode("missing.txt"), addr: 0 },
+    end: { bytes: encode("end.txt"), addr: 0 },
+    other: { bytes: encode("other-pack.txt"), addr: 0 },
+    dot: { bytes: encode("."), addr: 0 },
+  };
+  for (const key of Object.keys(paths) as (keyof typeof paths)[]) {
+    if (key === "note") continue;
+    paths[key].addr = place(paths[key].bytes);
+  }
+  data.push({ offset: 3000, bytes: new Uint8Array(400).fill(0xa5) });
+  data.push({ offset: 3100, bytes: Uint8Array.of(0xff, 0xff, 0xff, 0xff) });
+  data.push({ offset: 65520, bytes: new Uint8Array(16).fill(0xa5) });
+
+  const scenarios: ResourceScenario[] = [];
+  const add = (name: string, spec: Omit<ResourceScenario, "id" | "name">) => {
+    scenarios.push({ id: scenarios.length + 1, name, ...spec });
+  };
+  const read = (name: string, path: { bytes: Uint8Array; addr: number }, extra: Partial<ResourceScenario> = {}) => {
+    add(name, {
+      path: path.bytes,
+      pathAddr: path.addr,
+      out: 3000,
+      outCap: 64,
+      written: 3100,
+      watch: 3000,
+      grow: false,
+      ...extra,
+    });
+  };
+  read("note", paths.note);
+  read("empty", paths.empty, { outCap: 0 });
+  read("empty-overlap", paths.empty, { out: 3100, outCap: 0, written: 3100, watch: 3000 });
+  read("missing", paths.missing);
+  read("case", paths.wrong);
+  read("utf8", paths.bad);
+  read("dotdot", paths.dotdot);
+  read("slash", paths.slash);
+  read("absolute", paths.absolute);
+  read("percent", paths.percent);
+  read("deep16", paths.deep16);
+  read("deep17", paths.deep17);
+  read("long", paths.long);
+  read("empty-name", paths.note, { pathLen: 0 });
+  read("too-small", paths.note, { outCap: 0 });
+  read("short", paths.note, { outCap: 4 });
+  read("proto", paths.proto);
+  read("constructor", paths.ctor);
+  read("wasm", paths.wasm, { outCap: 40000, written: 60000, watch: 3000 });
+  read("end", paths.end, { out: 65532, outCap: 4, watch: 65520 });
+  read("adjacent", paths.end, { out: 3200, outCap: 4, written: 3204, watch: 3200 });
+  read("overlap", paths.end, { out: 3300, outCap: 4, written: 3302, watch: 3300 });
+  read("high-written", paths.note, { written: -16 });
+  read("high-out", paths.note, { out: -2147483648 });
+  read("high-length", paths.note, { pathLen: -2147483648 });
+  read("path-range", paths.note, { pathAddr: 70000, pathLen: 4 });
+  read("written-range", paths.note, { written: 65534 });
+  read("out-range", paths.end, { out: 65534, outCap: 4 });
+  read("other", paths.other);
+  read("dot", paths.dot);
+  read("grow", paths.note, { out: 65536, outCap: 64, watch: 65536, grow: true });
+
+  const ELSE = [0x05];
+  const dump = (start: number, size: number, dest: number, count: number): number[] => [
+    ...op.i32Const(start),
+    ...op.i32Const(size),
+    ...op.call(1),
+    ...op.i32Eqz,
+    ...op.if,
+    ...Array.from({ length: count * 2 }, (_, index) => [...op.i32Const(dest + index), ...op.i32Const(0x66), ...op.i32Store8]).flat(),
+    ...ELSE,
+    ...Array.from({ length: count }, (_, index) => [
+      ...op.i32Const(start + index),
+      ...op.i32Load8U,
+      ...op.i32Const(dest + index * 2),
+      ...op.call(3),
+    ]).flat(),
+    ...op.end,
+  ];
+  const scenarioBody = (item: ResourceScenario): number[] => {
+    const pathLen = item.pathLen ?? item.path.byteLength;
+    return [
+      ...op.block,
+      ...op.localGet(1),
+      ...op.i32Load8U,
+      ...op.i32Const(item.id),
+      ...op.i32Ne,
+      ...op.brIf(0),
+      ...op.memorySize,
+      ...op.localSet(4),
+      ...(item.grow ? [...op.i32Const(1), ...op.memoryGrow, ...op.drop] : []),
+      ...op.i32Const(item.pathAddr),
+      ...op.i32Const(pathLen),
+      ...op.i32Const(item.out),
+      ...op.i32Const(item.outCap),
+      ...op.i32Const(item.written),
+      ...op.call(0),
+      ...op.localSet(3),
+      ...op.memorySize,
+      ...op.localSet(5),
+      ...op.i32Const(2000),
+      ...op.localGet(3),
+      ...op.i32Const(48),
+      ...op.i32Add,
+      ...op.i32Store8,
+      ...dump(item.written, 4, 2001, 4),
+      ...dump(item.watch, 16, 2009, 16),
+      ...op.localGet(4),
+      ...op.i32Const(2041),
+      ...op.call(3),
+      ...op.localGet(5),
+      ...op.i32Const(2043),
+      ...op.call(3),
+      ...op.i32Const(2000),
+      ...op.globalSet(1),
+      ...op.i32Const(45),
+      ...op.globalSet(2),
+      ...op.i32Const(0),
+      ...op.ret,
+      ...op.end,
+    ];
+  };
+
+  const hook: number[] = [
+    ...op.localGet(0),
+    ...op.i32Const(2),
+    ...op.i32Eq,
+    ...op.if,
+    ...op.i32Const(noteAddr),
+    ...op.i32Const(notePath.byteLength),
+    ...op.i32Const(3000),
+    ...op.i32Const(64),
+    ...op.i32Const(3100),
+    ...op.call(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...scenarios.flatMap(scenarioBody),
+    ...op.i32Const(0),
+  ];
+
+  const wasm = compileWasm({
+    types: [...STANDARD_TYPES, { params: 5, results: 1 }, { params: 2, results: 0 }, { params: 2, results: 1 }],
+    imports: [{ module: "cgp.abi", name: "resource_read", type: 3 }],
+    funcs: [
+      {
+        type: 5,
+        locals: 1,
+        body: [
+          ...op.memorySize,
+          ...op.i32Const(65536),
+          ...op.i32Mul,
+          ...op.localSet(2),
+          ...op.localGet(1),
+          ...op.localGet(2),
+          ...op.i32GtU,
+          ...op.if,
+          ...op.i32Const(0),
+          ...op.ret,
+          ...op.end,
+          ...op.localGet(0),
+          ...op.localGet(2),
+          ...op.localGet(1),
+          ...op.i32Sub,
+          ...op.i32GtU,
+          ...op.if,
+          ...op.i32Const(0),
+          ...op.ret,
+          ...op.end,
+          ...op.i32Const(1),
+        ],
+      },
+      {
+        type: 1,
+        body: [
+          ...op.localGet(0),
+          ...op.i32Const(10),
+          ...op.i32LtU,
+          ...op.if,
+          ...op.localGet(0),
+          ...op.i32Const(48),
+          ...op.i32Add,
+          ...op.ret,
+          ...op.end,
+          ...op.localGet(0),
+          ...op.i32Const(87),
+          ...op.i32Add,
+        ],
+      },
+      {
+        type: 4,
+        body: [
+          ...op.localGet(1),
+          ...op.localGet(0),
+          ...op.i32Const(4),
+          ...op.i32ShrU,
+          ...op.i32Const(15),
+          ...op.i32And,
+          ...op.call(2),
+          ...op.i32Store8,
+          ...op.localGet(1),
+          ...op.i32Const(1),
+          ...op.i32Add,
+          ...op.localGet(0),
+          ...op.i32Const(15),
+          ...op.i32And,
+          ...op.call(2),
+          ...op.i32Store8,
+        ],
+      },
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      { type: 0, locals: 4, body: hook },
+    ],
+    memory: { min: 1, max: 2 },
+    globals: [{ init: 4096 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(4),
+    data,
+  });
+  return { wasm, scenarios, noteAddr, notePathLength: notePath.byteLength };
 }

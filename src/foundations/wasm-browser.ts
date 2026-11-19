@@ -34,8 +34,8 @@ function defaultSpawn(): GuestProcess {
   const wrappers = new Map<(message: WorkerMessage) => void, (event: MessageEvent) => void>();
   const errors = new Map<(error: Error) => void, (event: ErrorEvent) => void>();
   return {
-    postMessage(message) {
-      worker.postMessage(message);
+    postMessage(message, transfer) {
+      worker.postMessage(message, transfer ? [...transfer] : []);
     },
     addMessageListener(listener) {
       const wrapped = (event: MessageEvent) => listener(event.data as WorkerMessage);
