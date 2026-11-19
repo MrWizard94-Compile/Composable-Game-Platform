@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, opendirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -85,9 +85,11 @@ export type ProjectActivation = {
   composition: CompositionResult;
   /**
    * Shuts down Foundations, disposes a Wasm backend when one was created, removes the
-   * owned JavaScript copies, then releases the composition lease. A second successful
-   * call returns `already: true`. A failed cleanup rejects again until the unfinished
-   * step succeeds, and it never reports the lease as released when release threw.
+   * owned JavaScript copies, then releases the composition lease. Each step is marked
+   * done only after it returns. A second call after every step has succeeded returns
+   * `already: true`. A failed cleanup rejects again until that step succeeds. The
+   * source path is kept until removal returns, and the lease is not reported released
+   * when release throws.
    */
   shutdown: () => Promise<ShutdownReport>;
   /** Store lease held until shutdown finishes. The release token is not exposed. */
@@ -118,6 +120,151 @@ const JAVASCRIPT_OPT_IN =
   "Project activation refuses to import JavaScript until the caller opts in with javascript: \"trusted-in-process\". " +
   "JavaScript runs in this Node process and can use its filesystem, network, and operating-system access. " +
   "It is not sandboxed. A Wasm import allowlist does not cover it.";
+
+const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+
+function systemCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function modeOctal(mode: number): string {
+  return (mode & 0o777).toString(8).padStart(3, "0");
+}
+
+/**
+ * Owner write and execute are required before a directory is walked.
+ * This stays in force when the process is root. CAP_DAC_OVERRIDE would
+ * otherwise hide a permission change and let a later shutdown look finished.
+ */
+function assertDirectoryRemovable(label: string, mode: number): void {
+  if ((mode & 0o200) !== 0 && (mode & 0o100) !== 0) return;
+  throw new Error(
+    "Activation source cleanup cannot remove " + label +
+    " because its permissions (" + modeOctal(mode) + ") do not allow recursive removal.",
+  );
+}
+
+function refuseSymlink(label: string): never {
+  throw new Error("Activation source cleanup refuses to follow a symlink at " + label + ".");
+}
+
+function procDirectory(fd: number, name?: string): string {
+  const base = "/proc/self/fd/" + String(fd);
+  return name === undefined ? base : base + "/" + name;
+}
+
+/**
+ * Deletes one activation-owned directory.
+ *
+ * The walk uses the directory file descriptor, not a path looked up again from
+ * the filesystem root, and it never follows a symlink. A symlink entry is
+ * unlinked. Its target is not opened and not deleted. This does not contain
+ * trusted in-process JavaScript: that code can still copy bytes out, replace
+ * this directory, or chmod it again after a successful retry.
+ */
+function removeDirectoryContents(fd: number, label: string): void {
+  const listing = opendirSync(procDirectory(fd));
+  const names: string[] = [];
+  try {
+    let entry = listing.readSync();
+    while (entry !== null) {
+      names.push(entry.name);
+      entry = listing.readSync();
+    }
+  } finally {
+    listing.closeSync();
+  }
+  for (const name of names) {
+    if (name.length === 0 || name === "." || name === ".." || name.includes("/") || name.includes("\0")) {
+      throw new Error("Activation source cleanup refuses an unsafe directory entry under " + label + ".");
+    }
+    const childLabel = label + "/" + name;
+    const childPath = procDirectory(fd, name);
+    let info;
+    try {
+      info = lstatSync(childPath);
+    } catch (error) {
+      if (systemCode(error) === "ENOENT") continue;
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      unlinkSync(childPath);
+      continue;
+    }
+    if (info.isDirectory()) {
+      let childFd: number;
+      try {
+        childFd = openSync(childPath, DIRECTORY_OPEN_FLAGS);
+      } catch (error) {
+        const code = systemCode(error);
+        if (code === "ELOOP" || code === "ENOTDIR") {
+          unlinkSync(childPath);
+          continue;
+        }
+        throw error;
+      }
+      try {
+        const opened = fstatSync(childFd);
+        if (!opened.isDirectory() || opened.dev !== info.dev || opened.ino !== info.ino) refuseSymlink(childLabel);
+        assertDirectoryRemovable(childLabel, opened.mode);
+        removeDirectoryContents(childFd, childLabel);
+        const after = lstatSync(childPath);
+        if (after.isSymbolicLink() || !after.isDirectory() || after.dev !== opened.dev || after.ino !== opened.ino) {
+          refuseSymlink(childLabel);
+        }
+        rmdirSync(childPath);
+      } finally {
+        closeSync(childFd);
+      }
+      continue;
+    }
+    unlinkSync(childPath);
+  }
+}
+
+function removeOwnedActivationDirectory(directory: string): void {
+  if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_DIRECTORY !== "number") {
+    throw new Error("Activation source cleanup requires O_NOFOLLOW and O_DIRECTORY.");
+  }
+  let fd: number;
+  try {
+    fd = openSync(directory, DIRECTORY_OPEN_FLAGS);
+  } catch (error) {
+    const code = systemCode(error);
+    if (code === "ENOENT") return;
+    if (code === "EACCES" || code === "EPERM") {
+      throw new Error(
+        "Activation source cleanup cannot remove " + directory +
+        " because its permissions do not allow recursive removal.",
+      );
+    }
+    let info;
+    try {
+      info = lstatSync(directory);
+    } catch {
+      throw error;
+    }
+    if (info.isSymbolicLink()) refuseSymlink(directory);
+    throw new Error("Activation source cleanup expected a directory at " + directory + ".");
+  }
+  try {
+    const opened = fstatSync(fd);
+    assertDirectoryRemovable(directory, opened.mode);
+    const current = lstatSync(directory);
+    if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== opened.dev || current.ino !== opened.ino) {
+      refuseSymlink(directory);
+    }
+    removeDirectoryContents(fd, directory);
+    const again = lstatSync(directory);
+    if (again.isSymbolicLink() || !again.isDirectory() || again.dev !== opened.dev || again.ino !== opened.ino) {
+      refuseSymlink(directory);
+    }
+    rmdirSync(directory);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 async function loadOwnedJavaScript(
   sourceRoot: string,
@@ -201,10 +348,10 @@ async function runProjectActivation(
   const releaseLease = () => releaseCompositionLease(storeDirectory, lease.leaseId, lease.token);
   let sourceRoot: string | undefined;
   const removeSources = () => {
-    if (!sourceRoot) return;
     const path = sourceRoot;
+    if (path === undefined) return;
+    removeOwnedActivationDirectory(path);
     sourceRoot = undefined;
-    rmSync(path, { recursive: true, force: true });
   };
 
   let snapshot;

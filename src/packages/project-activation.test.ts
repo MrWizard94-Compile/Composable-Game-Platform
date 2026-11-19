@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,18 @@ function markerSource(label: string): string {
     "export const implementation = {};",
     "",
   ].join("\n");
+}
+async function rejectedShutdown(shutdown: () => Promise<{ already: boolean }>): Promise<string> {
+  try {
+    const report = await shutdown();
+    assert.fail("shutdown resolved already=" + String(report.already));
+  } catch (error) {
+    if (error instanceof assert.AssertionError) throw error;
+    if (error instanceof AggregateError) {
+      return [error.message, ...error.errors.map((item) => item instanceof Error ? item.message : String(item))].join("\n");
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 test("refuses JavaScript until the caller opts into trusted in-process execution", async (t) => {
@@ -319,4 +331,160 @@ test("a failed lease release stays visible and can be retried", async (t) => {
   assert.equal(stopped.already, false);
   assert.deepEqual(leaseNames(store), []);
   assert.equal((await activation.shutdown()).already, true);
+});
+
+test("retries source cleanup until the owned directory is removable and does not follow symlinks", async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const dirMarker = join(root, "source-dir");
+  const shutdownMarker = join(root, "shutdown");
+  const sentinel = join(root, "sentinel.txt");
+  const sentinelDir = join(root, "sentinel-dir");
+  writeFileSync(sentinel, "keep-file");
+  mkdirSync(sentinelDir);
+  writeFileSync(join(sentinelDir, "keep.txt"), "keep-dir");
+  const source = [
+    "import { appendFileSync, chmodSync, symlinkSync, writeFileSync } from \"node:fs\";",
+    "import { dirname } from \"node:path\";",
+    "import { fileURLToPath } from \"node:url\";",
+    "const here = dirname(fileURLToPath(import.meta.url));",
+    "const dirMarker = process.env.CGP_SOURCE_CLEANUP_DIR;",
+    "const shutdownMarker = process.env.CGP_SOURCE_CLEANUP_SHUTDOWN;",
+    "const sentinelFile = process.env.CGP_SOURCE_CLEANUP_SENTINEL;",
+    "const sentinelDir = process.env.CGP_SOURCE_CLEANUP_SENTINEL_DIR;",
+    "if (dirMarker) writeFileSync(dirMarker, here);",
+    "if (sentinelFile) symlinkSync(sentinelFile, here + \"/escape-file\");",
+    "if (sentinelDir) symlinkSync(sentinelDir, here + \"/escape-dir\");",
+    "export const implementation = {",
+    "  shutdown() {",
+    "    if (shutdownMarker) appendFileSync(shutdownMarker, \"x\");",
+    "    chmodSync(here, 0o555);",
+    "  },",
+    "};",
+    "",
+  ].join("\n");
+  const staging = await stageJavaScript(root, "org.example.cleanup", source);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.cleanup-project", name: "Cleanup", modules: [{ moduleId: "org.example.cleanup", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_SOURCE_CLEANUP_DIR = dirMarker;
+  process.env.CGP_SOURCE_CLEANUP_SHUTDOWN = shutdownMarker;
+  process.env.CGP_SOURCE_CLEANUP_SENTINEL = sentinel;
+  process.env.CGP_SOURCE_CLEANUP_SENTINEL_DIR = sentinelDir;
+  let tempDir = "";
+  let activation: Awaited<ReturnType<typeof activateProject>> | undefined;
+  try {
+    activation = await activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" });
+    tempDir = readFileSync(dirMarker, "utf8");
+    assert.equal(existsSync(join(tempDir, "escape-file")), true);
+    assert.equal(lstatSync(join(tempDir, "escape-dir")).isSymbolicLink(), true);
+    const directory = join(store, ".cgp-store.composition-leases");
+    const leasePath = join(directory, activation.leaseId + ".json");
+    const saved = readFileSync(leasePath);
+    rmSync(leasePath);
+    mkdirSync(leasePath);
+    const first = await rejectedShutdown(activation.shutdown);
+    assert.match(first, /permissions \(555\)/);
+    assert.match(first, /Composition lease must be a regular file/);
+    assert.equal((lstatSync(tempDir).mode & 0o777), 0o555);
+    assert.equal(existsSync(leasePath), true);
+    assert.equal(readFileSync(sentinel, "utf8"), "keep-file");
+    assert.equal(readFileSync(join(sentinelDir, "keep.txt"), "utf8"), "keep-dir");
+    const second = await rejectedShutdown(activation.shutdown);
+    assert.match(second, /permissions \(555\)/);
+    assert.match(second, /Composition lease must be a regular file/);
+    assert.equal(readFileSync(shutdownMarker, "utf8"), "x");
+    rmSync(leasePath, { recursive: true, force: true });
+    writeFileSync(leasePath, saved);
+    const third = await rejectedShutdown(activation.shutdown);
+    assert.match(third, /permissions \(555\)/);
+    assert.equal(/regular file/.test(third), false);
+    assert.equal(existsSync(tempDir), true);
+    assert.deepEqual(leaseNames(store), []);
+    assert.equal(readFileSync(sentinel, "utf8"), "keep-file");
+    const fourth = await rejectedShutdown(activation.shutdown);
+    assert.match(fourth, /permissions \(555\)/);
+    chmodSync(tempDir, 0o755);
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.equal(existsSync(tempDir), false);
+    tempDir = "";
+    assert.equal(readFileSync(sentinel, "utf8"), "keep-file");
+    assert.equal(readFileSync(join(sentinelDir, "keep.txt"), "utf8"), "keep-dir");
+    assert.equal(readFileSync(shutdownMarker, "utf8"), "x");
+    assert.equal((await activation.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_SOURCE_CLEANUP_DIR;
+    delete process.env.CGP_SOURCE_CLEANUP_SHUTDOWN;
+    delete process.env.CGP_SOURCE_CLEANUP_SENTINEL;
+    delete process.env.CGP_SOURCE_CLEANUP_SENTINEL_DIR;
+    if (tempDir && existsSync(tempDir)) {
+      const info = lstatSync(tempDir);
+      if (info.isSymbolicLink()) unlinkSync(tempDir);
+      else {
+        chmodSync(tempDir, 0o755);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+    if (activation) await activation.shutdown().catch(() => undefined);
+  }
+});
+
+test("source cleanup does not follow a symlink swapped in for the activation directory", async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const dirMarker = join(root, "source-dir");
+  const outside = join(root, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "keep.txt"), "keep");
+  const source = [
+    "import { writeFileSync } from \"node:fs\";",
+    "import { dirname } from \"node:path\";",
+    "import { fileURLToPath } from \"node:url\";",
+    "const marker = process.env.CGP_SOURCE_LINK_DIR;",
+    "if (marker) writeFileSync(marker, dirname(fileURLToPath(import.meta.url)));",
+    "export const implementation = {};",
+    "",
+  ].join("\n");
+  const staging = await stageJavaScript(root, "org.example.linkswap", source);
+  await registerStagedPackage(staging, store);
+  const project = { profileId: "org.example.linkswap-project", name: "Link", modules: [{ moduleId: "org.example.linkswap", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  process.env.CGP_SOURCE_LINK_DIR = dirMarker;
+  let tempDir = "";
+  let parked = "";
+  let activation: Awaited<ReturnType<typeof activateProject>> | undefined;
+  try {
+    activation = await activateProject(store, project, lock, { maxSnapshotBytes: 1024 * 1024, javascript: "trusted-in-process" });
+    tempDir = readFileSync(dirMarker, "utf8");
+    parked = tempDir + "-parked";
+    renameSync(tempDir, parked);
+    symlinkSync(outside, tempDir);
+    const first = await rejectedShutdown(activation.shutdown);
+    assert.match(first, /refuses to follow a symlink/);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal(existsSync(join(parked, "0.mjs")), true);
+    assert.deepEqual(leaseNames(store), []);
+    const second = await rejectedShutdown(activation.shutdown);
+    assert.match(second, /refuses to follow a symlink/);
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    unlinkSync(tempDir);
+    renameSync(parked, tempDir);
+    parked = "";
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.equal(existsSync(tempDir), false);
+    tempDir = "";
+    assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal((await activation.shutdown()).already, true);
+  } finally {
+    delete process.env.CGP_SOURCE_LINK_DIR;
+    if (tempDir && existsSync(tempDir)) {
+      const info = lstatSync(tempDir);
+      if (info.isSymbolicLink()) unlinkSync(tempDir);
+      else rmSync(tempDir, { recursive: true, force: true });
+    }
+    if (parked && existsSync(parked)) rmSync(parked, { recursive: true, force: true });
+    if (activation) await activation.shutdown().catch(() => undefined);
+  }
 });

@@ -46,7 +46,11 @@ Importing trusted JavaScript runs its top-level code. That can happen before `in
 
 The lease covers every locked package, of either runtime. It is acquired before the snapshot and released only after Foundations shutdown, Wasm backend disposal when a Wasm backend exists, and removal of the owned JavaScript copies. It does not hold a reader marker, so unrelated objects can still be collected.
 
-Shutdown is idempotent after success (`already: true`). If a cleanup step throws, the error is returned as that failure. The call does not report the lease released. A later shutdown retries only the unfinished steps.
+Shutdown is idempotent after every cleanup step has succeeded (`already: true`). Foundations shutdown, Wasm disposal, source-directory removal, and lease release are each marked done only after that step returns. The source path is kept until removal returns, so a failed `rm` is not treated as a finished step on the next call.
+
+Removal walks the directory file descriptor and does not follow symlinks. A symlink entry is unlinked and its target is left in place. A directory whose owner mode lacks write or execute is refused, including when the process is root, so `CAP_DAC_OVERRIDE` cannot hide the failure. A later shutdown retries only the unfinished steps. If lease release throws, the error is that failure. The call does not report the lease released.
+
+Trusted JavaScript can still read its temporary module URL, change permissions, replace the directory, or copy bytes out. This cleanup does not contain that code. Top-level side effects are not rolled back.
 
 A failed activation releases what it acquired. An import failure releases the lease before a backend is left running. An initialization or Wasm budget failure returns the Foundations result when Foundations does, then shuts the activation down. If that cleanup also fails, both failures are reported.
 
@@ -66,4 +70,4 @@ Separate from activation: `store:gc-reconcile --apply` no longer drops token-own
 
 ## Conformance coverage
 
-Opt-in refusal, verification before import, closed-policy refusal, import and initialization cleanup, mixed cross-backend activation, live retention, Wasm budget cleanup, lock rejection, and a visible lease-release retry are covered from `src/packages/project-activation.test.ts`. Existing Wasm activation tests still cover `activateWasmProject`. Claim ownership is covered from `src/packages/store-retention.test.ts`.
+Opt-in refusal, verification before import, closed-policy refusal, import and initialization cleanup, mixed cross-backend activation, live retention, Wasm budget cleanup, lock rejection, and a visible lease-release retry are covered from `src/packages/project-activation.test.ts`. That file also covers a source directory whose mode blocks removal, a symlink swapped in for that directory, repeated shutdown while cleanup is still failing, and a lease release that succeeds while source cleanup is still failing. Existing Wasm activation tests still cover `activateWasmProject`. Claim ownership is covered from `src/packages/store-retention.test.ts`.
