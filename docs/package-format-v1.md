@@ -43,7 +43,7 @@ The descriptor is separate from the runtime manifest. It must not repeat module 
 
 The JavaScript entrypoint must provide the named `implementation` export. Format v1 permits static imports from Node built-in modules using valid `node:` specifiers. Relative imports, third-party/bare imports, dynamic `import()`, `require()`, and `require.resolve()` are refused. The check uses esbuild's parser/bundler in memory; it does not evaluate or import the module. This is a package policy check, not a sandbox. JavaScript remains trusted in-process code.
 
-The Wasm check compiles the Core module and inspects its imports, exports, memory, and table declarations without instantiating it. Only the `cgp.abi.log` function import is permitted, and only when the runtime manifest declares `cgp.log`. Runtime execution remains subject to the existing backend policy and resource limits.
+The Wasm check compiles the Core module and inspects its imports, exports, memory, and table declarations without instantiating it. The permitted function imports are `cgp.abi.log`, when the manifest declares `cgp.log`, and `cgp.abi.resource_read`, when the manifest declares `cgp.resource.read`. A module that imports `resource_read` and has a start section is refused. The package check does not apply the execution policy and does not read package files through that import. Runtime execution remains subject to the existing backend policy and resource limits.
 
 ## Strict JSON
 

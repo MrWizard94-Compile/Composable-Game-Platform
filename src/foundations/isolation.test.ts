@@ -11,6 +11,7 @@ import { callService, publish, runPipeline } from "./dispatch.ts";
 import { CROSS_POLICY, createCrossBackend } from "./cross-backend.ts";
 import { ABI_ID, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, materializeAbiValue, mintAbiHandle } from "./abi.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
+import { createGuestRuntime } from "./wasm-guest-runtime.mjs";
 import {
   counterGuest,
   echoGuest,
@@ -20,7 +21,11 @@ import {
   logGuest,
   loopingGuest,
   openTableGuest,
+  quietStartGuest,
   readerGuest,
+  resourceGuest,
+  resourceLogGuest,
+  resourceStartGuest,
   sharedGuest,
   startLoopGuest,
   storeGuest,
@@ -76,6 +81,7 @@ describe("isolated wasm execution", () => {
     assert.ok(discovered[0]?.implementation?.wasm && discovered[0].implementation.wasm.byteLength > 0);
     const inspected = inspectWasm(discovered[0].implementation.wasm);
     assert.equal("min" in inspected.memory, true);
+    assert.equal(inspected.hasStart, true);
     await assert.rejects(() => loadInProcessImplementations(discovered));
     assert.equal((globalThis as { __cgDiscoveryRan?: boolean }).__cgDiscoveryRan, true);
     rmSync(root, { recursive: true, force: true });
@@ -169,6 +175,76 @@ describe("isolated wasm execution", () => {
     assert.equal(live.runtimeActive, true, live.diagnostics.map((item) => item.message).join("\n"));
     assert.ok(allowed.takeLogs().some((line) => line === "[org.example.log] ping"));
     await live.shutdown();
+  });
+
+  it("requires both grants before resource_read is linked, and the link does not read", async () => {
+    const policyOnly = createWasmBackend();
+    const noManifest = await compose([pkg("org.example.resource", resourceGuest())], {
+      backend: policyOnly,
+      policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"] }),
+    });
+    assert.equal(noManifest.runtimeActive, false);
+    assert.match(messages(noManifest), /Capability cgp\.resource\.read is not granted/);
+    policyOnly.dispose();
+
+    const manifestOnly = createWasmBackend();
+    const noPolicy = await compose([pkg("org.example.resource", resourceGuest(), { permissions: ["cgp.resource.read"] })], {
+      backend: manifestOnly,
+      policy: wasmPolicy(),
+    });
+    assert.equal(noPolicy.runtimeActive, false);
+    assert.match(messages(noPolicy), /Capability cgp\.resource\.read is not granted/);
+    manifestOnly.dispose();
+
+    const both = createWasmBackend();
+    const refused = await compose([pkg("org.example.resource", resourceGuest(), { permissions: ["cgp.resource.read"] })], {
+      backend: both,
+      policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"] }),
+    });
+    assert.equal(refused.runtimeActive, false);
+    assert.match(messages(refused), /Package resources are not available/);
+    assert.doesNotMatch(messages(refused), /Unauthorized import/);
+    assert.equal(both.openSessions(), 0);
+    both.dispose();
+
+    const plain = createWasmBackend();
+    const live = await compose([pkg("org.example.plain", storeGuest("{}"))], { backend: plain, policy: wasmPolicy() });
+    assert.equal(live.runtimeActive, true, messages(live));
+    await live.shutdown();
+    plain.dispose();
+  });
+
+  it("links log and resource_read on one namespace", async () => {
+    const backend = createWasmBackend();
+    const result = await compose(
+      [pkg("org.example.both", resourceLogGuest(), { permissions: ["cgp.log", "cgp.resource.read"] })],
+      { backend, policy: wasmPolicy({ allowCapabilities: ["cgp.log", "cgp.resource.read"] }) },
+    );
+    assert.equal(result.runtimeActive, false);
+    assert.match(messages(result), /Initialize of "org\.example\.both" threw: Package resources are not available/);
+    assert.ok(backend.takeLogs().some((line) => line === "[org.example.both] ping"));
+    assert.equal(backend.openSessions(), 0);
+    backend.dispose();
+  });
+
+  it("refuses resource_read with a start section before that function runs", async () => {
+    const backend = createWasmBackend();
+    const result = await compose(
+      [pkg("org.example.start", resourceStartGuest(), { permissions: ["cgp.resource.read"] })],
+      { backend, policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"] }) },
+    );
+    assert.equal(result.runtimeActive, false);
+    assert.match(messages(result), /Module "org\.example\.start" imports cgp\.abi\.resource_read and has a start section/);
+    assert.doesNotMatch(messages(result), /Package resources are not available/);
+    assert.doesNotMatch(messages(result), /Time limit exceeded/);
+    assert.equal(backend.openSessions(), 0);
+    backend.dispose();
+
+    const quiet = createWasmBackend();
+    const live = await compose([pkg("org.example.quiet", quietStartGuest())], { backend: quiet, policy: wasmPolicy() });
+    assert.equal(live.runtimeActive, true, messages(live));
+    await live.shutdown();
+    quiet.dispose();
   });
 
   it("keeps guest memories apart and does not call a JavaScript hook", async () => {
@@ -928,6 +1004,112 @@ describe("javascript and a guest share JSON", () => {
     await wasm.dispose();
   });
 });
+
+describe("wasm start section and resource allowlist", () => {
+  it("records a missing start section and a valid one without instantiating", () => {
+    assert.equal(inspectWasm(storeGuest("{}")).hasStart, false);
+    assert.equal(inspectWasm(startLoopGuest()).hasStart, true);
+    const wideIndex = inspectWasm(wasmFile([section(8, [0x80, 0x01])]));
+    assert.equal(wideIndex.hasStart, true);
+    assert.deepEqual(wideIndex.imports, []);
+  });
+
+  it("rejects a malformed start section and a malformed function index", () => {
+    assert.throws(() => inspectWasm(wasmFile([section(8, [])])), /Malformed WebAssembly start section/);
+    assert.throws(() => inspectWasm(wasmFile([section(8, [0x00, 0x00])])), /Malformed WebAssembly start section/);
+    assert.throws(() => inspectWasm(wasmFile([[0x08, 0x05]])), /Truncated WebAssembly binary/);
+    assert.throws(() => inspectWasm(wasmFile([section(8, [0x80])])), /Malformed WebAssembly function index/);
+    assert.throws(
+      () => inspectWasm(wasmFile([section(8, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80])])),
+      /Malformed WebAssembly function index/,
+    );
+  });
+
+  it("rejects a duplicate start section and does not enforce section order", () => {
+    assert.throws(
+      () => inspectWasm(wasmFile([section(8, [0x00]), section(8, [0x00])])),
+      /Malformed WebAssembly start section/,
+    );
+    const ordered = wasmFile([section(1, [0x01, 0x60, 0x00, 0x00]), section(8, [0x00])]);
+    assert.equal(inspectWasm(ordered).hasStart, true);
+    const startFirst = wasmFile([section(8, [0x00]), section(1, [0x01, 0x60, 0x00, 0x00])]);
+    assert.equal(inspectWasm(startFirst).hasStart, true);
+    assert.throws(() => new WebAssembly.Module(startFirst.slice().buffer));
+  });
+
+  it("repeats the start-section refusal inside the worker before the stub can run", () => {
+    const started = loadGuest(resourceStartGuest(), { allowResource: true });
+    assert.equal(started?.ok, false);
+    assert.match(started?.text ?? "", /Guest imports cgp\.abi\.resource_read and has a start section/);
+    assert.doesNotMatch(started?.text ?? "", /Package resources are not available/);
+
+    const index = loadGuest(wasmFile([section(8, [0x80])]), { allowResource: true });
+    assert.match(index?.text ?? "", /Malformed WebAssembly function index/);
+
+    const denied = loadGuest(resourceGuest(), {});
+    assert.match(denied?.text ?? "", /Capability cgp\.resource\.read is not granted/);
+
+    const plain = loadGuest(storeGuest("{}"), {});
+    assert.equal(plain?.ok, true);
+  });
+
+  it("keeps both imports after a resource refusal inside the worker", () => {
+    const sent: Array<{ id?: number; ok?: boolean; text?: string }> = [];
+    const runtime = createGuestRuntime((id, ok, text) => {
+      sent.push({ id, ok, text });
+    });
+    const load = {
+      id: 1,
+      op: "load",
+      wasm: resourceLogGuest(),
+      allowLog: true,
+      allowResource: true,
+      maxBytes: 65536,
+      maxBinaryBytes: 65536,
+    };
+    runtime.onMessage(load);
+    assert.equal(sent[0]?.ok, true, sent[0]?.text);
+    runtime.onMessage({ id: 2, op: "hook", hook: 0, json: "{}", maxBytes: 65536 });
+    const registered = JSON.parse(sent[1]?.text ?? "{}") as { ok?: boolean; logs?: string[] };
+    assert.equal(registered.ok, true);
+    assert.deepEqual(registered.logs, ["ping"]);
+    runtime.onMessage({ id: 3, op: "hook", hook: 1, json: "{}", maxBytes: 65536 });
+    assert.equal(sent[2]?.ok, false);
+    assert.match(sent[2]?.text ?? "", /^Package resources are not available\.$/);
+    runtime.onMessage({ id: 4, op: "hook", hook: 0, json: "{}", maxBytes: 65536 });
+    const again = JSON.parse(sent[3]?.text ?? "{}") as { ok?: boolean; logs?: string[] };
+    assert.equal(again.ok, true);
+    assert.deepEqual(again.logs, ["ping"]);
+  });
+});
+
+function section(id: number, body: number[]): number[] {
+  return [id, body.length, ...body];
+}
+
+function wasmFile(sections: number[][]): Uint8Array {
+  return Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...sections.flat()]);
+}
+
+function loadGuest(
+  bytes: Uint8Array,
+  allow: { allowLog?: boolean; allowResource?: boolean },
+): { id?: number; ok?: boolean; text?: string } | undefined {
+  const sent: Array<{ id?: number; ok?: boolean; text?: string }> = [];
+  const runtime = createGuestRuntime((id, ok, text) => {
+    sent.push({ id, ok, text });
+  });
+  runtime.onMessage({
+    id: 1,
+    op: "load",
+    wasm: bytes,
+    allowLog: allow.allowLog === true,
+    allowResource: allow.allowResource === true,
+    maxBytes: 65536,
+    maxBinaryBytes: 65536,
+  });
+  return sent[0];
+}
 
 function failureText(result: { ok: boolean; error?: unknown; code?: string }): string {
   if (result.ok) return "";

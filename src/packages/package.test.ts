@@ -20,6 +20,7 @@ import {
   validatePackageTreeFiles,
 } from "./package-format.ts";
 import { validateReleasePackageDirectory } from "./package-directory.ts";
+import { logGuest, quietStartGuest, resourceGuest, resourceLogGuest, resourceStartGuest } from "../foundations/wasm-build.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const wasmFixture = join(repoRoot, "examples/third-party-module");
@@ -341,5 +342,56 @@ describe("CGP module package format v1", () => {
     } finally {
       temp.cleanup();
     }
+  });
+});
+
+describe("wasm resource import allowlist", () => {
+  function packaged(bytes: Uint8Array, permissions: string[]) {
+    return tempPackage({
+      "manifest.json": JSON.stringify({
+        moduleId: "org.example.package-test",
+        name: "Package Test",
+        version: "1.0.0",
+        moduleApi: ">=1.0.0 <2.0.0",
+        permissions,
+      }),
+      "cgp-package.json": wasmDescriptor,
+      "module.wasm": bytes,
+    });
+  }
+
+  async function errorsOf(bytes: Uint8Array, permissions: string[]): Promise<string[]> {
+    const temp = packaged(bytes, permissions);
+    try {
+      const result = await validateReleasePackageDirectory(temp.directory);
+      return result.ok ? [] : result.errors;
+    } finally {
+      temp.cleanup();
+    }
+  }
+
+  it("accepts a module that imports neither function", async () => {
+    const errors = await errorsOf(quietStartGuest(), []);
+    assert.deepEqual(errors, []);
+  });
+
+  it("still requires the manifest grant for cgp.abi.log", async () => {
+    const errors = await errorsOf(logGuest(), []);
+    assert.ok(errors.some((item) => item.includes("does not declare cgp.log")));
+  });
+
+  it("requires the manifest grant for resource_read and does not apply policy", async () => {
+    const missing = await errorsOf(resourceGuest(), []);
+    assert.ok(missing.some((item) => item.includes("does not declare cgp.resource.read")));
+    const granted = await errorsOf(resourceGuest(), ["cgp.resource.read"]);
+    assert.deepEqual(granted, []);
+    const both = await errorsOf(resourceLogGuest(), ["cgp.log", "cgp.resource.read"]);
+    assert.deepEqual(both, []);
+  });
+
+  it("refuses resource_read with a start section before instantiation", async () => {
+    const errors = await errorsOf(resourceStartGuest(), ["cgp.resource.read"]);
+    assert.ok(errors.some((item) => item.includes("imports cgp.abi.resource_read and has a start section")));
+    assert.equal(errors.some((item) => item.includes("Package resources are not available")), false);
   });
 });

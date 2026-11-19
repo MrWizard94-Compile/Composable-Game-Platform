@@ -7,7 +7,7 @@ import { createLogBuffer, clipUtf8, utf8Bytes, type GuestProcess } from "./wasm-
 import { attachBrowserGuest } from "./wasm-worker-browser.ts";
 import { compose, sessionOf, type ModulePackage } from "./host.ts";
 import type { ExecutionPolicy } from "./backend.ts";
-import { logGuest, storeGuest, wasiGuest } from "./wasm-build.ts";
+import { logGuest, resourceStartGuest, storeGuest, wasiGuest } from "./wasm-build.ts";
 
 function manifest(moduleId: string, extra: Record<string, unknown> = {}) {
   return {
@@ -377,6 +377,37 @@ describe("browser guest runtime", () => {
     assert.equal(reply.id, 7);
     assert.equal(reply.ok, false);
     assert.match(reply.text ?? "", /Unauthorized import wasi_snapshot_preview1/);
+  });
+
+  it("refuses a resource start section in the browser worker before the stub runs", () => {
+    const sent: unknown[] = [];
+    const slot: { handler: ((event: MessageEvent) => void) | null } = { handler: null };
+    attachBrowserGuest({
+      postMessage(data) {
+        sent.push(data);
+      },
+      set onmessage(value) {
+        slot.handler = value;
+      },
+      get onmessage() {
+        return slot.handler;
+      },
+    });
+    slot.handler?.({
+      data: {
+        id: 8,
+        op: "load",
+        wasm: resourceStartGuest(),
+        allowLog: false,
+        allowResource: true,
+        maxBytes: 65536,
+        maxBinaryBytes: 65536,
+      },
+    } as MessageEvent);
+    const reply = sent[0] as { id?: number; ok?: boolean; text?: string };
+    assert.equal(reply.ok, false);
+    assert.match(reply.text ?? "", /Guest imports cgp\.abi\.resource_read and has a start section/);
+    assert.doesNotMatch(reply.text ?? "", /Package resources are not available/);
   });
 });
 

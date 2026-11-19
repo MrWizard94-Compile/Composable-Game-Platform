@@ -90,30 +90,40 @@ export function createGuestRuntime(reply) {
         const bytes = record.wasm instanceof Uint8Array ? record.wasm : new Uint8Array();
         const maxBytes = typeof record.maxBytes === "number" ? record.maxBytes : 0;
         const maxBinaryBytes = typeof record.maxBinaryBytes === "number" ? record.maxBinaryBytes : maxBytes;
-        assertGuestBinary(bytes, maxBytes, maxBinaryBytes, record.allowLog === true);
+        assertGuestBinary(bytes, maxBytes, maxBinaryBytes, record.allowLog === true, record.allowResource === true);
         const mod = new WebAssembly.Module(bytes);
         const imports = WebAssembly.Module.imports(mod);
         /** @type {WebAssembly.Imports} */
         const importObject = {};
+        /** @type {Record<string, Function>} */
+        const abi = {};
         logs = [];
         logBytes = 0;
         dropped = false;
         for (const item of imports) {
-          if (item.module !== "cgp.abi" || item.name !== "log" || item.kind !== "function") {
+          if (item.module !== "cgp.abi" || item.kind !== "function") {
             throw new Error(`Unauthorized import ${item.module}.${item.name}`);
           }
-          if (record.allowLog !== true) throw new Error("Capability cgp.log is not granted.");
-          importObject["cgp.abi"] = {
+          if (item.name === "log") {
+            if (record.allowLog !== true) throw new Error("Capability cgp.log is not granted.");
             /**
              * @param {number} ptr
              * @param {number} len
              */
-            log(ptr, len) {
+            abi.log = (ptr, len) => {
               const size = Math.min(len >>> 0, logBudget.maxLine);
               pushLog(textDecode.decode(copyOut(ptr, size)));
-            },
-          };
+            };
+          } else if (item.name === "resource_read") {
+            if (record.allowResource !== true) throw new Error("Capability cgp.resource.read is not granted.");
+            abi.resource_read = () => {
+              throw new Error("Package resources are not available.");
+            };
+          } else {
+            throw new Error(`Unauthorized import ${item.module}.${item.name}`);
+          }
         }
+        if (imports.length > 0) importObject["cgp.abi"] = abi;
         instance = new WebAssembly.Instance(mod, importObject);
         const exported = /** @type {GuestExports} */ (instance.exports);
         if (!(exported.memory instanceof WebAssembly.Memory)) throw new Error("Guest did not export memory.");
@@ -244,11 +254,34 @@ function readName(bytes, at) {
 
 /**
  * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readStartIndex(bytes, at, end) {
+  if (at.i >= end) throw new Error("Malformed WebAssembly start section.");
+  let shift = 0;
+  for (;;) {
+    if (at.i >= end) throw new Error("Malformed WebAssembly function index.");
+    const byte = bytes[at.i];
+    if (byte === undefined) throw new Error("Truncated WebAssembly binary.");
+    at.i += 1;
+    if ((byte & 0x80) === 0) {
+      if (at.i !== end) throw new Error("Malformed WebAssembly start section.");
+      return;
+    }
+    shift += 7;
+    if (shift > 35) throw new Error("Malformed WebAssembly function index.");
+  }
+}
+
+/**
+ * @param {Uint8Array} bytes
  * @param {number} maxBytes
  * @param {number} maxBinaryBytes
  * @param {boolean} allowLog
+ * @param {boolean} allowResource
  */
-function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog) {
+function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResource) {
   if (!(bytes instanceof Uint8Array)) throw new Error("Guest binary is missing.");
   if (bytes.byteLength > maxBinaryBytes) {
     throw new Error(`Guest binary is ${bytes.byteLength} bytes. The binary limit is ${maxBinaryBytes}.`);
@@ -258,6 +291,8 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog) {
   }
   const at = { i: 8 };
   let sawMemory = false;
+  let hasStart = false;
+  let importsResource = false;
   while (at.i < bytes.length) {
     const id = bytes[at.i];
     at.i += 1;
@@ -284,10 +319,12 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog) {
           throw new Error("Guest imports memory. The host does not share memory.");
         } else if (kind === 3) at.i += 2;
         else throw new Error("Unsupported WebAssembly import.");
-        if (moduleName !== "cgp.abi" || field !== "log" || kind !== 0) {
-          throw new Error(`Unauthorized import ${moduleName}.${field}`);
-        }
-        if (!allowLog) throw new Error("Capability cgp.log is not granted.");
+        const isLog = moduleName === "cgp.abi" && field === "log" && kind === 0;
+        const isResource = moduleName === "cgp.abi" && field === "resource_read" && kind === 0;
+        if (!isLog && !isResource) throw new Error(`Unauthorized import ${moduleName}.${field}`);
+        if (isLog && !allowLog) throw new Error("Capability cgp.log is not granted.");
+        if (isResource && !allowResource) throw new Error("Capability cgp.resource.read is not granted.");
+        if (isResource) importsResource = true;
       }
     } else if (id === 4) {
       const count = readUleb(bytes, at);
@@ -312,8 +349,15 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog) {
         throw new Error(`Guest memory maximum is ${max * PAGE} bytes. The limit is ${maxBytes}.`);
       }
       sawMemory = true;
+    } else if (id === 8) {
+      if (hasStart) throw new Error("Malformed WebAssembly start section.");
+      readStartIndex(bytes, at, end);
+      hasStart = true;
     }
     at.i = end;
+  }
+  if (importsResource && hasStart) {
+    throw new Error("Guest imports cgp.abi.resource_read and has a start section.");
   }
   if (!sawMemory) throw new Error("Guest exports no memory limit.");
 }

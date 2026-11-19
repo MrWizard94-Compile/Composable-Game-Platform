@@ -172,12 +172,21 @@ function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string
     else if (found.kind !== kind) errors.push("module.wasm ABI export \"" + name + "\" must be a " + kind + ".");
   }
 
+  let importsResource = false;
   for (const item of inspected.imports) {
-    if (item.module !== "cgp.abi" || item.name !== "log" || item.kind !== "func") {
+    const isLog = item.module === "cgp.abi" && item.name === "log" && item.kind === "func";
+    const isResource = item.module === "cgp.abi" && item.name === "resource_read" && item.kind === "func";
+    if (!isLog && !isResource) {
       errors.push("module.wasm has unauthorized import " + item.module + "." + item.name + ".");
-    } else if (!permissions.includes("cgp.log")) {
+    } else if (isLog && !permissions.includes("cgp.log")) {
       errors.push("module.wasm imports cgp.abi.log but manifest.json does not declare cgp.log.");
+    } else if (isResource && !permissions.includes("cgp.resource.read")) {
+      errors.push("module.wasm imports cgp.abi.resource_read but manifest.json does not declare cgp.resource.read.");
     }
+    if (isResource) importsResource = true;
+  }
+  if (importsResource && inspected.hasStart) {
+    errors.push("module.wasm imports cgp.abi.resource_read and has a start section.");
   }
 
   if ("missing" in inspected.memory) errors.push("module.wasm must define and export one bounded memory.");

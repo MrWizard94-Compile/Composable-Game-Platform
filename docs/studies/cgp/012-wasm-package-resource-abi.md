@@ -3,7 +3,7 @@
 **Research date:** 2026-11-19
 **Revised:** 2026-11-19. Delivery remains one transferred pack per guest. Scanner `Buffer`s are not cloned. `BAD_PATH` is grammar, not a case miss. Overlapping `out` and `written` is `BAD_RANGE`. The index stays an array of `{ path, offset, length }` records; the worker converts those records into `[path, { offset, length }]` pairs before `new Map`, then rejects a malformed index before instantiation. Resource-byte accounting is per activation, not process-wide.
 **Research baseline:** `main` at `e4ef0c4` (transport correction recorded; resource import not implemented)
-**Decision status:** Recommended. Not implemented. This study does not change the package format, the lock schema, the ABI allowlist, the guest runtime, or any execution backend.
+**Decision status:** Phase 1 is implemented. `inspectWasm` records `hasStart`. `validateWasm`, `refuseBinary`, and `assertGuestBinary` accept `cgp.abi.resource_read` only with the matching grant, and they refuse that import when a start section is present, before instantiation. The worker builds one `cgp.abi` object. `resource_read` throws `Package resources are not available.` and does not read bytes. Packing, transfer, status codes, resource maps, and activation integration are not implemented. Later phases in this study are unchanged.
 
 ## Problem
 
@@ -25,7 +25,7 @@ The composition lease is the GC root. The store reader ends when the snapshot ex
 
 ### Where an import is refused
 
-The same allowlist is enforced three times. All three currently accept only `cgp.abi.log`, and only when the matching grant is present at that layer.
+The same allowlist is enforced three times. Phase 1 accepts `cgp.abi.log` and `cgp.abi.resource_read`, and only when the matching grant is present at that layer. A granted `resource_read` still does not copy file bytes.
 
 | Layer | Where | What it sees | What it does not see |
 |---|---|---|---|
@@ -58,7 +58,7 @@ instance = new WebAssembly.Instance(mod, importObject);
 memory = exported.memory;
 ```
 
-Assigning `importObject["cgp.abi"]` inside the loop replaces the whole namespace on every import. With only `log` that is harmless. A second function on `cgp.abi` would leave whichever import was seen last. The implementation must build one `cgp.abi` object and add `log` and `resource_read` onto it. Both must be present when the module imports both.
+Assigning `importObject["cgp.abi"]` inside the loop replaces the whole namespace on every import. With only `log` that is harmless. A second function on `cgp.abi` would leave whichever import was seen last. Phase 1 builds one `cgp.abi` object and adds `log` and `resource_read` onto it. `resource_read` throws `Package resources are not available.` Both must be present when the module imports both. A later phase replaces the throw with the copy described below. There is still no resource map, so the throw is not a successful read.
 
 `log` is `(ptr: i32, len: i32) -> ()`. The worker reads guest memory with `copyOut`, which treats both arguments as unsigned (`>>> 0`) and rejects `start + size` past `memory.buffer.byteLength`. A bad pointer throws. That throw fails the hook, and the isolate then stops the guest. `log` has no status code to return.
 

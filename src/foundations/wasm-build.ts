@@ -535,6 +535,145 @@ export function logGuest(allowedName = "cgp.abi"): Uint8Array {
   });
 }
 
+/** Imports `resource_read` and calls it from every hook. The host stub must refuse that call. */
+export function resourceGuest(): Uint8Array {
+  return compileWasm({
+    types: [...STANDARD_TYPES, { params: 5, results: 1 }],
+    imports: [{ module: "cgp.abi", name: "resource_read", type: 3 }],
+    funcs: [
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      {
+        type: 0,
+        body: [
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.call(0),
+          ...op.drop,
+          ...op.i32Const(0),
+        ],
+      },
+    ],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(1),
+  });
+}
+
+/**
+ * Register calls `log`. Initialize calls `resource_read`.
+ * A namespace that keeps only the last import fails one of those hooks.
+ */
+export function resourceLogGuest(): Uint8Array {
+  const ping = text("ping");
+  const ok = text('{"ok":true}');
+  return compileWasm({
+    types: [...STANDARD_TYPES, { params: 2, results: 0 }, { params: 5, results: 1 }],
+    imports: [
+      { module: "cgp.abi", name: "log", type: 3 },
+      { module: "cgp.abi", name: "resource_read", type: 4 },
+    ],
+    funcs: [
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      {
+        type: 0,
+        body: [
+          ...op.localGet(0),
+          ...op.i32Const(0),
+          ...op.i32Eq,
+          ...op.if,
+          ...op.i32Const(200),
+          ...op.i32Const(ping.length),
+          ...op.call(0),
+          ...op.i32Const(256),
+          ...op.globalSet(1),
+          ...op.i32Const(ok.length),
+          ...op.globalSet(2),
+          ...op.i32Const(0),
+          ...op.ret,
+          ...op.end,
+          ...op.localGet(0),
+          ...op.i32Const(1),
+          ...op.i32Eq,
+          ...op.if,
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.call(1),
+          ...op.drop,
+          ...op.i32Const(0),
+          ...op.ret,
+          ...op.end,
+          ...op.i32Const(0),
+        ],
+      },
+    ],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 256 }, { init: ok.length }],
+    exports: standardExports(2),
+    data: [
+      { offset: 200, bytes: ping },
+      { offset: 256, bytes: ok },
+    ],
+  });
+}
+
+/** Start calls `resource_read`. Refusal must happen before that call runs. */
+export function resourceStartGuest(): Uint8Array {
+  return compileWasm({
+    types: [...STANDARD_TYPES, { params: 0, results: 0 }, { params: 5, results: 1 }],
+    imports: [{ module: "cgp.abi", name: "resource_read", type: 4 }],
+    funcs: [
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      { type: 0, body: [...op.i32Const(0)] },
+      {
+        type: 3,
+        body: [
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.i32Const(0),
+          ...op.call(0),
+          ...op.drop,
+        ],
+      },
+    ],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(1),
+    start: 5,
+  });
+}
+
+/** A start section that does not import `resource_read` stays legal. */
+export function quietStartGuest(): Uint8Array {
+  return compileWasm({
+    types: [...STANDARD_TYPES, { params: 0, results: 0 }],
+    funcs: [
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      { type: 0, body: [...op.i32Const(0)] },
+      { type: 3, body: [] },
+    ],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(0),
+    start: 4,
+  });
+}
+
 export function unboundedGuest(): Uint8Array {
   return compileWasm({
     types: STANDARD_TYPES,

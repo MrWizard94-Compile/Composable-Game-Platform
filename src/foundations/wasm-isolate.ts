@@ -189,8 +189,30 @@ function skipLimits(bytes: Uint8Array, at: { i: number }) {
   if (flags & 1) readUleb(bytes, at);
 }
 
-/** Reads import names and resource limits without compiling or instantiating. */
-export function inspectWasm(bytes: Uint8Array): { imports: WasmImport[]; memory: WasmMemoryLimit; tables: WasmTableLimit[] } {
+function readStartIndex(bytes: Uint8Array, at: { i: number }, end: number): void {
+  if (at.i >= end) throw new Error("Malformed WebAssembly start section.");
+  let shift = 0;
+  for (;;) {
+    if (at.i >= end) throw new Error("Malformed WebAssembly function index.");
+    const byte = bytes[at.i];
+    if (byte === undefined) throw new Error("Truncated WebAssembly binary.");
+    at.i += 1;
+    if ((byte & 0x80) === 0) {
+      if (at.i !== end) throw new Error("Malformed WebAssembly start section.");
+      return;
+    }
+    shift += 7;
+    if (shift > 35) throw new Error("Malformed WebAssembly function index.");
+  }
+}
+
+/** Reads import names, resource limits, and the start section without compiling or instantiating. */
+export function inspectWasm(bytes: Uint8Array): {
+  imports: WasmImport[];
+  memory: WasmMemoryLimit;
+  tables: WasmTableLimit[];
+  hasStart: boolean;
+} {
   if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
     throw new Error("Module bytes are not WebAssembly.");
   }
@@ -198,6 +220,7 @@ export function inspectWasm(bytes: Uint8Array): { imports: WasmImport[]; memory:
   const imports: WasmImport[] = [];
   let memory: WasmMemoryLimit = { missing: true };
   const tables: WasmTableLimit[] = [];
+  let hasStart = false;
   while (at.i < bytes.length) {
     const id = bytes[at.i];
     at.i += 1;
@@ -256,10 +279,14 @@ export function inspectWasm(bytes: Uint8Array): { imports: WasmImport[]; memory:
           memory = { min, max };
         }
       }
+    } else if (id === 8) {
+      if (hasStart) throw new Error("Malformed WebAssembly start section.");
+      readStartIndex(bytes, at, end);
+      hasStart = true;
     }
     at.i = end;
   }
-  return { imports, memory, tables };
+  return { imports, memory, tables, hasStart };
 }
 
 export function createLogBuffer(budget: LogBudget): LogBuffer {
@@ -599,6 +626,7 @@ export function createIsolateBackend(options: {
         const reserved = reserve(moduleId, bytes.byteLength, memoryBytes);
         if (typeof reserved === "string") return { ok: false, error: reserved };
         const allowLog = permissions.includes("cgp.log") && captured.allow.has("cgp.log");
+        const allowResource = permissions.includes("cgp.resource.read") && captured.allow.has("cgp.resource.read");
         const heapMb = captured.isolateHeapMb ?? Math.max(8, Math.ceil(captured.maxMemoryBytes / (1024 * 1024)) + 8);
         let worker: GuestProcess;
         try {
@@ -609,7 +637,7 @@ export function createIsolateBackend(options: {
         }
         const guest: Guest = { worker, dead: false };
         guests.set(moduleId, guest);
-        const loaded = await callGuest(guest, moduleId, { op: "load", wasm: bytes, allowLog });
+        const loaded = await callGuest(guest, moduleId, { op: "load", wasm: bytes, allowLog, allowResource });
         if (!loaded.ok || released) {
           refund(reserved);
           await stopGuest(guest);
@@ -834,10 +862,17 @@ function refuseBinary(
     return `Module "${moduleId}" table maximum is ${table.max} entries. The limit is ${MAX_TABLE}.`;
   }
   for (const item of inspected.imports) {
-    const allowed = item.module === "cgp.abi" && item.name === "log" && item.kind === "func";
-    if (!allowed) return `Unauthorized import ${item.module}.${item.name}.`;
-    if (!permissions.includes("cgp.log") || !captured.allow.has("cgp.log")) {
+    const isLog = item.module === "cgp.abi" && item.name === "log" && item.kind === "func";
+    const isResource = item.module === "cgp.abi" && item.name === "resource_read" && item.kind === "func";
+    if (!isLog && !isResource) return `Unauthorized import ${item.module}.${item.name}.`;
+    if (isLog && (!permissions.includes("cgp.log") || !captured.allow.has("cgp.log"))) {
       return "Capability cgp.log is not granted.";
+    }
+    if (isResource && (!permissions.includes("cgp.resource.read") || !captured.allow.has("cgp.resource.read"))) {
+      return "Capability cgp.resource.read is not granted.";
+    }
+    if (isResource && inspected.hasStart) {
+      return `Module "${moduleId}" imports cgp.abi.resource_read and has a start section.`;
     }
   }
   return undefined;

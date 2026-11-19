@@ -2,9 +2,13 @@
  * Portable module ABI `cgp.abi/1`.
  *
  * A guest is a WebAssembly module. It cannot see another guest's memory.
- * The host copies bytes in and copies bytes out. The only host import is
- * `cgp.abi.log`, and only when the module's manifest lists `cgp.log` and the
- * policy allows that capability.
+ * The host copies bytes in and copies bytes out. It links `cgp.abi.log`
+ * when the manifest lists `cgp.log` and the policy allows that capability.
+ * It also recognizes `cgp.abi.resource_read` when the manifest lists
+ * `cgp.resource.read` and the policy allows that capability. That import
+ * does not read package bytes. Calling it fails the hook. A module that
+ * imports it and has a start section is refused before instantiation.
+ * Any other import is refused before the guest runs.
  *
  * Guest exports:
  * - `memory`, with a maximum, in pages of 65536 bytes
@@ -21,7 +25,6 @@
  * a copied object is not a handle, and a handle from another composition does not call.
  * A call with no arguments sends `arg: null` and `args: []`. An explicit `undefined` is refused.
  * Guest JSON is copied onto fresh objects so `__proto__` cannot change a prototype.
- * Any other import is refused before the guest runs.
  */
 
 export const ABI_ID = "cgp.abi/1" as const;
