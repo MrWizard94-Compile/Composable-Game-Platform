@@ -1014,15 +1014,43 @@ describe("wasm start section and resource allowlist", () => {
     assert.deepEqual(wideIndex.imports, []);
   });
 
-  it("rejects a malformed start section and a malformed function index", () => {
+  it("accepts one-byte, padded, and maximum u32 start indexes", () => {
+    for (const payload of [
+      [0x00],
+      [0x80, 0x00],
+      [0x80, 0x80, 0x80, 0x80, 0x00],
+      [0xff, 0xff, 0xff, 0xff, 0x0f],
+    ]) {
+      const bytes = wasmFile([section(8, payload)]);
+      assert.equal(inspectWasm(bytes).hasStart, true, payload.map((item) => item.toString(16)).join(" "));
+      const worker = loadGuest(bytes, {});
+      assert.equal(worker?.ok, false);
+      assert.match(worker?.text ?? "", /Guest exports no memory limit/);
+      assert.doesNotMatch(worker?.text ?? "", /Malformed WebAssembly/);
+    }
+  });
+
+  it("rejects a start index that is longer than five bytes or has unused high bits", () => {
+    for (const payload of [
+      [0x80],
+      [0x80, 0x80, 0x80, 0x80],
+      [0x80, 0x80, 0x80, 0x80, 0x80],
+      [0x80, 0x80, 0x80, 0x80, 0x80, 0x00],
+      [0x80, 0x80, 0x80, 0x80, 0x10],
+    ]) {
+      assert.throws(() => inspectWasm(wasmFile([section(8, payload)])), /Malformed WebAssembly function index/);
+      const worker = loadGuest(wasmFile([section(8, payload)]), {});
+      assert.match(worker?.text ?? "", /Malformed WebAssembly function index/);
+    }
     assert.throws(() => inspectWasm(wasmFile([section(8, [])])), /Malformed WebAssembly start section/);
     assert.throws(() => inspectWasm(wasmFile([section(8, [0x00, 0x00])])), /Malformed WebAssembly start section/);
     assert.throws(() => inspectWasm(wasmFile([[0x08, 0x05]])), /Truncated WebAssembly binary/);
-    assert.throws(() => inspectWasm(wasmFile([section(8, [0x80])])), /Malformed WebAssembly function index/);
-    assert.throws(
-      () => inspectWasm(wasmFile([section(8, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80])])),
-      /Malformed WebAssembly function index/,
-    );
+    const empty = loadGuest(wasmFile([section(8, [])]), {});
+    assert.match(empty?.text ?? "", /Malformed WebAssembly start section/);
+    const extra = loadGuest(wasmFile([section(8, [0x00, 0x00])]), {});
+    assert.match(extra?.text ?? "", /Malformed WebAssembly start section/);
+    const truncated = loadGuest(wasmFile([[0x08, 0x05]]), {});
+    assert.match(truncated?.text ?? "", /Truncated WebAssembly binary/);
   });
 
   it("rejects a duplicate start section and does not enforce section order", () => {

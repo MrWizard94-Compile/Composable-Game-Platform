@@ -259,19 +259,20 @@ function readName(bytes, at) {
  */
 function readStartIndex(bytes, at, end) {
   if (at.i >= end) throw new Error("Malformed WebAssembly start section.");
-  let shift = 0;
-  for (;;) {
+  for (let n = 0; n < 5; n += 1) {
     if (at.i >= end) throw new Error("Malformed WebAssembly function index.");
     const byte = bytes[at.i];
     if (byte === undefined) throw new Error("Truncated WebAssembly binary.");
     at.i += 1;
+    if (n === 4 && ((byte & 0x80) !== 0 || byte > 0x0f)) {
+      throw new Error("Malformed WebAssembly function index.");
+    }
     if ((byte & 0x80) === 0) {
       if (at.i !== end) throw new Error("Malformed WebAssembly start section.");
       return;
     }
-    shift += 7;
-    if (shift > 35) throw new Error("Malformed WebAssembly function index.");
   }
+  throw new Error("Malformed WebAssembly function index.");
 }
 
 /**
