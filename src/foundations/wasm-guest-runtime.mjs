@@ -348,6 +348,67 @@ function readStartIndex(bytes, at, end) {
   throw new Error("Malformed WebAssembly function index.");
 }
 
+const I32 = 0x7f;
+
+/** @param {number} byte */
+function isValueType(byte) {
+  return byte === 0x7f || byte === 0x7e || byte === 0x7d || byte === 0x7c || byte === 0x7b || byte === 0x70 || byte === 0x6f;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readValtypes(bytes, at, end) {
+  const count = readUleb(bytes, at);
+  if (count > 128) throw new Error("Malformed WebAssembly type section.");
+  /** @type {number[]} */
+  const values = [];
+  for (let n = 0; n < count; n += 1) {
+    if (at.i >= end) throw new Error("Malformed WebAssembly type section.");
+    const byte = bytes[at.i];
+    if (byte === undefined || !isValueType(byte)) throw new Error("Malformed WebAssembly type section.");
+    at.i += 1;
+    values.push(byte);
+  }
+  return values;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readFuncTypes(bytes, at, end) {
+  const count = readUleb(bytes, at);
+  if (count > 256) throw new Error("Malformed WebAssembly type section.");
+  /** @type {{ params: number[], results: number[] }[]} */
+  const types = [];
+  for (let n = 0; n < count; n += 1) {
+    if (at.i >= end || bytes[at.i] !== 0x60) throw new Error("Malformed WebAssembly type section.");
+    at.i += 1;
+    types.push({ params: readValtypes(bytes, at, end), results: readValtypes(bytes, at, end) });
+  }
+  if (at.i !== end) throw new Error("Malformed WebAssembly type section.");
+  return types;
+}
+
+/**
+ * @param {readonly number[] | undefined} params
+ * @param {readonly number[] | undefined} results
+ */
+function resourceSignatureMatches(params, results) {
+  return (
+    !!params &&
+    !!results &&
+    params.length === 5 &&
+    results.length === 1 &&
+    params.every((item) => item === I32) &&
+    results[0] === I32
+  );
+}
+
 /**
  * @param {Uint8Array} bytes
  * @param {number} maxBytes
@@ -368,20 +429,33 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
   let sawMemory = false;
   let hasStart = false;
   let importsResource = false;
+  let sawTypes = false;
+  let deniedLog = false;
+  let deniedResource = false;
+  /** @type {{ params: number[], results: number[] }[]} */
+  const funcTypes = [];
+  /** @type {number[]} */
+  const resourceTypes = [];
   while (at.i < bytes.length) {
     const id = bytes[at.i];
     at.i += 1;
     const size = readUleb(bytes, at);
     const end = at.i + size;
     if (end > bytes.length) throw new Error("Truncated WebAssembly binary.");
-    if (id === 2) {
+    if (id === 1) {
+      if (sawTypes) throw new Error("Malformed WebAssembly type section.");
+      sawTypes = true;
+      funcTypes.push(...readFuncTypes(bytes, at, end));
+    } else if (id === 2) {
       const count = readUleb(bytes, at);
       for (let n = 0; n < count; n += 1) {
         const moduleName = readName(bytes, at);
         const field = readName(bytes, at);
         const kind = bytes[at.i];
         at.i += 1;
-        if (kind === 0) readUleb(bytes, at);
+        /** @type {number | undefined} */
+        let typeIndex;
+        if (kind === 0) typeIndex = readUleb(bytes, at);
         else if (kind === 1) {
           at.i += 1;
           const flags = readUleb(bytes, at);
@@ -397,9 +471,12 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
         const isLog = moduleName === "cgp.abi" && field === "log" && kind === 0;
         const isResource = moduleName === "cgp.abi" && field === "resource_read" && kind === 0;
         if (!isLog && !isResource) throw new Error(`Unauthorized import ${moduleName}.${field}`);
-        if (isLog && !allowLog) throw new Error("Capability cgp.log is not granted.");
-        if (isResource && !allowResource) throw new Error("Capability cgp.resource.read is not granted.");
-        if (isResource) importsResource = true;
+        if (isLog && !allowLog) deniedLog = true;
+        if (isResource && !allowResource) deniedResource = true;
+        if (isResource) {
+          importsResource = true;
+          resourceTypes.push(typeIndex ?? -1);
+        }
       }
     } else if (id === 4) {
       const count = readUleb(bytes, at);
@@ -431,6 +508,15 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
     }
     at.i = end;
   }
+  for (const typeIndex of resourceTypes) {
+    const signature = funcTypes[typeIndex];
+    if (!signature) throw new Error("Malformed WebAssembly function type.");
+    if (!resourceSignatureMatches(signature.params, signature.results)) {
+      throw new Error("cgp.abi.resource_read has the wrong signature.");
+    }
+  }
+  if (deniedLog) throw new Error("Capability cgp.log is not granted.");
+  if (deniedResource) throw new Error("Capability cgp.resource.read is not granted.");
   if (importsResource && hasStart) {
     throw new Error("Guest imports cgp.abi.resource_read and has a start section.");
   }

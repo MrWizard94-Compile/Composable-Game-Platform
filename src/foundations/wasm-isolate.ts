@@ -60,7 +60,14 @@ export type ResourceUsage = {
   retainedLogBytes: number;
 };
 
-export type WasmImport = { module: string; name: string; kind: "func" | "memory" | "table" | "global" };
+export type WasmImport = {
+  module: string;
+  name: string;
+  kind: "func" | "memory" | "table" | "global";
+  /** Value-type bytes for a function import. Absent for other kinds. */
+  params?: readonly number[];
+  results?: readonly number[];
+};
 
 export type WasmMemoryLimit =
   | { min: number; max: number | null }
@@ -209,6 +216,53 @@ function readStartIndex(bytes: Uint8Array, at: { i: number }, end: number): void
   throw new Error("Malformed WebAssembly function index.");
 }
 
+const I32 = 0x7f;
+
+function isValueType(byte: number): boolean {
+  return byte === 0x7f || byte === 0x7e || byte === 0x7d || byte === 0x7c || byte === 0x7b || byte === 0x70 || byte === 0x6f;
+}
+
+function readValtypes(bytes: Uint8Array, at: { i: number }, end: number): number[] {
+  const count = readUleb(bytes, at);
+  if (count > 128) throw new Error("Malformed WebAssembly type section.");
+  const values: number[] = [];
+  for (let n = 0; n < count; n += 1) {
+    if (at.i >= end) throw new Error("Malformed WebAssembly type section.");
+    const byte = bytes[at.i];
+    if (byte === undefined || !isValueType(byte)) throw new Error("Malformed WebAssembly type section.");
+    at.i += 1;
+    values.push(byte);
+  }
+  return values;
+}
+
+type FuncType = { params: number[]; results: number[] };
+
+function readFuncTypes(bytes: Uint8Array, at: { i: number }, end: number): FuncType[] {
+  const count = readUleb(bytes, at);
+  if (count > 256) throw new Error("Malformed WebAssembly type section.");
+  const types: FuncType[] = [];
+  for (let n = 0; n < count; n += 1) {
+    if (at.i >= end || bytes[at.i] !== 0x60) throw new Error("Malformed WebAssembly type section.");
+    at.i += 1;
+    types.push({ params: readValtypes(bytes, at, end), results: readValtypes(bytes, at, end) });
+  }
+  if (at.i !== end) throw new Error("Malformed WebAssembly type section.");
+  return types;
+}
+
+/** Five i32 parameters and one i32 result. `cgp.abi.log` is not checked here. */
+function resourceSignatureMatches(params: readonly number[] | undefined, results: readonly number[] | undefined): boolean {
+  return (
+    !!params &&
+    !!results &&
+    params.length === 5 &&
+    results.length === 1 &&
+    params.every((item) => item === I32) &&
+    results[0] === I32
+  );
+}
+
 /** Reads import names, resource limits, and the start section without compiling or instantiating. */
 export function inspectWasm(bytes: Uint8Array): {
   imports: WasmImport[];
@@ -221,6 +275,9 @@ export function inspectWasm(bytes: Uint8Array): {
   }
   const at = { i: 8 };
   const imports: WasmImport[] = [];
+  const funcTypes: FuncType[] = [];
+  const pendingFuncs: { index: number; typeIndex: number }[] = [];
+  let sawTypes = false;
   let memory: WasmMemoryLimit = { missing: true };
   const tables: WasmTableLimit[] = [];
   let hasStart = false;
@@ -230,7 +287,11 @@ export function inspectWasm(bytes: Uint8Array): {
     const size = readUleb(bytes, at);
     const end = at.i + size;
     if (end > bytes.length) throw new Error("Truncated WebAssembly binary.");
-    if (id === 2) {
+    if (id === 1) {
+      if (sawTypes) throw new Error("Malformed WebAssembly type section.");
+      sawTypes = true;
+      funcTypes.push(...readFuncTypes(bytes, at, end));
+    } else if (id === 2) {
       const count = readUleb(bytes, at);
       for (let n = 0; n < count; n += 1) {
         const moduleName = nameAt(bytes, at);
@@ -238,7 +299,8 @@ export function inspectWasm(bytes: Uint8Array): {
         const kind = bytes[at.i];
         at.i += 1;
         if (kind === 0) {
-          readUleb(bytes, at);
+          const typeIndex = readUleb(bytes, at);
+          pendingFuncs.push({ index: imports.length, typeIndex });
           imports.push({ module: moduleName, name: field, kind: "func" });
         } else if (kind === 1) {
           at.i += 1;
@@ -288,6 +350,14 @@ export function inspectWasm(bytes: Uint8Array): {
       hasStart = true;
     }
     at.i = end;
+  }
+  for (const pending of pendingFuncs) {
+    const signature = funcTypes[pending.typeIndex];
+    if (!signature) throw new Error("Malformed WebAssembly function type.");
+    const item = imports[pending.index];
+    if (!item) throw new Error("Malformed WebAssembly function type.");
+    item.params = signature.params;
+    item.results = signature.results;
   }
   return { imports, memory, tables, hasStart };
 }
@@ -532,13 +602,24 @@ export function createIsolateBackend(options: {
       function stopGuest(guest: Guest): Promise<void> {
         if (guest.stopped) return guest.stopped;
         guest.dead = true;
-        if (guest.packBytes > 0) {
-          packedBytes -= guest.packBytes;
-          guest.packBytes = 0;
-          if (packedBytes < 0) throw new Error("Resource pack ledger went negative.");
-        }
-        guest.stopped = guest.worker ? guest.worker.terminate() : Promise.resolve();
-        return guest.stopped;
+        const worker = guest.worker;
+        const slot: { current?: Promise<void> } = {};
+        const finishing = (worker ? worker.terminate() : Promise.resolve()).then(
+          () => {
+            const charge = guest.packBytes;
+            if (charge <= 0) return;
+            guest.packBytes = 0;
+            packedBytes -= charge;
+            if (packedBytes < 0) throw new Error("Resource pack ledger went negative.");
+          },
+          (error: unknown) => {
+            if (guest.stopped === slot.current) guest.stopped = undefined;
+            throw error instanceof Error ? error : new Error("Could not stop the isolate.");
+          },
+        );
+        slot.current = finishing;
+        guest.stopped = finishing;
+        return finishing;
       }
 
       function release(): Promise<void> {
@@ -546,7 +627,14 @@ export function createIsolateBackend(options: {
         released = true;
         for (const cancel of [...cancelPending]) cancel();
         cancelPending.clear();
-        releasing = (async () => {
+        let resolveRelease: () => void = () => {};
+        let rejectRelease: (error: unknown) => void = () => {};
+        const published = new Promise<void>((resolve, reject) => {
+          resolveRelease = resolve;
+          rejectRelease = reject;
+        });
+        releasing = published;
+        const finishing = (async () => {
           while (pendingWork > 0) {
             await new Promise<void>((resolve) => idleWaiters.push(resolve));
           }
@@ -556,7 +644,14 @@ export function createIsolateBackend(options: {
           live.delete(session);
           retain(session.id);
         })();
-        return releasing;
+        void finishing.then(
+          () => resolveRelease(),
+          (error: unknown) => {
+            if (releasing === published) releasing = undefined;
+            rejectRelease(error);
+          },
+        );
+        return published;
       }
 
       function callHandle(payload: unknown, args: readonly unknown[]): Promise<PayloadResult> {
@@ -962,6 +1057,9 @@ function refuseBinary(
     const isLog = item.module === "cgp.abi" && item.name === "log" && item.kind === "func";
     const isResource = item.module === "cgp.abi" && item.name === "resource_read" && item.kind === "func";
     if (!isLog && !isResource) return `Unauthorized import ${item.module}.${item.name}.`;
+    if (isResource && !resourceSignatureMatches(item.params, item.results)) {
+      return `Module "${moduleId}" imports cgp.abi.resource_read with the wrong signature.`;
+    }
     if (isLog && (!permissions.includes("cgp.log") || !captured.allow.has("cgp.log"))) {
       return "Capability cgp.log is not granted.";
     }

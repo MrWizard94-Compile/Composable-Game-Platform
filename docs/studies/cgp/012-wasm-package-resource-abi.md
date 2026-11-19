@@ -109,7 +109,7 @@ One import. Guest-side signature:
   (result i32))
 ```
 
-`path` / `path_len` are the UTF-8 package-relative key. `out` / `out_cap` are the destination. `written` is the address of an `i32` where the host stores a length. All five parameters are Wasm `i32`. The host treats each as unsigned with `>>> 0` before any arithmetic. A negative JS number from the high bit is not a negative length.
+`path` / `path_len` are the UTF-8 package-relative key. `out` / `out_cap` are the destination. `written` is the address of an `i32` where the host stores a length. All five parameters are Wasm `i32`. The host treats each as unsigned with `>>> 0` before any arithmetic. A negative JS number from the high bit is not a negative length. The host and the worker resolve this import's function type and refuse any other shape before instantiation: not five parameters, a parameter that is not `i32`, or a result that is not one `i32`. A missing or out-of-range type index is a malformed binary. `cgp.abi.log` is not given a new signature check.
 
 The import is synchronous. It does not post a message and does not wait on the parent. The bytes are already in the worker, or the call fails.
 
@@ -222,7 +222,7 @@ A call finds the exact path in that map. A miss returns `NOT_FOUND`. A hit build
 
 The worker compiles `module.wasm` from that same pack, using the `module.wasm` record: `new Uint8Array(pack, wasmOffset, wasmLength)`. It does not also post or clone the scanner's `module.wasm` `Buffer`. That second post would clone a pool slab on top of the pack. The artifact bytes inside the pack are the verified bytes.
 
-Parent snapshot buffers are never transferred. After a successful post the pack's `byteLength` on the parent is 0 and the worker holds exactly `S` resource bytes. The index is separate metadata, not part of `S`. `stopGuest` terminates the worker and drops the pack with it. Shutdown hook `2` still runs before disposal, so the pack is alive during guest shutdown.
+Parent snapshot buffers are never transferred. After a successful post the pack's `byteLength` on the parent is 0 and the worker holds exactly `S` resource bytes. The index is separate metadata, not part of `S`. `stopGuest` marks the guest dead immediately and keeps that pack charged until `terminate()` succeeds, including while termination is still pending. A failed termination does not release the charge and can be retried; a successful one releases it once. Shutdown hook `2` still runs before disposal, so the pack is alive during guest shutdown.
 
 ### Worker-side index validation
 

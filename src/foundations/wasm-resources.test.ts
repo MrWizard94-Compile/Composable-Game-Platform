@@ -3,13 +3,21 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { Worker, isMarkedAsUntransferable } from "node:worker_threads";
+import { Worker, MessageChannel, isMarkedAsUntransferable } from "node:worker_threads";
 import { compose, type ModulePackage } from "./host.ts";
-import type { ExecutionPolicy } from "./backend.ts";
-import { createWasmBackend } from "./wasm-backend.ts";
+import type { ExecutionPolicy, HookCall } from "./backend.ts";
+import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
 import { createBrowserWasmBackend } from "./wasm-browser.ts";
 import { acceptResourceIndex, createGuestRuntime, packPackageFiles } from "./wasm-guest-runtime.mjs";
-import { abiSupportFuncs, compileWasm, resourceProbeGuest, storeGuest, type ResourceScenario } from "./wasm-build.ts";
+import {
+  abiSupportFuncs,
+  compileWasm,
+  resourceGuest,
+  resourceProbeGuest,
+  resourceSignatureGuest,
+  storeGuest,
+  type ResourceScenario,
+} from "./wasm-build.ts";
 import type { GuestProcess } from "./wasm-isolate.ts";
 
 const text = new TextEncoder();
@@ -353,9 +361,11 @@ describe("resource_read", () => {
 
   it("transfers only the pack, detaches it, and keeps the parent snapshot readable", async () => {
     const { wasm } = built;
-    const owned = filesFor(wasm).map((file) => ({ path: file.path, bytes: Uint8Array.from(file.bytes) }));
+    const files = filesFor(wasm);
+    const before = files.map((file) => Uint8Array.from(file.bytes));
     let staged: ArrayBuffer | undefined;
     let posted: Record<string, unknown> | undefined;
+    let transfers: readonly ArrayBuffer[] = [];
     const backend = createBrowserWasmBackend({
       spawn() {
         const worker = new Worker(new URL("./wasm-worker.mjs", import.meta.url));
@@ -363,7 +373,10 @@ describe("resource_read", () => {
         const listeners = new Set<(message: { id?: number; ok?: boolean; text?: string }) => void>();
         const process: GuestProcess = {
           postMessage(message, transfer) {
-            if (message.op === "load") posted = message;
+            if (message.op === "load") {
+              posted = message;
+              transfers = transfer ? [...transfer] : [];
+            }
             worker.postMessage(message, transfer ? [...transfer] : []);
           },
           addMessageListener(listener) {
@@ -389,6 +402,7 @@ describe("resource_read", () => {
       },
     });
     const result = await compose([pkg("org.example.read", wasm, ["cgp.resource.read"], {
+      packageFiles: files,
       allocatePack(size: number) {
         staged = new ArrayBuffer(size);
         return staged;
@@ -398,8 +412,14 @@ describe("resource_read", () => {
     assert.equal(staged?.byteLength, 0);
     assert.equal(posted?.wasm, undefined);
     assert.ok(posted?.pack instanceof ArrayBuffer);
-    for (const file of owned) assert.equal(file.bytes.byteLength > 0 || file.path === "empty.txt", true);
-    assert.equal(Buffer.from(owned[1]?.bytes ?? new Uint8Array()).toString(), "hello-note");
+    assert.equal(transfers.length, 1);
+    assert.equal(transfers[0], staged);
+    const sourceBuffers = new Set(files.map((file) => file.bytes.buffer));
+    for (const item of transfers) assert.equal(sourceBuffers.has(item), false);
+    files.forEach((file, index) => {
+      assert.deepEqual(file.bytes, before[index]);
+      assert.doesNotThrow(() => new Uint8Array(file.bytes.buffer));
+    });
     await result.shutdown();
     backend.dispose();
   });
@@ -459,6 +479,9 @@ describe("resource pack failures", () => {
     alloc.dispose();
 
     let staged: ArrayBuffer | undefined;
+    let terminated = 0;
+    const postedFiles = filesFor(wasm);
+    const postedBefore = postedFiles.map((file) => Uint8Array.from(file.bytes));
     const deliver = createBrowserWasmBackend({
       spawn() {
         return {
@@ -470,19 +493,29 @@ describe("resource pack failures", () => {
           addErrorListener() {},
           removeErrorListener() {},
           terminate() {
+            terminated += 1;
             return Promise.resolve();
           },
         };
       },
     });
     const undelivered = await compose([pkg("org.example.read", wasm, ["cgp.resource.read"], {
+      packageFiles: postedFiles,
       allocatePack(size: number) {
         staged = new ArrayBuffer(size);
         return staged;
       },
     })], { backend: deliver, policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"] }) });
     assert.match(undelivered.diagnostics.map((item) => item.message).join("\n"), /post failed/);
+    assert.equal(terminated, 1);
     assert.ok(staged && staged.byteLength > 0);
+    postedFiles.forEach((file, index) => {
+      assert.deepEqual(file.bytes, postedBefore[index]);
+      assert.doesNotThrow(() => new Uint8Array(file.bytes.buffer));
+    });
+    assert.equal(deliver.resourceUsage().memoryBytes, 0);
+    assert.equal(deliver.resourceUsage().guests, 0);
+    assert.equal(deliver.openSessions(), 0);
     deliver.dispose();
 
     const broken = compileWasm({
@@ -569,3 +602,360 @@ describe("resource pack failures", () => {
     assert.match(sent[0]?.text ?? "", /not WebAssembly/);
   });
 });
+
+const I32 = 0x7f;
+const I64 = 0x7e;
+
+function hookError(result: { ok: boolean; error?: unknown }): string {
+  if (result.ok) return "";
+  return result.error instanceof Error ? result.error.message : String(result.error);
+}
+
+function byteSum(files: readonly { bytes: Uint8Array }[]): number {
+  return files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+}
+
+function resourceCall(
+  moduleId: string,
+  wasm: Uint8Array,
+  files: { path: string; bytes: Uint8Array }[],
+  maxSnapshotBytes: number,
+  hook: HookCall["hook"] = "initialize",
+  allocatePack?: (size: number) => ArrayBuffer,
+): HookCall {
+  return {
+    moduleId,
+    hook,
+    implementation: {
+      wasm,
+      packageFiles: files,
+      maxSnapshotBytes,
+      ...(allocatePack ? { allocatePack } : {}),
+    } as HookCall["implementation"],
+    args: [],
+    permissions: ["cgp.resource.read"],
+  };
+}
+
+function scriptedGuest(options?: {
+  terminate?: () => Promise<void>;
+  onPost?: (message: Record<string, unknown>, transfer: readonly ArrayBuffer[] | undefined) => void;
+}): GuestProcess {
+  const listeners = new Set<(message: { id?: number; ok?: boolean; text?: string }) => void>();
+  return {
+    postMessage(message, transfer) {
+      options?.onPost?.(message, transfer);
+      const channel = new MessageChannel();
+      channel.port1.postMessage(null, transfer ? [...transfer] : []);
+      channel.port1.close();
+      channel.port2.close();
+      queueMicrotask(() => {
+        const fail = message.op === "hook" && message.hook === 2;
+        const text =
+          message.op === "load"
+            ? "loaded"
+            : JSON.stringify({ ok: !fail, json: "", error: fail ? "hook failed" : "", logs: [] });
+        for (const listener of listeners) listener({ id: typeof message.id === "number" ? message.id : -1, ok: true, text });
+      });
+    },
+    addMessageListener(listener) {
+      listeners.add(listener);
+    },
+    removeMessageListener(listener) {
+      listeners.delete(listener);
+    },
+    addErrorListener() {},
+    removeErrorListener() {},
+    terminate() {
+      return options?.terminate ? options.terminate() : Promise.resolve();
+    },
+  };
+}
+
+describe("resource pack termination", () => {
+  it("keeps a pack charged until termination finishes, then allows another guest", async () => {
+    const wasm = resourceGuest();
+    const files = filesFor(wasm);
+    const size = byteSum(files);
+    let spawned = 0;
+    let releaseFirst: () => void = () => {};
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const backend = createBrowserWasmBackend({
+      spawn() {
+        spawned += 1;
+        const mine = spawned;
+        return scriptedGuest({
+          terminate() {
+            if (mine !== 1) return Promise.resolve();
+            markStarted();
+            return hold;
+          },
+        });
+      },
+    });
+    if (!backend.configure) throw new Error("missing configure");
+    backend.configure(wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }));
+    const session = backend.open();
+    const first = await session.invoke(resourceCall("org.example.first", wasm, files, size));
+    assert.equal(first.ok, true, hookError(first));
+    assert.equal(spawned, 1);
+    const stopping = session.invoke(resourceCall("org.example.first", wasm, files, size, "shutdown"));
+    await started;
+    const blocked = await session.invoke(resourceCall("org.example.second", wasm, filesFor(wasm), size));
+    assert.equal(blocked.ok, false);
+    assert.match(hookError(blocked), /Resource pack exceeds the snapshot budget/);
+    assert.equal(spawned, 1);
+    releaseFirst();
+    const stopped = await stopping;
+    assert.equal(stopped.ok, false);
+    assert.match(hookError(stopped), /hook failed/);
+    const next = await session.invoke(resourceCall("org.example.third", wasm, filesFor(wasm), size));
+    assert.equal(next.ok, true, hookError(next));
+    assert.equal(spawned, 2);
+    await session.release();
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    backend.dispose();
+  });
+
+  it("keeps the charge when termination fails and releases it on the retry", async () => {
+    const wasm = resourceGuest();
+    const files = filesFor(wasm);
+    const size = byteSum(files);
+    let attempts = 0;
+    const backend = createBrowserWasmBackend({
+      spawn() {
+        return scriptedGuest({
+          terminate() {
+            attempts += 1;
+            if (attempts === 1) return Promise.reject(new Error("terminate failed"));
+            return Promise.resolve();
+          },
+        });
+      },
+    });
+    if (!backend.configure) throw new Error("missing configure");
+    backend.configure(wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }));
+    const session = backend.open();
+    const first = await session.invoke(resourceCall("org.example.first", wasm, files, size));
+    assert.equal(first.ok, true, hookError(first));
+    await assert.rejects(
+      () => session.invoke(resourceCall("org.example.first", wasm, files, size, "shutdown")),
+      /terminate failed/,
+    );
+    assert.equal(attempts, 1);
+    const blocked = await session.invoke(resourceCall("org.example.second", wasm, filesFor(wasm), size));
+    assert.match(hookError(blocked), /Resource pack exceeds the snapshot budget/);
+    await session.release();
+    assert.equal(attempts, 2);
+    assert.equal(backend.resourceUsage().guests, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    backend.dispose();
+  });
+
+  it("drops a parent-owned pack when worker creation throws and then accepts another guest", async () => {
+    const wasm = resourceGuest();
+    const files = filesFor(wasm);
+    const before = files.map((file) => Uint8Array.from(file.bytes));
+    const size = byteSum(files);
+    let staged: ArrayBuffer | undefined;
+    let posts = 0;
+    let live = 0;
+    let failCreate = true;
+    const backend = createBrowserWasmBackend({
+      spawn() {
+        if (failCreate) {
+          failCreate = false;
+          throw new Error("worker creation failed");
+        }
+        live += 1;
+        return scriptedGuest({
+          onPost() {
+            posts += 1;
+          },
+          terminate() {
+            live -= 1;
+            return Promise.resolve();
+          },
+        });
+      },
+    });
+    if (!backend.configure) throw new Error("missing configure");
+    backend.configure(wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }));
+    const session = backend.open();
+    const failed = await session.invoke(resourceCall("org.example.first", wasm, files, size, "initialize", (bytes) => {
+      staged = new ArrayBuffer(bytes);
+      return staged;
+    }));
+    assert.match(hookError(failed), /worker creation failed/);
+    assert.equal(posts, 0);
+    assert.equal(live, 0);
+    assert.ok(staged && staged.byteLength === size);
+    files.forEach((file, index) => assert.deepEqual(file.bytes, before[index]));
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    const again = await session.invoke(resourceCall("org.example.second", wasm, filesFor(wasm), size));
+    assert.equal(again.ok, true, hookError(again));
+    assert.equal(live, 1);
+    await session.release();
+    assert.equal(live, 0);
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    backend.dispose();
+  });
+
+  it("releases the pack charge once when delivery throws before transfer", async () => {
+    const wasm = resourceGuest();
+    const files = filesFor(wasm);
+    const before = files.map((file) => Uint8Array.from(file.bytes));
+    const size = byteSum(files);
+    let staged: ArrayBuffer | undefined;
+    let terminated = 0;
+    let failDelivery = true;
+    const backend = createBrowserWasmBackend({
+      spawn() {
+        const fail = failDelivery;
+        failDelivery = false;
+        return scriptedGuest({
+          onPost() {
+            if (fail) throw new Error("post failed");
+          },
+          terminate() {
+            terminated += 1;
+            return Promise.resolve();
+          },
+        });
+      },
+    });
+    if (!backend.configure) throw new Error("missing configure");
+    backend.configure(wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }));
+    const session = backend.open();
+    const failed = await session.invoke(resourceCall("org.example.first", wasm, files, size, "initialize", (bytes) => {
+      staged = new ArrayBuffer(bytes);
+      return staged;
+    }));
+    assert.match(hookError(failed), /post failed/);
+    assert.equal(terminated, 1);
+    assert.ok(staged && staged.byteLength > 0);
+    files.forEach((file, index) => {
+      assert.deepEqual(file.bytes, before[index]);
+      assert.doesNotThrow(() => new Uint8Array(file.bytes.buffer));
+    });
+    assert.equal(backend.resourceUsage().memoryBytes, 0);
+    assert.equal(backend.resourceUsage().guests, 0);
+    const again = await session.invoke(resourceCall("org.example.second", wasm, filesFor(wasm), size));
+    assert.equal(again.ok, true, hookError(again));
+    await session.release();
+    assert.equal(terminated, 2);
+    assert.equal(backend.openSessions(), 0);
+    backend.dispose();
+  });
+});
+
+describe("resource_read signature", () => {
+  const five = [I32, I32, I32, I32, I32];
+  const shapes: { name: string; params: number[]; results: number[]; typeIndex?: number; error: RegExp }[] = [
+    { name: "four parameters", params: [I32, I32, I32, I32], results: [I32], error: /wrong signature/ },
+    { name: "six parameters", params: [...five, I32], results: [I32], error: /wrong signature/ },
+    { name: "a non-i32 parameter", params: [I32, I32, I32, I32, I64], results: [I32], error: /wrong signature/ },
+    { name: "no result", params: five, results: [], error: /wrong signature/ },
+    { name: "two results", params: five, results: [I32, I32], error: /wrong signature/ },
+    { name: "a non-i32 result", params: five, results: [I64], error: /wrong signature/ },
+    { name: "an invalid type index", params: five, results: [I32], typeIndex: 99, error: /Malformed WebAssembly function type/ },
+  ];
+
+  function workerReply(wasm: Uint8Array) {
+    const sent: Array<{ ok?: boolean; text?: string }> = [];
+    const runtime = createGuestRuntime((_id, ok, text) => sent.push({ ok, text }));
+    runtime.onMessage({
+      id: 1,
+      op: "load",
+      wasm,
+      allowResource: true,
+      maxBytes: 65536,
+      maxBinaryBytes: 262144,
+    });
+    return sent[0];
+  }
+
+  it("loads the five i32 signature and rejects every other function type before instantiation", async () => {
+    const good = resourceSignatureGuest({ params: five, results: [I32] });
+    const inspected = inspectWasm(good);
+    const resource = inspected.imports.find((item) => item.name === "resource_read");
+    assert.deepEqual(resource?.params, five);
+    assert.deepEqual(resource?.results, [I32]);
+    const accepted = workerReply(good);
+    assert.equal(accepted?.ok, false);
+    assert.match(accepted?.text ?? "", /^Package resources are not available\.$/);
+    const sample = probe();
+    const note = runScenario(byName(sample.scenarios, "note").id, filesFor(sample.wasm), sample.wasm);
+    assert.equal(note.status, 0);
+    assert.equal(note.written, le(NOTE.byteLength));
+
+    const backend = createWasmBackend();
+    const loaded = await compose(
+      [pkg("org.example.signature", good, ["cgp.resource.read"], {
+        packageFiles: [{ path: "module.wasm", bytes: good }],
+        maxSnapshotBytes: good.byteLength,
+      })],
+      { backend, policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }) },
+    );
+    assert.equal(loaded.runtimeActive, true, loaded.diagnostics.map((item) => item.message).join("\n"));
+    await loaded.shutdown();
+    backend.dispose();
+
+    for (const shape of shapes) {
+      const wasm = resourceSignatureGuest({ params: shape.params, results: shape.results }, shape.typeIndex);
+      const reply = workerReply(wasm);
+      assert.equal(reply?.ok, false, shape.name);
+      assert.match(reply?.text ?? "", shape.error, shape.name);
+      assert.doesNotMatch(reply?.text ?? "", /WebAssembly\.Module|loaded/, shape.name);
+      let spawned = false;
+      const host = createBrowserWasmBackend({
+        spawn() {
+          spawned = true;
+          throw new Error("spawned");
+        },
+      });
+      const refused = await compose([pkg(`org.example.${shape.name.replace(/\s+/g, "-")}`, wasm, ["cgp.resource.read"])], {
+        backend: host,
+        policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }),
+      });
+      assert.equal(refused.runtimeActive, false, shape.name);
+      assert.match(refused.diagnostics.map((item) => item.message).join("\n"), shape.error, shape.name);
+      assert.equal(spawned, false, shape.name);
+      host.dispose();
+    }
+  });
+});
+
+describe("special resource keys", () => {
+  it("accepts __proto__ and constructor as exact map keys beside module.wasm", () => {
+    const built = probe();
+    const ctor = text.encode("ctor-value");
+    const files = filesFor(built.wasm, [{ path: "constructor", bytes: ctor }]);
+    const packed = packPackageFiles(files, built.wasm, { maxSnapshotBytes: 8 * 1024 * 1024 });
+    assert.equal(acceptResourceIndex(packed.pack, packed.index), undefined);
+    const resources = new Map(packed.index.map(({ path, offset, length }) => [path, { offset, length }]));
+    const protoRecord = packed.index.find((item) => item.path === "__proto__");
+    const ctorRecord = packed.index.find((item) => item.path === "constructor");
+    assert.ok(protoRecord);
+    assert.ok(ctorRecord);
+    assert.equal(typeof resources.get, "function");
+    assert.deepEqual(resources.get("__proto__"), { offset: protoRecord.offset, length: protoRecord.length });
+    assert.deepEqual(resources.get("constructor"), { offset: ctorRecord.offset, length: ctorRecord.length });
+    assert.equal(typeof resources.get("constructor"), "object");
+    const proto = runScenario(byName(built.scenarios, "proto").id, files, built.wasm);
+    const constructed = runScenario(byName(built.scenarios, "constructor").id, files, built.wasm);
+    assert.equal(proto.status, 0);
+    assert.equal(proto.watch.startsWith(hex(PROTO)), true);
+    assert.equal(constructed.status, 0);
+    assert.equal(constructed.watch.startsWith(hex(ctor)), true);
+  });
+});
+

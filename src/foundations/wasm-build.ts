@@ -88,7 +88,7 @@ function funcBody(localCount: number, body: number[]): number[] {
   return [...uleb(bytes.length), ...bytes];
 }
 
-type FnType = { params: number; results: number };
+type FnType = { params: number; results: number; paramTypes?: readonly number[]; resultTypes?: readonly number[] };
 type Fn = { type: number; locals?: number; body: number[] };
 type Imp = { module: string; name: string; type: number };
 type Glob = { init: number };
@@ -108,7 +108,11 @@ export type WasmSpec = {
 function typeBytes(types: FnType[]): number[] {
   return [
     ...uleb(types.length),
-    ...types.flatMap((item) => [0x60, ...uleb(item.params), ...Array(item.params).fill(I32), ...uleb(item.results), ...Array(item.results).fill(I32)]),
+    ...types.flatMap((item) => {
+      const params = item.paramTypes ?? Array.from({ length: item.params }, () => I32);
+      const results = item.resultTypes ?? Array.from({ length: item.results }, () => I32);
+      return [0x60, ...uleb(params.length), ...params, ...uleb(results.length), ...results];
+    }),
   ];
 }
 
@@ -537,6 +541,29 @@ export function logGuest(allowedName = "cgp.abi"): Uint8Array {
       { offset: 200, bytes: ping },
       { offset: 256, bytes: ok },
     ],
+  });
+}
+
+/** A guest whose `resource_read` import uses `typeIndex` into a custom function type. */
+export function resourceSignatureGuest(
+  signature: { params: readonly number[]; results: readonly number[] },
+  typeIndex = 3,
+): Uint8Array {
+  return compileWasm({
+    types: [
+      ...STANDARD_TYPES,
+      {
+        params: signature.params.length,
+        results: signature.results.length,
+        paramTypes: signature.params,
+        resultTypes: signature.results,
+      },
+    ],
+    imports: [{ module: "cgp.abi", name: "resource_read", type: typeIndex }],
+    funcs: [...abiSupportFuncs(), { type: 0, body: [...op.i32Const(0)] }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: standardExports(1),
   });
 }
 
