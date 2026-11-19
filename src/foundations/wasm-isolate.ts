@@ -1,5 +1,5 @@
 import { ABI_HOOK, abiHandleOwned, copyJsonData, encodeAbiCall, encodeAbiJson, guestContributions, isAbiHandle, mintAbiHandle } from "./abi.ts";
-import { packPackageFiles } from "./wasm-guest-runtime.mjs";
+import { packPackageFiles, resourceFunctionType } from "./wasm-guest-runtime.mjs";
 import type {
   ExecutionBackend,
   ExecutionPolicy,
@@ -217,39 +217,8 @@ function readStartIndex(bytes: Uint8Array, at: { i: number }, end: number): void
 }
 
 const I32 = 0x7f;
-
-function isValueType(byte: number): boolean {
-  return byte === 0x7f || byte === 0x7e || byte === 0x7d || byte === 0x7c || byte === 0x7b || byte === 0x70 || byte === 0x6f;
-}
-
-function readValtypes(bytes: Uint8Array, at: { i: number }, end: number): number[] {
-  const count = readUleb(bytes, at);
-  if (count > 128) throw new Error("Malformed WebAssembly type section.");
-  const values: number[] = [];
-  for (let n = 0; n < count; n += 1) {
-    if (at.i >= end) throw new Error("Malformed WebAssembly type section.");
-    const byte = bytes[at.i];
-    if (byte === undefined || !isValueType(byte)) throw new Error("Malformed WebAssembly type section.");
-    at.i += 1;
-    values.push(byte);
-  }
-  return values;
-}
-
-type FuncType = { params: number[]; results: number[] };
-
-function readFuncTypes(bytes: Uint8Array, at: { i: number }, end: number): FuncType[] {
-  const count = readUleb(bytes, at);
-  if (count > 256) throw new Error("Malformed WebAssembly type section.");
-  const types: FuncType[] = [];
-  for (let n = 0; n < count; n += 1) {
-    if (at.i >= end || bytes[at.i] !== 0x60) throw new Error("Malformed WebAssembly type section.");
-    at.i += 1;
-    types.push({ params: readValtypes(bytes, at, end), results: readValtypes(bytes, at, end) });
-  }
-  if (at.i !== end) throw new Error("Malformed WebAssembly type section.");
-  return types;
-}
+const MALFORMED_TYPE = "Malformed WebAssembly type section.";
+const MALFORMED_FUNC = "Malformed WebAssembly function type.";
 
 /** Five i32 parameters and one i32 result. `cgp.abi.log` is not checked here. */
 function resourceSignatureMatches(params: readonly number[] | undefined, results: readonly number[] | undefined): boolean {
@@ -275,9 +244,10 @@ export function inspectWasm(bytes: Uint8Array): {
   }
   const at = { i: 8 };
   const imports: WasmImport[] = [];
-  const funcTypes: FuncType[] = [];
-  const pendingFuncs: { index: number; typeIndex: number }[] = [];
-  let sawTypes = false;
+  const resourceImports: { item: WasmImport; typeIndex: number }[] = [];
+  let typeSections = 0;
+  let typeStart = 0;
+  let typeEnd = 0;
   let memory: WasmMemoryLimit = { missing: true };
   const tables: WasmTableLimit[] = [];
   let hasStart = false;
@@ -288,9 +258,11 @@ export function inspectWasm(bytes: Uint8Array): {
     const end = at.i + size;
     if (end > bytes.length) throw new Error("Truncated WebAssembly binary.");
     if (id === 1) {
-      if (sawTypes) throw new Error("Malformed WebAssembly type section.");
-      sawTypes = true;
-      funcTypes.push(...readFuncTypes(bytes, at, end));
+      typeSections += 1;
+      if (typeSections === 1) {
+        typeStart = at.i;
+        typeEnd = end;
+      }
     } else if (id === 2) {
       const count = readUleb(bytes, at);
       for (let n = 0; n < count; n += 1) {
@@ -300,8 +272,9 @@ export function inspectWasm(bytes: Uint8Array): {
         at.i += 1;
         if (kind === 0) {
           const typeIndex = readUleb(bytes, at);
-          pendingFuncs.push({ index: imports.length, typeIndex });
-          imports.push({ module: moduleName, name: field, kind: "func" });
+          const item: WasmImport = { module: moduleName, name: field, kind: "func" };
+          imports.push(item);
+          if (moduleName === "cgp.abi" && field === "resource_read") resourceImports.push({ item, typeIndex });
         } else if (kind === 1) {
           at.i += 1;
           skipLimits(bytes, at);
@@ -351,13 +324,15 @@ export function inspectWasm(bytes: Uint8Array): {
     }
     at.i = end;
   }
-  for (const pending of pendingFuncs) {
-    const signature = funcTypes[pending.typeIndex];
-    if (!signature) throw new Error("Malformed WebAssembly function type.");
-    const item = imports[pending.index];
-    if (!item) throw new Error("Malformed WebAssembly function type.");
-    item.params = signature.params;
-    item.results = signature.results;
+  if (resourceImports.length > 0) {
+    if (typeSections === 0) throw new Error(MALFORMED_FUNC);
+    if (typeSections !== 1) throw new Error(MALFORMED_TYPE);
+    for (const pending of resourceImports) {
+      const signature = resourceFunctionType(bytes, typeStart, typeEnd, pending.typeIndex);
+      if (!signature) continue;
+      pending.item.params = signature.params;
+      pending.item.results = signature.results;
+    }
   }
   return { imports, memory, tables, hasStart };
 }

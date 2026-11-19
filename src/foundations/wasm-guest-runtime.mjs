@@ -349,10 +349,76 @@ function readStartIndex(bytes, at, end) {
 }
 
 const I32 = 0x7f;
+const MALFORMED_TYPE = "Malformed WebAssembly type section.";
+const MALFORMED_FUNC = "Malformed WebAssembly function type.";
+const UNSUPPORTED_TYPE = "cgp.abi.resource_read uses an unsupported WebAssembly type form.";
 
-/** @param {number} byte */
-function isValueType(byte) {
-  return byte === 0x7f || byte === 0x7e || byte === 0x7d || byte === 0x7c || byte === 0x7b || byte === 0x70 || byte === 0x6f;
+/**
+ * @param {string} message
+ * @returns {never}
+ */
+function typeError(message) {
+  throw new Error(message);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readBoundedUleb(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const value = readUleb(bytes, at);
+  if (at.i > end) typeError(MALFORMED_TYPE);
+  return value;
+}
+
+/**
+ * A count cannot need more bytes than the section still holds.
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readCount(bytes, at, end) {
+  const count = readBoundedUleb(bytes, at, end);
+  if (count > end - at.i) typeError(MALFORMED_TYPE);
+  return count;
+}
+
+/**
+ * Signed LEB128 of at most five bytes. The value is not needed; this only skips a heap type or a supertype index.
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readS33(bytes, at, end) {
+  for (let n = 0; n < 5; n += 1) {
+    if (at.i >= end) typeError(MALFORMED_TYPE);
+    const byte = bytes[at.i];
+    if (byte === undefined) typeError("Truncated WebAssembly binary.");
+    at.i += 1;
+    if ((byte & 0x80) === 0) return;
+  }
+  typeError(MALFORMED_TYPE);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readValtype(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const byte = bytes[at.i];
+  if (byte === undefined) typeError("Truncated WebAssembly binary.");
+  at.i += 1;
+  if (byte >= 0x7b && byte <= 0x7f) return byte;
+  if (byte >= 0x69 && byte <= 0x74) return byte;
+  if (byte === 0x63 || byte === 0x64) {
+    readS33(bytes, at, end);
+    return byte;
+  }
+  typeError(UNSUPPORTED_TYPE);
 }
 
 /**
@@ -361,17 +427,10 @@ function isValueType(byte) {
  * @param {number} end
  */
 function readValtypes(bytes, at, end) {
-  const count = readUleb(bytes, at);
-  if (count > 128) throw new Error("Malformed WebAssembly type section.");
+  const count = readCount(bytes, at, end);
   /** @type {number[]} */
   const values = [];
-  for (let n = 0; n < count; n += 1) {
-    if (at.i >= end) throw new Error("Malformed WebAssembly type section.");
-    const byte = bytes[at.i];
-    if (byte === undefined || !isValueType(byte)) throw new Error("Malformed WebAssembly type section.");
-    at.i += 1;
-    values.push(byte);
-  }
+  for (let n = 0; n < count; n += 1) values.push(readValtype(bytes, at, end));
   return values;
 }
 
@@ -380,18 +439,111 @@ function readValtypes(bytes, at, end) {
  * @param {{ i: number }} at
  * @param {number} end
  */
-function readFuncTypes(bytes, at, end) {
-  const count = readUleb(bytes, at);
-  if (count > 256) throw new Error("Malformed WebAssembly type section.");
-  /** @type {{ params: number[], results: number[] }[]} */
-  const types = [];
-  for (let n = 0; n < count; n += 1) {
-    if (at.i >= end || bytes[at.i] !== 0x60) throw new Error("Malformed WebAssembly type section.");
+function readStorage(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const byte = bytes[at.i];
+  if (byte === 0x77 || byte === 0x78) {
     at.i += 1;
-    types.push({ params: readValtypes(bytes, at, end), results: readValtypes(bytes, at, end) });
+    return;
   }
-  if (at.i !== end) throw new Error("Malformed WebAssembly type section.");
-  return types;
+  readValtype(bytes, at, end);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readField(bytes, at, end) {
+  readStorage(bytes, at, end);
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const mut = bytes[at.i];
+  at.i += 1;
+  if (mut !== 0x00 && mut !== 0x01) typeError(MALFORMED_TYPE);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ * @returns {{ params: number[], results: number[] } | null}
+ */
+function readComptype(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const form = bytes[at.i];
+  if (form === undefined) typeError("Truncated WebAssembly binary.");
+  at.i += 1;
+  if (form === 0x60) return { params: readValtypes(bytes, at, end), results: readValtypes(bytes, at, end) };
+  if (form === 0x5f) {
+    const count = readCount(bytes, at, end);
+    for (let n = 0; n < count; n += 1) readField(bytes, at, end);
+    return null;
+  }
+  if (form === 0x5e) {
+    readField(bytes, at, end);
+    return null;
+  }
+  typeError(UNSUPPORTED_TYPE);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ * @returns {{ params: number[], results: number[] } | null}
+ */
+function readSubtype(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const form = bytes[at.i];
+  if (form === 0x4f || form === 0x50) {
+    at.i += 1;
+    const supers = readCount(bytes, at, end);
+    for (let n = 0; n < supers; n += 1) readS33(bytes, at, end);
+    return readComptype(bytes, at, end);
+  }
+  return readComptype(bytes, at, end);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ * @returns {({ params: number[], results: number[] } | null)[]}
+ */
+function readRectype(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  if (bytes[at.i] === 0x4e) {
+    at.i += 1;
+    const count = readCount(bytes, at, end);
+    /** @type {({ params: number[], results: number[] } | null)[]} */
+    const group = [];
+    for (let n = 0; n < count; n += 1) group.push(readSubtype(bytes, at, end));
+    return group;
+  }
+  return [readSubtype(bytes, at, end)];
+}
+
+/**
+ * Decode one function type from a WebAssembly 3.0 type section.
+ * Callers use this only after they have seen a `cgp.abi.resource_read` import.
+ * A struct or array at `typeIndex` returns undefined. An unknown opcode throws
+ * `cgp.abi.resource_read uses an unsupported WebAssembly type form.`
+ * @param {Uint8Array} bytes
+ * @param {number} start
+ * @param {number} end
+ * @param {number} typeIndex
+ * @returns {{ params: number[], results: number[] } | undefined}
+ */
+export function resourceFunctionType(bytes, start, end, typeIndex) {
+  const at = { i: start };
+  const groups = readCount(bytes, at, end);
+  /** @type {({ params: number[], results: number[] } | null)[]} */
+  const types = [];
+  for (let n = 0; n < groups; n += 1) types.push(...readRectype(bytes, at, end));
+  if (at.i !== end) typeError(MALFORMED_TYPE);
+  if (!Number.isInteger(typeIndex) || typeIndex < 0 || typeIndex >= types.length) typeError(MALFORMED_FUNC);
+  const found = types[typeIndex];
+  return found ?? undefined;
 }
 
 /**
@@ -429,11 +581,11 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
   let sawMemory = false;
   let hasStart = false;
   let importsResource = false;
-  let sawTypes = false;
+  let typeSections = 0;
+  let typeStart = 0;
+  let typeEnd = 0;
   let deniedLog = false;
   let deniedResource = false;
-  /** @type {{ params: number[], results: number[] }[]} */
-  const funcTypes = [];
   /** @type {number[]} */
   const resourceTypes = [];
   while (at.i < bytes.length) {
@@ -443,9 +595,11 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
     const end = at.i + size;
     if (end > bytes.length) throw new Error("Truncated WebAssembly binary.");
     if (id === 1) {
-      if (sawTypes) throw new Error("Malformed WebAssembly type section.");
-      sawTypes = true;
-      funcTypes.push(...readFuncTypes(bytes, at, end));
+      typeSections += 1;
+      if (typeSections === 1) {
+        typeStart = at.i;
+        typeEnd = end;
+      }
     } else if (id === 2) {
       const count = readUleb(bytes, at);
       for (let n = 0; n < count; n += 1) {
@@ -508,11 +662,14 @@ function assertGuestBinary(bytes, maxBytes, maxBinaryBytes, allowLog, allowResou
     }
     at.i = end;
   }
-  for (const typeIndex of resourceTypes) {
-    const signature = funcTypes[typeIndex];
-    if (!signature) throw new Error("Malformed WebAssembly function type.");
-    if (!resourceSignatureMatches(signature.params, signature.results)) {
-      throw new Error("cgp.abi.resource_read has the wrong signature.");
+  if (resourceTypes.length > 0) {
+    if (typeSections === 0) throw new Error(MALFORMED_FUNC);
+    if (typeSections !== 1) throw new Error(MALFORMED_TYPE);
+    for (const typeIndex of resourceTypes) {
+      const signature = resourceFunctionType(bytes, typeStart, typeEnd, typeIndex);
+      if (!resourceSignatureMatches(signature?.params, signature?.results)) {
+        throw new Error("cgp.abi.resource_read has the wrong signature.");
+      }
     }
   }
   if (deniedLog) throw new Error("Capability cgp.log is not granted.");

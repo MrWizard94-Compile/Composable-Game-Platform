@@ -16,3 +16,14 @@ export function packPackageFiles(
     allocate?: (size: number) => ArrayBuffer;
   },
 ): { pack: ArrayBuffer; index: ResourceRecord[]; bytes: number };
+
+/**
+ * Function type at `typeIndex` inside a WebAssembly 3.0 type-section payload.
+ * Undefined when that index is a struct or array. Only used for `cgp.abi.resource_read`.
+ */
+export function resourceFunctionType(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  typeIndex: number,
+): { params: number[]; results: number[] } | undefined;

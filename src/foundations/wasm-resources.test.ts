@@ -8,7 +8,7 @@ import { compose, type ModulePackage } from "./host.ts";
 import type { ExecutionPolicy, HookCall } from "./backend.ts";
 import { createWasmBackend, inspectWasm } from "./wasm-backend.ts";
 import { createBrowserWasmBackend } from "./wasm-browser.ts";
-import { acceptResourceIndex, createGuestRuntime, packPackageFiles } from "./wasm-guest-runtime.mjs";
+import { acceptResourceIndex, createGuestRuntime, packPackageFiles, resourceFunctionType } from "./wasm-guest-runtime.mjs";
 import {
   abiSupportFuncs,
   compileWasm,
@@ -866,6 +866,7 @@ describe("resource_read signature", () => {
     { name: "no result", params: five, results: [], error: /wrong signature/ },
     { name: "two results", params: five, results: [I32, I32], error: /wrong signature/ },
     { name: "a non-i32 result", params: five, results: [I64], error: /wrong signature/ },
+    { name: "129 parameters", params: Array.from({ length: 129 }, () => I32), results: [I32], error: /wrong signature/ },
     { name: "an invalid type index", params: five, results: [I32], typeIndex: 99, error: /Malformed WebAssembly function type/ },
   ];
 
@@ -931,6 +932,215 @@ describe("resource_read signature", () => {
       assert.equal(spawned, false, shape.name);
       host.dispose();
     }
+  });
+});
+
+function uleb(value: number): number[] {
+  const out: number[] = [];
+  let rest = value;
+  do {
+    let byte = rest & 0x7f;
+    rest = Math.floor(rest / 128);
+    if (rest !== 0) byte |= 0x80;
+    out.push(byte);
+  } while (rest !== 0);
+  return out;
+}
+
+function readUlebAt(bytes: number[], at: { i: number }): number {
+  let result = 0;
+  let shift = 0;
+  for (;;) {
+    const byte = bytes[at.i];
+    if (byte === undefined) throw new Error("bad uleb");
+    at.i += 1;
+    result |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return result >>> 0;
+    shift += 7;
+  }
+}
+
+function typePayload(wasm: Uint8Array): { payload: number[]; rest: number } {
+  if (wasm[8] !== 1) throw new Error("type section missing");
+  let i = 9;
+  let size = 0;
+  let shift = 0;
+  let byte = 0;
+  do {
+    byte = wasm[i] ?? 0;
+    i += 1;
+    size |= (byte & 0x7f) << shift;
+    shift += 7;
+  } while (byte & 0x80);
+  return { payload: [...wasm.subarray(i, i + size)], rest: i + size };
+}
+
+function withTypePayload(wasm: Uint8Array, payload: number[]): Uint8Array {
+  const { rest } = typePayload(wasm);
+  return Uint8Array.from([...wasm.subarray(0, 8), 1, ...uleb(payload.length), ...payload, ...wasm.subarray(rest)]);
+}
+
+function asRecursive(wasm: Uint8Array, extraCount = 0, extraBytes: number[] = []): Uint8Array {
+  const { payload } = typePayload(wasm);
+  const at = { i: 0 };
+  const count = readUlebAt(payload, at);
+  return withTypePayload(wasm, [0x01, 0x4e, ...uleb(count + extraCount), ...payload.slice(at.i), ...extraBytes]);
+}
+
+function replaceOnce(payload: number[], from: number[], to: number[]): number[] {
+  for (let i = 0; i + from.length <= payload.length; i += 1) {
+    if (from.every((byte, offset) => payload[i + offset] === byte)) {
+      return [...payload.slice(0, i), ...to, ...payload.slice(i + from.length)];
+    }
+  }
+  throw new Error("pattern missing");
+}
+
+function plainGuest(typeCount: number): Uint8Array {
+  const types: { params: number; results: number }[] = [
+    { params: 3, results: 1 },
+    { params: 1, results: 1 },
+    { params: 0, results: 1 },
+    { params: 129, results: 0 },
+  ];
+  while (types.length < typeCount) types.push({ params: 0, results: 0 });
+  return compileWasm({
+    types,
+    funcs: [...abiSupportFuncs(), { type: 0, body: [0x41, 0x00] }],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+    exports: [
+      { name: "memory", kind: "mem", index: 0 },
+      { name: "cg_alloc", kind: "func", index: 0 },
+      { name: "cg_out_ptr", kind: "func", index: 1 },
+      { name: "cg_out_len", kind: "func", index: 2 },
+      { name: "cg_hook", kind: "func", index: 3 },
+    ],
+  });
+}
+
+function workerLoad(wasm: Uint8Array, allowResource = false) {
+  const sent: Array<{ ok?: boolean; text?: string }> = [];
+  const runtime = createGuestRuntime((_id, ok, text) => sent.push({ ok, text }));
+  runtime.onMessage({
+    id: 1,
+    op: "load",
+    wasm,
+    allowResource,
+    maxBytes: 65536,
+    maxBinaryBytes: 262144,
+  });
+  return sent[0];
+}
+
+describe("type section compatibility", () => {
+  it("leaves a non-resource WebAssembly 3.0 type section to the runtime", async () => {
+    const wide = asRecursive(plainGuest(257), 1, [0x5f, 0x00]);
+    assert.doesNotThrow(() => new WebAssembly.Module(wide.slice().buffer));
+    assert.doesNotThrow(() => inspectWasm(wide));
+    assert.equal(inspectWasm(wide).imports.length, 0);
+    const loaded = workerLoad(wide);
+    assert.equal(loaded?.ok, true, loaded?.text);
+    assert.equal(loaded?.text, "loaded");
+    const backend = createWasmBackend();
+    const result = await compose([pkg("org.example.wide-types", wide, [])], {
+      backend,
+      policy: wasmPolicy({ maxMemoryBytes: 65536 }),
+    });
+    assert.equal(result.runtimeActive, true, result.diagnostics.map((item) => item.message).join("\n"));
+    await result.shutdown();
+    backend.dispose();
+  });
+
+  it("resolves resource_read across a recursive group and rejects an unknown type opcode", async () => {
+    const five = [I32, I32, I32, I32, I32];
+    const grouped = asRecursive(resourceSignatureGuest({ params: five, results: [I32] }));
+    const inspected = inspectWasm(grouped);
+    const resource = inspected.imports.find((item) => item.name === "resource_read");
+    assert.deepEqual(resource?.params, five);
+    assert.deepEqual(resource?.results, [I32]);
+    const unavailable = workerLoad(grouped, true);
+    assert.match(unavailable?.text ?? "", /^Package resources are not available\.$/);
+    const backend = createWasmBackend();
+    const loaded = await compose(
+      [pkg("org.example.rec-signature", grouped, ["cgp.resource.read"], {
+        packageFiles: [{ path: "module.wasm", bytes: grouped }],
+        maxSnapshotBytes: grouped.byteLength,
+      })],
+      { backend, policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }) },
+    );
+    assert.equal(loaded.runtimeActive, true, loaded.diagnostics.map((item) => item.message).join("\n"));
+    await loaded.shutdown();
+    backend.dispose();
+
+    const defined = compileWasm({
+      types: [
+        { params: 3, results: 1 },
+        { params: 1, results: 1 },
+        { params: 0, results: 1 },
+        { params: 0, results: 0 },
+        { params: 5, results: 1 },
+      ],
+      imports: [{ module: "cgp.abi", name: "resource_read", type: 4 }],
+      funcs: [...abiSupportFuncs(), { type: 0, body: [0x41, 0x00] }],
+      memory: { min: 1, max: 1 },
+      globals: [{ init: 1024 }, { init: 0 }, { init: 0 }],
+      exports: [
+        { name: "memory", kind: "mem", index: 0 },
+        { name: "cg_alloc", kind: "func", index: 0 },
+        { name: "cg_out_ptr", kind: "func", index: 1 },
+        { name: "cg_out_len", kind: "func", index: 2 },
+        { name: "cg_hook", kind: "func", index: 3 },
+      ],
+    });
+    const swapped = replaceOnce(typePayload(defined).payload, [0x60, 0x00, 0x00], [0x5f, 0x00]);
+    const at = { i: 0 };
+    const count = readUlebAt(swapped, at);
+    const afterStruct = withTypePayload(defined, [0x01, 0x4e, ...uleb(count), ...swapped.slice(at.i)]);
+    assert.deepEqual(inspectWasm(afterStruct).imports.find((item) => item.name === "resource_read")?.params, five);
+    const afterReply = workerLoad(afterStruct, true);
+    assert.match(afterReply?.text ?? "", /^Package resources are not available\.$/);
+
+    const section = Uint8Array.from([
+      0x02,
+      0x4e, 0x02,
+      0x5f, 0x00,
+      0x50, 0x01, 0x00, 0x60, 0x01, 0x63, 0x70, 0x00,
+      0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+    ]);
+    const resolved = resourceFunctionType(section, 0, section.length, 2);
+    assert.deepEqual(resolved?.params, five);
+    assert.equal(resourceFunctionType(section, 0, section.length, 0), undefined);
+    const many = [0x81, 0x02];
+    for (let n = 0; n < 257; n += 1) many.push(0x60, 0x00, 0x00);
+    const manyBytes = Uint8Array.from(many);
+    assert.deepEqual(resourceFunctionType(manyBytes, 0, manyBytes.length, 256), { params: [], results: [] });
+    assert.throws(
+      () => resourceFunctionType(Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0x0f]), 0, 5, 0),
+      /Malformed WebAssembly type section/,
+    );
+
+    const { payload } = typePayload(grouped);
+    payload[payload.indexOf(0x60)] = 0x5d;
+    const unknown = withTypePayload(grouped, payload);
+    assert.throws(() => inspectWasm(unknown), /unsupported WebAssembly type form/);
+    const reply = workerLoad(unknown, true);
+    assert.match(reply?.text ?? "", /unsupported WebAssembly type form/);
+    assert.doesNotMatch(reply?.text ?? "", /WebAssembly\.Module|loaded/);
+    let spawned = false;
+    const host = createBrowserWasmBackend({
+      spawn() {
+        spawned = true;
+        throw new Error("spawned");
+      },
+    });
+    const refused = await compose([pkg("org.example.unknown-type", unknown, ["cgp.resource.read"])], {
+      backend: host,
+      policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }),
+    });
+    assert.match(refused.diagnostics.map((item) => item.message).join("\n"), /unsupported WebAssembly type form/);
+    assert.equal(spawned, false);
+    host.dispose();
   });
 });
 
