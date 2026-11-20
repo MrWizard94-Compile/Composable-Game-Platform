@@ -1,0 +1,69 @@
+{
+  "selected": "2026-11-20",
+  "reason": "These versions are the set that actually built one sync WIT world and ran the same component bytes on Wasmtime 50, then ran the jco transpilation of those bytes on Node 22 and Chromium. Newer or older pieces were not mixed in just to chase a release.",
+  "host": {
+    "os": "linux x86_64",
+    "node": "22.23.3",
+    "rustc": "1.99.0",
+    "cargo": "1.99.0",
+    "engines": "package.json engines.node >=22. CGP CI uses Node 22."
+  },
+  "tools": [
+    {
+      "name": "wasmtime",
+      "version": "50.0.3",
+      "published": "2026-11-19",
+      "license": "Apache-2.0",
+      "source": "https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.3/wasmtime-v50.0.3-x86_64-linux.tar.xz",
+      "sha256": "c59133a9334e96eaca5e26f0d4c35199bfe43ab34049aa254ef4b47af1361476",
+      "role": "Native component runtime. Executes the component binary. wasm-tools 1.263 tracks the Wasmtime 50 line.",
+      "crate": "=50.0.3 with feature component-model"
+    },
+    {
+      "name": "wasm-tools",
+      "version": "1.263.0",
+      "published": "2026-10-30",
+      "license": "Apache-2.0",
+      "source": "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.263.0/wasm-tools-1.263.0-x86_64-linux.tar.gz",
+      "sha256": "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431",
+      "role": "WIT validation via component new and component wit. Proves the import set before instantiation."
+    },
+    {
+      "name": "wit-bindgen",
+      "version": "0.63.0",
+      "published": "2026-10-14",
+      "license": "Apache-2.0",
+      "source": "https://github.com/bytecodealliance/wit-bindgen/releases/download/v0.63.0/wit-bindgen-0.63.0-x86_64-linux.tar.gz",
+      "sha256": "bf4efe883ab70d34a4740253911dda20caf895d58a003af58369506b04684cbe",
+      "role": "Newest stable guest generator. Embeds wit-component 0.262, one release behind wasm-tools 1.263. Kept because there is no newer stable wit-bindgen, and this sync world plus one async func validated under wasm-tools 1.263 and ran on Wasmtime 50.0.3.",
+      "crate": "=0.63.0"
+    },
+    {
+      "name": "@bytecodealliance/jco",
+      "version": "1.42.0",
+      "published": "2026-11-13",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "source": "https://www.npmjs.com/package/@bytecodealliance/jco",
+      "role": "Transpiles a component to ES modules and core Wasm. This is what Node and browsers execute. It does not mean they execute the component binary. Default componentize backend is StarlingMonkey."
+    },
+    {
+      "name": "@bytecodealliance/componentize-js",
+      "version": "0.23.0",
+      "published": "2026-09-21",
+      "license": "Apache-2.0",
+      "source": "https://www.npmjs.com/package/@bytecodealliance/componentize-js",
+      "role": "JS guest to component, pulled by jco 1.42 as the StarlingMonkey backend. Pinned exact so the prototype does not float. Built with --disable all so the sync guest imports nothing. The QuickJS backend was not used: it is async by default, and --backend-qjs-disable-async would have produced a different artifact."
+    },
+    {
+      "name": "playwright",
+      "version": "1.64.0",
+      "license": "Apache-2.0",
+      "role": "Chromium launch in this sandbox succeeded. Firefox 157 downloaded but did not launch here: libgtk-3, libgdk-3, libXcursor, libcairo-gobject, libpangocairo, and libgdk_pixbuf are missing and apt cannot install them. WebKit also failed, on libgtk-4 and libgstreamer. CI installs browser libraries and requires Firefox."
+    }
+  ],
+  "notSelected": [
+    "WASI 0.3 as the slot ABI. One async func was probed separately.",
+    "QuickJS componentize backend.",
+    "A Component Model package as the CGP release format. ADR 0017 remains a core module."
+  ]
+}

@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "guests/rust-meter",
+    "guests/hostile",
+    "guests/async-ping",
+    "harness/wasmtime-host",
+]
+resolver = "2"
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+strip = "symbols"

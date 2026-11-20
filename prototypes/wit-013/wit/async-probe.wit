@@ -1,0 +1,10 @@
+package cgp:async-probe@0.1.0;
+
+/// Separate from the slot contract. Not a simulation interface.
+interface ping {
+    tick: async func() -> result<string, string>;
+}
+
+world async-probe {
+    export ping;
+}

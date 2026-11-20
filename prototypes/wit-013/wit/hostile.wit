@@ -1,0 +1,25 @@
+package cgp:slot-probe@0.1.0;
+
+interface meter {
+    record reading {
+        value: s32,
+        label: string,
+    }
+    enum meter-error {
+        refused,
+        overflow,
+    }
+    calls: func() -> s32;
+    read: func() -> result<reading, meter-error>;
+    add: func(delta: s32) -> result<s32, meter-error>;
+}
+
+/// A capability this prototype does not grant. Importing it is not authorization.
+interface hostile-io {
+    read-file: func(path: string) -> string;
+}
+
+world hostile {
+    import hostile-io;
+    export meter;
+}

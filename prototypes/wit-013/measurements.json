@@ -1,0 +1,125 @@
+{
+  "measuredAt": "2026-11-20T10:34:40.125Z",
+  "host": "linux x86_64",
+  "node": "v22.23.3",
+  "calls": 1000,
+  "method": "performance.now in the calling process, except Wasmtime bench which uses std::time::Instant inside the host process. RSS is VmRSS for the Wasmtime process and process.memoryUsage().rss for Node.",
+  "sizes": {
+    "rustComponent": 27338,
+    "jsComponent": 12028656,
+    "hostileComponent": 17279,
+    "rustCore": 22135,
+    "rustGlue": 144131,
+    "jsCore": 12023118,
+    "jsGlue": 147354,
+    "hostileGlue": 130238
+  },
+  "buildTimes": {
+    "times": [
+      {
+        "label": "cargo guests",
+        "elapsedMs": 871
+      },
+      {
+        "label": "cargo wasmtime-host",
+        "elapsedMs": 98
+      },
+      {
+        "label": "component new rust",
+        "elapsedMs": 6
+      },
+      {
+        "label": "component new hostile",
+        "elapsedMs": 5
+      },
+      {
+        "label": "componentize js",
+        "elapsedMs": 4167
+      },
+      {
+        "label": "transpile /workspace/prototypes/wit-013/dist/transpile/rust",
+        "elapsedMs": 667
+      },
+      {
+        "label": "transpile /workspace/prototypes/wit-013/dist/transpile/js",
+        "elapsedMs": 1260
+      },
+      {
+        "label": "transpile /workspace/prototypes/wit-013/dist/transpile/hostile",
+        "elapsedMs": 552
+      }
+    ],
+    "importReport": {
+      "rust": [],
+      "js": [],
+      "hostile": [
+        "cgp:slot-probe/hostile-io@0.1.0"
+      ]
+    }
+  },
+  "wasmtimeRust": {
+    "instantiateUs": 120,
+    "elapsedUs": 540,
+    "n": 1000,
+    "value": 1000,
+    "rssBeforeKb": 2720,
+    "rssAfterKb": 12128
+  },
+  "wasmtimeJs": {
+    "instantiateUs": 3718,
+    "elapsedUs": 11008,
+    "n": 1000,
+    "value": 1000,
+    "rssBeforeKb": 2680,
+    "rssAfterKb": 321764
+  },
+  "nodeJcoRust": {
+    "instantiateMs": 9.203,
+    "callMs": 18.244,
+    "perCallUs": 18.244,
+    "value": 1000,
+    "rssBefore": 168980480,
+    "rssAfter": 176058368
+  },
+  "nodeJcoJs": {
+    "instantiateMs": 92.252,
+    "callMs": 101.243,
+    "perCallUs": 101.243,
+    "value": 1000,
+    "rssBefore": 176058368,
+    "rssAfter": 220454912
+  },
+  "cgpAbi": {
+    "note": "Production cgp.abi/1 echo through wasm-isolate. Includes worker IPC. Not an in-process WIT call.",
+    "encodeOnlyMs": 2.036,
+    "startupMs": 106.615,
+    "callMs": 58.196,
+    "perCallUs": 58.196,
+    "guests": 1
+  },
+  "browsers": [
+    {
+      "runtime": "chromium",
+      "supported": true,
+      "calls": 1000,
+      "rust": {
+        "instantiateMs": 32.7,
+        "callMs": 14.7,
+        "perCallUs": 14.7,
+        "value": 1000
+      },
+      "js": {
+        "instantiateMs": 117.3,
+        "callMs": 92.3,
+        "perCallUs": 92.3,
+        "value": 1000
+      },
+      "nativeComponent": false
+    },
+    {
+      "runtime": "firefox",
+      "supported": false,
+      "error": "browserType.launch: \n╔══════════════════════════════════════════════════════╗\n║ Host system is missing dependencies to run browsers. ║\n║ Missing libraries:                                   ║\n║     libXcursor.so.1                                  ║\n║     libgtk-3.so.0                                    ║\n║     libgdk-3.so.0                                    ║\n║     libpangocairo-1.0.so.0                           ║\n║     libcairo-gobject.so.2                            ║\n║     libgdk_pixbuf-2.0.so.0                           ║\n╚══════════════════════════════════════════════════════╝"
+    }
+  ]
+}

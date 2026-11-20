@@ -1,0 +1,39 @@
+name: wit-prototype
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  prototype:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust 1.99.0
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.99.0 --profile minimal --target wasm32-unknown-unknown
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install pinned component tools
+        env:
+          CGP_WIT_TOOLS: ${{ runner.temp }}/cgp-wit/bin
+        run: sh prototypes/wit-013/tools/install.sh
+      - name: Install prototype packages
+        working-directory: prototypes/wit-013
+        run: npm ci --no-fund --no-audit
+      - name: Install Chromium and Firefox
+        working-directory: prototypes/wit-013
+        run: npx playwright install --with-deps chromium firefox
+      - name: Build, conformance, and async probe
+        working-directory: prototypes/wit-013
+        env:
+          CGP_WIT_TOOLS: ${{ runner.temp }}/cgp-wit/bin
+          CGP_REQUIRE_FIREFOX: "1"
+        run: npm test
+      - name: Measure
+        working-directory: prototypes/wit-013
+        env:
+          CGP_WIT_TOOLS: ${{ runner.temp }}/cgp-wit/bin
+        run: npm run measure

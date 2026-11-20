@@ -1,0 +1,53 @@
+package cgp:slot-probe@0.1.0;
+
+/// Typed service surface for one CGP service Slot.
+/// The WIT package version is not a CGP module id, module version, or composition id.
+interface meter {
+    record reading {
+        value: s32,
+        label: string,
+    }
+    enum meter-error {
+        refused,
+        overflow,
+    }
+    /// Host-observed call count. Unauthorized calls must not increment it.
+    calls: func() -> s32;
+    read: func() -> result<reading, meter-error>;
+    /// Adds `delta` or returns `overflow` without changing the stored value.
+    add: func(delta: s32) -> result<s32, meter-error>;
+}
+
+/// Data a guest offers to a registry Slot.
+/// Contribution identity is explicit. The host decides membership, order, and selection.
+interface registry {
+    record contribution {
+        id: string,
+        order: s32,
+        label: string,
+    }
+    contributions: func() -> list<contribution>;
+}
+
+/// Composition-scoped pass. WIT ownership is not CGP authorization.
+interface passes {
+    resource pass {
+        id: func() -> string;
+        module: func() -> string;
+        composition: func() -> string;
+    }
+    /// Guest-side live count, including handles the host has not consumed.
+    /// This is an observation for the prototype, not a CGP capability.
+    live: func() -> s32;
+    issue: func(module-id: string, composition: string) -> pass;
+    /// Borrow lasts for this call. The result is an owned string, not the handle.
+    peek: func(ticket: borrow<pass>) -> string;
+    /// Takes ownership and destroys the resource.
+    consume: func(ticket: pass) -> result<string, string>;
+}
+
+world probe {
+    export meter;
+    export registry;
+    export passes;
+}
