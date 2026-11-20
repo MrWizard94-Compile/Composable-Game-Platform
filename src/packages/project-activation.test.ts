@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { applyLocalStoreGarbageCollection, previewLocalStoreGarbageCollection, registerStagedPackage, removeLocalRetentionPin } from "./local-store.ts";
@@ -9,6 +9,7 @@ import { createProjectLock } from "./project-lock.ts";
 import { buildReleasePackage } from "./release-pipeline.ts";
 import { activateProject, platformJavascriptCleanupSupported, setProjectActivationTestProbes } from "./project-activation.ts";
 import { CLOSED_POLICY } from "../foundations/index.ts";
+import { resourceActivationGuest } from "../foundations/wasm-build.ts";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const wasmPackage = join(repositoryRoot, "examples/third-party-module");
@@ -38,13 +39,23 @@ function leaseNames(store: string): string[] {
   const directory = join(store, ".cgp-store.composition-leases");
   return existsSync(directory) ? readdirSync(directory) : [];
 }
-async function stageJavaScript(root: string, moduleId: string, source: string): Promise<string> {
+async function stageJavaScript(
+  root: string,
+  moduleId: string,
+  source: string,
+  files: Readonly<Record<string, string>> = {},
+): Promise<string> {
   const sourceDir = join(root, moduleId + "-source");
   mkdirSync(sourceDir);
   writeFileSync(join(sourceDir, "manifest.json"), JSON.stringify({
     moduleId, name: moduleId, version: "1.0.0", moduleApi: ">=1.0.0 <2.0.0", permissions: [],
   }, null, 2) + "\n");
   writeFileSync(join(sourceDir, "module.ts"), source);
+  for (const [path, contents] of Object.entries(files)) {
+    const full = join(sourceDir, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, contents);
+  }
   const staging = join(root, moduleId + "-stage");
   await buildReleasePackage({
     sourceDirectory: sourceDir,
@@ -971,5 +982,138 @@ test("an ancestor swapped for a symlink after a child is pinned is not used for 
     }
     if (parked && existsSync(parked)) rmSync(parked, { recursive: true, force: true });
     if (activation) await activation.shutdown().catch(() => undefined);
+  }
+});
+
+
+function stageResource(root: string, moduleId: string, note: string, contributionId: string): string {
+  const directory = join(root, moduleId.replaceAll(".", "-"));
+  mkdirSync(directory, { recursive: true });
+  const manifest = JSON.parse(readFileSync(join(wasmPackage, "manifest.json"), "utf8")) as {
+    moduleId: string;
+    name: string;
+    permissions?: string[];
+  };
+  manifest.moduleId = moduleId;
+  manifest.name = moduleId;
+  manifest.permissions = ["cgp.resource.read"];
+  writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+  writeFileSync(join(directory, "cgp-package.json"), readFileSync(join(wasmPackage, "cgp-package.json")));
+  writeFileSync(join(directory, "module.wasm"), resourceActivationGuest(contributionId));
+  writeFileSync(join(directory, "note.txt"), note);
+  writeFileSync(join(directory, "README.md"), "Project activation fixture for " + moduleId + "\n");
+  return directory;
+}
+
+function assertPack(payload: unknown, note: string, wasm: Uint8Array): void {
+  assert.ok(payload && typeof payload === "object");
+  const row = payload as { noteLength: string; noteHex: string; wasmLength: string; wasmPrefix: string; foreign: string };
+  const noteBytes = Buffer.from(note, "utf8");
+  assert.equal(Number(row.noteLength), noteBytes.byteLength);
+  assert.equal(row.noteHex.slice(0, noteBytes.byteLength * 2), noteBytes.toString("hex"));
+  assert.equal(Number(row.wasmLength), wasm.byteLength);
+  assert.equal(row.wasmPrefix, Buffer.from(wasm.subarray(0, 16)).toString("hex"));
+  assert.equal(Number(row.foreign), 2);
+}
+
+const resourcePolicy = {
+  allowGrants: ["filesystem", "network", "os"] as const,
+  allowCapabilities: ["cgp.resource.read"],
+  maxHookMs: 1000,
+  maxMemoryBytes: 65536,
+  maxBinaryBytes: 65536,
+};
+
+test("wasm-only resource activation reads its verified package when JavaScript cleanup is unavailable", async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const note = "wasm-only-note";
+  const staged = stageResource(root, "org.example.reader", note, "alpha");
+  const wasm = readFileSync(join(staged, "module.wasm"));
+  await registerStagedPackage(staged, store);
+  const project = { profileId: "org.example.resource-wasm-only", name: "Resource", modules: [{ moduleId: "org.example.reader", version: "1.0.0" }] };
+  const lock = await createProjectLock(store, project);
+  setProjectActivationTestProbes({ cleanupSupported: false });
+  const activation = await activateProject(store, project, lock, {
+    maxSnapshotBytes: 8 * 1024 * 1024,
+    policy: { allowGrants: [], allowCapabilities: ["cgp.resource.read"], ...limits },
+    backendOptions: limits,
+  });
+  try {
+    assert.equal(activation.ok, true, activation.composition.diagnostics.map((item) => item.message).join("\n"));
+    assert.equal(activation.composition.backendId, "wasm-isolate");
+    assert.equal("javascriptTrust" in activation, false);
+    const contribution = activation.composition.contributions.find((item) => item.id === "alpha");
+    assert.ok(contribution);
+    assertPack(contribution.payload, note, wasm);
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.deepEqual(stopped.diagnostics, []);
+    assert.ok(stopped.order.includes("org.example.reader"));
+    assert.deepEqual(leaseNames(store), []);
+  } finally {
+    setProjectActivationTestProbes(undefined);
+    await activation.shutdown().catch(() => undefined);
+  }
+});
+
+test("a mixed project gives each Wasm guest only its own files", { skip: skipWithoutPinnedCleanup }, async (t) => {
+  const root = fixture(t);
+  const store = join(root, "store");
+  const slot = "__cgpMixedResource";
+  const hello = "js-secret";
+  const jsSource = [
+    "export const implementation = {",
+    "  openResources(view) { globalThis[" + JSON.stringify(slot) + "] = view; },",
+    "};",
+    "",
+  ].join("\n");
+  const jsStage = await stageJavaScript(root, "org.example.resource-js", jsSource, { "data/hello.txt": hello });
+  const firstStage = stageResource(root, "org.example.reader-a", "alpha-note", "alpha");
+  const secondStage = stageResource(root, "org.example.reader-b", "beta-note", "beta");
+  const firstWasm = readFileSync(join(firstStage, "module.wasm"));
+  const secondWasm = readFileSync(join(secondStage, "module.wasm"));
+  await registerStagedPackage(jsStage, store);
+  await registerStagedPackage(firstStage, store);
+  await registerStagedPackage(secondStage, store);
+  const project = {
+    profileId: "org.example.mixed-resources",
+    name: "Mixed Resources",
+    modules: [
+      { moduleId: "org.example.resource-js", version: "1.0.0" },
+      { moduleId: "org.example.reader-a", version: "1.0.0" },
+      { moduleId: "org.example.reader-b", version: "1.0.0" },
+    ],
+  };
+  const lock = await createProjectLock(store, project);
+  const activation = await activateProject(store, project, lock, {
+    maxSnapshotBytes: 8 * 1024 * 1024,
+    javascript: "trusted-in-process",
+    policy: resourcePolicy,
+    backendOptions: limits,
+  });
+  try {
+    assert.equal(activation.ok, true, activation.composition.diagnostics.map((item) => item.message).join("\n"));
+    assert.equal(activation.composition.backendId, "cross");
+    const view = (globalThis as unknown as Record<string, { read(path: string): Uint8Array; list(): readonly string[] }>)[slot];
+    assert.ok(view);
+    assert.equal(Buffer.from(view.read("data/hello.txt")).toString("utf8"), hello);
+    assert.equal(view.list().includes("data/hello.txt"), true);
+    assert.equal(view.list().includes("note.txt"), false);
+    assert.equal(view.list().includes("module.wasm"), false);
+    assert.equal(view.list().join("\n").includes(store), false);
+    const alpha = activation.composition.contributions.find((item) => item.id === "alpha");
+    const beta = activation.composition.contributions.find((item) => item.id === "beta");
+    assert.ok(alpha && beta);
+    assertPack(alpha.payload, "alpha-note", firstWasm);
+    assertPack(beta.payload, "beta-note", secondWasm);
+    const stopped = await activation.shutdown();
+    assert.equal(stopped.already, false);
+    assert.deepEqual(stopped.diagnostics, []);
+    assert.deepEqual(leaseNames(store), []);
+    assert.throws(() => view.read("data/hello.txt"), /Package resources are closed/);
+  } finally {
+    delete (globalThis as Record<string, unknown>)[slot];
+    await activation.shutdown().catch(() => undefined);
   }
 });

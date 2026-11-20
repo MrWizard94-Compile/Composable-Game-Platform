@@ -147,7 +147,7 @@ function scanDirectory(root: string, maxTotalBytes?: number): ScanResult {
   return { files, errors, totalBytes };
 }
 
-function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string[] {
+function validateWasm(bytes: Uint8Array, permissions: readonly string[]): { errors: string[]; importsResource: boolean } {
   const errors: string[] = [];
   let module: WebAssembly.Module;
   let inspected: ReturnType<typeof inspectWasm>;
@@ -155,7 +155,10 @@ function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string
     module = new WebAssembly.Module(bytes);
     inspected = inspectWasm(bytes);
   } catch (error) {
-    return [error instanceof Error ? error.message : "module.wasm is not a valid WebAssembly Core module."];
+    return {
+      errors: [error instanceof Error ? error.message : "module.wasm is not a valid WebAssembly Core module."],
+      importsResource: false,
+    };
   }
 
   const exports = WebAssembly.Module.exports(module);
@@ -204,7 +207,7 @@ function validateWasm(bytes: Uint8Array, permissions: readonly string[]): string
   else if (table && "max" in table && table.max !== null && table.max > 256) {
     errors.push("module.wasm table maximum must not exceed 256 entries.");
   }
-  return errors;
+  return { errors, importsResource };
 }
 
 
@@ -261,6 +264,7 @@ type ScannedPackageValidation =
       manifest: ModuleManifest;
       artifactBytes: Uint8Array;
       packageBytes: number;
+      importsResource: boolean;
     }
   | { ok: false; errors: string[] };
 
@@ -307,10 +311,15 @@ async function validateScannedPackageDirectory(
 
   const wasmFile = byPath.get("module.wasm");
   const jsFile = byPath.get("module.mjs");
+  let importsResource = false;
   if (descriptorCheck.descriptor.runtime.kind === "wasm-core") {
     if (!wasmFile) errors.push("module.wasm is missing for the wasm-core package.");
     if (jsFile) errors.push("A wasm-core package must not also contain module.mjs.");
-    if (wasmFile) errors.push(...validateWasm(wasmFile.bytes, manifestCheck.manifest.permissions));
+    if (wasmFile) {
+      const wasmCheck = validateWasm(wasmFile.bytes, manifestCheck.manifest.permissions);
+      errors.push(...wasmCheck.errors);
+      importsResource = wasmCheck.importsResource;
+    }
   } else {
     if (!jsFile) errors.push("module.mjs is missing for the javascript-esm package.");
     if (wasmFile) errors.push("A javascript-esm package must not also contain module.wasm.");
@@ -341,6 +350,7 @@ async function validateScannedPackageDirectory(
     },
     artifactBytes: artifact.bytes,
     packageBytes: scanned.totalBytes,
+    importsResource,
   };
 }
 
@@ -369,6 +379,12 @@ export type WasmReleasePackageSnapshot = {
   wasmBytes: Uint8Array;
   /** Total size of every file in the verified package tree, not just the Wasm artifact. */
   packageBytes: number;
+  /**
+   * Present only when `module.wasm` imports `cgp.abi.resource_read`.
+   * These are the scanned buffers from the digest check, not a second copy.
+   * `wasmBytes` is the `module.wasm` entry in this array.
+   */
+  files?: readonly PackageFile[];
 };
 
 export type WasmReleasePackageSnapshotValidation =
@@ -392,6 +408,11 @@ export async function snapshotWasmReleasePackageDirectory(
   if (!checked.ok) return { ok: false, errors: checked.errors };
   freezeSnapshotMetadata(checked.package);
   freezeSnapshotMetadata(checked.manifest);
+  const files = checked.importsResource ? scanned.files : undefined;
+  if (files) {
+    for (const file of files) Object.freeze(file);
+    Object.freeze(files);
+  }
   return {
     ok: true,
     snapshot: Object.freeze({
@@ -399,6 +420,7 @@ export async function snapshotWasmReleasePackageDirectory(
       manifest: checked.manifest,
       wasmBytes: checked.artifactBytes,
       packageBytes: checked.packageBytes,
+      ...(files ? { files } : {}),
     }),
   };
 }

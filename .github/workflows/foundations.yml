@@ -57,4 +57,4 @@ jobs:
       - name: Install development dependencies
         run: npm ci --no-fund --no-audit
       - name: Activation cleanup and package resource tests
-        run: node --experimental-strip-types --test src/packages/project-activation.test.ts src/packages/package-resources.test.ts
+        run: node --experimental-strip-types --test src/packages/project-activation.test.ts src/packages/package-resources.test.ts src/packages/wasm-activation.test.ts

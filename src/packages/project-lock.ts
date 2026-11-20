@@ -284,6 +284,8 @@ export type WasmProjectModuleSnapshot = {
   manifest: ModuleManifest;
   wasmBytes: Uint8Array;
   packageBytes: number;
+  /** Retained only when this module's Wasm imports `cgp.abi.resource_read`. */
+  files?: readonly PackageFile[];
 };
 
 export type WasmProjectSnapshot = {
@@ -428,6 +430,7 @@ async function snapshotWasmProjectLockWithReadLockHeld(
       manifest: result.snapshot.manifest,
       wasmBytes: result.snapshot.wasmBytes,
       packageBytes: result.snapshot.packageBytes,
+      ...(result.snapshot.files ? { files: result.snapshot.files } : {}),
     });
     totalBytes += result.snapshot.packageBytes;
   }

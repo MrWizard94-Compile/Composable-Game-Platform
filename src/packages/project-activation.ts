@@ -18,7 +18,7 @@ import {
   type ModulePackage,
   type ShutdownReport,
 } from "../foundations/index.ts";
-import { createWasmBackend } from "../foundations/wasm-backend.ts";
+import { createWasmBackend, inspectWasm } from "../foundations/wasm-backend.ts";
 import type { HostBudget, LogBudget } from "../foundations/wasm-backend.ts";
 import {
   projectLockModules,
@@ -114,6 +114,18 @@ function publicIdentity(entry: LocalCatalogEntry): ProjectActivationModuleIdenti
     runtime: entry.runtime,
     files: Object.freeze([...entry.files]),
   });
+}
+
+function wasmImplementation(
+  artifact: Uint8Array,
+  files: readonly PackageFile[] | undefined,
+  budget: number,
+): ModuleImplementation {
+  const importsResource = inspectWasm(artifact).imports.some(
+    (item) => item.module === "cgp.abi" && item.name === "resource_read" && item.kind === "func",
+  );
+  if (!importsResource || !files || files.length === 0) return { wasm: artifact };
+  return { wasm: artifact, packageFiles: files, maxSnapshotBytes: budget } as ModuleImplementation;
 }
 
 function cleanupError(failures: unknown[], message: string): Error {
@@ -543,6 +555,7 @@ async function runProjectActivation(
           manifest: module.manifest,
           artifactBytes: module.wasmBytes,
           packageBytes: module.packageBytes,
+          ...(module.files ? { files: module.files } : {}),
         })),
       };
     } else {
@@ -576,7 +589,14 @@ async function runProjectActivation(
     for (let index = 0; index < snapshot.modules.length; index += 1) {
       const module = snapshot.modules[index]!;
       if (module.entry.runtime === "wasm-core") {
-        packages.push({ manifest: module.manifest, implementation: { wasm: module.artifactBytes } });
+        packages.push({
+          manifest: module.manifest,
+          implementation: wasmImplementation(
+            module.artifactBytes,
+            (module as { files?: readonly PackageFile[] }).files,
+            options.maxSnapshotBytes,
+          ),
+        });
         continue;
       }
       if (!admitJavaScript) {

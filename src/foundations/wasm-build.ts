@@ -1315,3 +1315,265 @@ export function resourceProbeGuest(): { wasm: Uint8Array; scenarios: ResourceSce
   });
   return { wasm, scenarios, noteAddr, notePathLength: notePath.byteLength };
 }
+
+/**
+ * Register reads `note.txt` and `module.wasm` from this guest's pack and contributes
+ * the note bytes, the artifact length, and a 16-byte prefix. Shutdown hook 2 reads
+ * `note.txt` again and returns 0 only when that read succeeds. `data/hello.txt` is
+ * reported as a status and is not expected to be in this package.
+ */
+export function resourceActivationGuest(contributionId = "pack"): Uint8Array {
+  if (!/^[a-z][a-z0-9-]{0,64}$/.test(contributionId)) {
+    throw new Error("Resource activation contribution id is not valid.");
+  }
+  const notePath = text("note.txt");
+  const wasmPath = text("module.wasm");
+  const foreignPath = text("data/hello.txt");
+  const json = JSON.stringify({
+    contributions: [{
+      slotId: "platform.systems",
+      id: contributionId,
+      payload: {
+        noteLength: "00",
+        noteHex: "0".repeat(64),
+        wasmLength: "000000",
+        wasmPrefix: "0".repeat(32),
+        foreign: "0",
+      },
+    }],
+  });
+  const jsonBytes = text(json);
+  const noteLenAt = json.indexOf('"noteLength":"') + '"noteLength":"'.length;
+  const noteHexAt = json.indexOf('"noteHex":"') + '"noteHex":"'.length;
+  const wasmLenAt = json.indexOf('"wasmLength":"') + '"wasmLength":"'.length;
+  const prefixAt = json.indexOf('"wasmPrefix":"') + '"wasmPrefix":"'.length;
+  const foreignAt = json.indexOf('"foreign":"') + '"foreign":"'.length;
+  const JSON_AT = 416;
+  const WASM_OUT = 1024;
+  const WASM_CAP = 48 * 1024;
+  const HEAP = WASM_OUT + WASM_CAP;
+  const NOTE_PATH = 256;
+  const WASM_PATH = 280;
+  const FOREIGN_PATH = 304;
+  const NOTE_OUT = 336;
+  const NOTE_CAP = 32;
+  const NOTE_WRITTEN = 368;
+  const WASM_WRITTEN = 376;
+  const FOREIGN_OUT = 384;
+  const FOREIGN_WRITTEN = 404;
+  if (jsonBytes[noteLenAt] !== 0x30 || jsonBytes[noteHexAt] !== 0x30 || jsonBytes[wasmLenAt] !== 0x30 ||
+      jsonBytes[prefixAt] !== 0x30 || jsonBytes[foreignAt] !== 0x30) {
+    throw new Error("Resource activation JSON slots are not zero-filled.");
+  }
+  if (JSON_AT + jsonBytes.byteLength >= WASM_OUT || HEAP >= 65536) {
+    throw new Error("Resource activation guest does not fit in one memory page.");
+  }
+  const read = (path: number, pathLen: number, out: number, cap: number, written: number): number[] => [
+    ...op.i32Const(path),
+    ...op.i32Const(pathLen),
+    ...op.i32Const(out),
+    ...op.i32Const(cap),
+    ...op.i32Const(written),
+    ...op.call(0),
+  ];
+  const failUnlessZero = [
+    ...op.i32Eqz,
+    ...op.if,
+    0x05,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+  ];
+  const hexLoop = (source: number, countFromLocal: boolean, count: number, dest: number): number[] => [
+    ...op.i32Const(0),
+    ...op.localSet(6),
+    ...op.block,
+    ...op.loop,
+    ...op.localGet(6),
+    ...(countFromLocal ? op.localGet(4) : op.i32Const(count)),
+    ...op.i32GeU,
+    ...op.brIf(1),
+    ...op.localGet(6),
+    ...op.i32Const(source),
+    ...op.i32Add,
+    ...op.i32Load8U,
+    ...op.localGet(6),
+    ...op.i32Const(2),
+    ...op.i32Mul,
+    ...op.i32Const(dest),
+    ...op.i32Add,
+    ...op.call(6),
+    ...op.localGet(6),
+    ...op.i32Const(1),
+    ...op.i32Add,
+    ...op.localSet(6),
+    ...op.br(0),
+    ...op.end,
+    ...op.end,
+  ];
+  const hook = [
+    ...op.localGet(0),
+    ...op.i32Const(2),
+    ...op.i32Eq,
+    ...op.if,
+    ...read(NOTE_PATH, notePath.byteLength, NOTE_OUT, NOTE_CAP, NOTE_WRITTEN),
+    ...op.i32Eqz,
+    ...op.if,
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Eqz,
+    ...op.if,
+    ...read(NOTE_PATH, notePath.byteLength, NOTE_OUT, NOTE_CAP, NOTE_WRITTEN),
+    ...failUnlessZero,
+    ...op.i32Const(NOTE_WRITTEN),
+    ...op.i32Load,
+    ...op.localTee(4),
+    ...op.i32Const(NOTE_CAP),
+    ...op.i32GtU,
+    ...op.if,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...read(WASM_PATH, wasmPath.byteLength, WASM_OUT, WASM_CAP, WASM_WRITTEN),
+    ...failUnlessZero,
+    ...op.i32Const(WASM_WRITTEN),
+    ...op.i32Load,
+    ...op.localTee(5),
+    ...op.i32Const(16),
+    ...op.i32LtU,
+    ...op.if,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(5),
+    ...op.i32Const(999999),
+    ...op.i32GtU,
+    ...op.if,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...read(FOREIGN_PATH, foreignPath.byteLength, FOREIGN_OUT, 16, FOREIGN_WRITTEN),
+    ...op.localSet(7),
+    ...op.localGet(4),
+    ...op.i32Const(JSON_AT + noteLenAt),
+    ...op.i32Const(2),
+    ...op.call(7),
+    ...hexLoop(NOTE_OUT, true, 0, JSON_AT + noteHexAt),
+    ...op.localGet(5),
+    ...op.i32Const(JSON_AT + wasmLenAt),
+    ...op.i32Const(6),
+    ...op.call(7),
+    ...hexLoop(WASM_OUT, false, 16, JSON_AT + prefixAt),
+    ...op.localGet(7),
+    ...op.i32Const(9),
+    ...op.i32GtU,
+    ...op.if,
+    ...op.i32Const(1),
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(7),
+    ...op.i32Const(JSON_AT + foreignAt),
+    ...op.i32Const(1),
+    ...op.call(7),
+    ...op.i32Const(JSON_AT),
+    ...op.globalSet(1),
+    ...op.i32Const(jsonBytes.byteLength),
+    ...op.globalSet(2),
+    ...op.i32Const(0),
+    ...op.ret,
+    ...op.end,
+    ...op.i32Const(0),
+  ];
+  const nibble = [
+    ...op.localGet(0),
+    ...op.i32Const(10),
+    ...op.i32LtU,
+    ...op.if,
+    ...op.localGet(0),
+    ...op.i32Const(48),
+    ...op.i32Add,
+    ...op.ret,
+    ...op.end,
+    ...op.localGet(0),
+    ...op.i32Const(87),
+    ...op.i32Add,
+  ];
+  const storeHex = [
+    ...op.localGet(1),
+    ...op.localGet(0),
+    ...op.i32Const(4),
+    ...op.i32ShrU,
+    ...op.i32Const(15),
+    ...op.i32And,
+    ...op.call(5),
+    ...op.i32Store8,
+    ...op.localGet(1),
+    ...op.i32Const(1),
+    ...op.i32Add,
+    ...op.localGet(0),
+    ...op.i32Const(15),
+    ...op.i32And,
+    ...op.call(5),
+    ...op.i32Store8,
+  ];
+  const storeDigits = [
+    ...op.localGet(2),
+    ...op.localSet(3),
+    ...op.block,
+    ...op.loop,
+    ...op.localGet(3),
+    ...op.i32Eqz,
+    ...op.brIf(1),
+    ...op.localGet(3),
+    ...op.i32Const(1),
+    ...op.i32Sub,
+    ...op.localTee(3),
+    ...op.localGet(1),
+    ...op.i32Add,
+    ...op.localGet(0),
+    ...op.i32Const(10),
+    ...op.i32RemU,
+    ...op.i32Const(48),
+    ...op.i32Add,
+    ...op.i32Store8,
+    ...op.localGet(0),
+    ...op.i32Const(10),
+    ...op.i32DivU,
+    ...op.localSet(0),
+    ...op.br(0),
+    ...op.end,
+    ...op.end,
+  ];
+  return compileWasm({
+    types: [
+      ...STANDARD_TYPES,
+      { params: 5, results: 1 },
+      { params: 2, results: 0 },
+      { params: 3, results: 0 },
+    ],
+    imports: [{ module: "cgp.abi", name: "resource_read", type: 3 }],
+    funcs: [
+      allocFunc(),
+      outPtrFunc(),
+      outLenFunc(),
+      { type: 0, locals: 5, body: hook },
+      { type: 1, body: nibble },
+      { type: 4, body: storeHex },
+      { type: 5, locals: 1, body: storeDigits },
+    ],
+    memory: { min: 1, max: 1 },
+    globals: [{ init: HEAP }, { init: 0 }, { init: 0 }],
+    exports: standardExports(1),
+    data: [
+      { offset: NOTE_PATH, bytes: notePath },
+      { offset: WASM_PATH, bytes: wasmPath },
+      { offset: FOREIGN_PATH, bytes: foreignPath },
+      { offset: JSON_AT, bytes: jsonBytes },
+    ],
+  });
+}
