@@ -14,9 +14,9 @@ npm ci
 npm test
 ```
 
-`npm test` builds both guests, runs the same conformance vectors on Wasmtime, Node (jco transpile), Chromium, and Firefox, then runs the separate async probe. Set `CGP_REQUIRE_FIREFOX=1` when Firefox must pass. This sandbox cannot launch Firefox; Chromium can.
+`npm test` builds both guests, runs the same synchronous conformance vectors on Wasmtime, Node (jco transpile), Chromium, and Firefox, then runs `async-probe.mjs`. That probe is not the slot suite. It requires Wasmtime to print `ok("pong")`, requires jco transpilation to succeed, requires Node 22 to fail with `WebAssembly.promising is not a function`, and requires Chromium to resolve `tick` to `pong`. A different Node 22 error fails the probe. Set `CGP_REQUIRE_FIREFOX=1` when Firefox must pass the synchronous suite. The authoring sandbox cannot launch Firefox. Chromium can. GitHub Actions installs the missing libraries and requires Firefox there. Browsers execute the jco output, not the component binary.
 
-`npm run measure` writes `measurements.json`. It imports the production ABI read-only.
+`npm run measure` rewrites `measurements.json` for the machine it runs on. The committed file is the authoring-sandbox run. Do not paste another machine's timings into it.
 
 ## Layout
 

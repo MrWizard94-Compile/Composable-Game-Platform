@@ -58,7 +58,7 @@
       "name": "playwright",
       "version": "1.64.0",
       "license": "Apache-2.0",
-      "role": "Chromium launch in this sandbox succeeded. Firefox 157 downloaded but did not launch here: libgtk-3, libgdk-3, libXcursor, libcairo-gobject, libpangocairo, and libgdk_pixbuf are missing and apt cannot install them. WebKit also failed, on libgtk-4 and libgstreamer. CI installs browser libraries and requires Firefox."
+      "role": "Chromium 156.0.8078.4 launched in the authoring sandbox, including the separate async probe. Firefox 157 is the browser this Playwright version installs. It did not launch in the authoring sandbox: libgtk-3, libgdk-3, libXcursor, libcairo-gobject, libpangocairo, and libgdk_pixbuf were missing and apt could not install them. WebKit also failed to launch there, on libgtk-4 and libgstreamer, and is not a tested runtime. CI installs browser libraries and requires Firefox for the synchronous jco suite. Neither browser executes the component binary."
     }
   ],
   "notSelected": [

@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>async probe</title>
+<body>
+<script type="module">
+  const report = {
+    execution: "jco-transpile-core-wasm-plus-js",
+    nativeComponent: false,
+  };
+  try {
+    const base = new URL("../dist/transpile/async/async-ping.js", import.meta.url);
+    const { instantiate } = await import(base.href);
+    const instance = await instantiate(async (path) => {
+      const response = await fetch(new URL(path, base));
+      if (!response.ok) throw new Error(`missing ${path}: ${response.status}`);
+      return WebAssembly.compile(await response.arrayBuffer());
+    }, {});
+    const value = await instance.ping.tick();
+    await instance._util.whenIdle();
+    instance._util.stop();
+    report.ok = true;
+    report.value = value;
+  } catch (error) {
+    report.ok = false;
+    report.error = String(error && error.message ? error.message : error);
+  }
+  window.__CGP_ASYNC = report;
+  document.body.textContent = JSON.stringify(report);
+</script>
+</body>

@@ -24,7 +24,9 @@ Three different things happened in this prototype:
 | Node 22.23.3 | `@bytecodealliance/jco` 1.42.0 transpilation: JavaScript plus core Wasm. Not the component binary |
 | Chromium via Playwright 1.64.0 | The same transpiled JavaScript and core Wasm. Not the component binary |
 
-Firefox 157 was downloaded. It did not start. The process lacks `libgtk-3.so.0`, `libgdk-3.so.0`, `libXcursor.so.1`, `libpangocairo-1.0.so.0`, `libcairo-gobject.so.2`, and `libgdk_pixbuf-2.0.so.0`, and this sandbox cannot install them. WebKit failed on `libgtk-4` and `libgstreamer`. The GitHub Actions job installs those libraries and treats Firefox as required. Until that job is green, Firefox is an unsupported platform for this run, not a passed browser.
+Firefox 157 is the browser Playwright 1.64.0 installs. In the authoring sandbox it did not start. That process lacks `libgtk-3.so.0`, `libgdk-3.so.0`, `libXcursor.so.1`, `libpangocairo-1.0.so.0`, `libcairo-gobject.so.2`, and `libgdk_pixbuf-2.0.so.0`, and this sandbox cannot install them. WebKit also failed to launch there, on `libgtk-4` and `libgstreamer`. WebKit is not a tested runtime. No WebKit result is claimed.
+
+GitHub Actions run [44721221639](https://github.com/MrWizard94-Compile/Composable-Game-Platform/actions/runs/44721221639) is a different machine. It installed Playwright's browser libraries and ran the same synchronous conformance page. The log records `"runtime": "firefox"` with `"pass": true`, alongside passing Wasmtime, Node jco, and Chromium reports. That Firefox executed the jco-transpiled JavaScript and core Wasm. It did not execute the component binary. The job's measure step also launched Firefox. Those CI timings are not in `measurements.json`.
 
 ## 3. Pinned toolchain
 
@@ -39,7 +41,7 @@ Selected because this combination built one sync world and ran it on all three p
 | `@bytecodealliance/componentize-js` | 0.23.0 | 2026-09-21 | Apache-2.0 | StarlingMonkey JS guest. Exact pin matches the backend jco 1.42 invokes. `--disable all` so the sync guest imports nothing |
 | rustc / cargo | 1.99.0 | 2026-09-28 / 2026-08-27 | Rust project licenses | Host and `wasm32-unknown-unknown` guests. wit-bindgen 0.63 accepts this compiler |
 | Node | 22.23.3 | — | Node.js | CGP's floor. Not a newer Node just because jco is tested on one |
-| Playwright | 1.64.0 | — | Apache-2.0 | Chromium here. Firefox in CI |
+| Playwright | 1.64.0 | — | Apache-2.0 | Chromium 156.0.8078.4 here, including the async probe. Firefox 157 did not launch here. The same Playwright package's Firefox passed the sync suite on CI run 44721221639 |
 
 The QuickJS componentize backend was rejected. It is async by default. `--backend-qjs-disable-async` would have been a second JS artifact, not the bytes Wasmtime and the browser share. StarlingMonkey with WASI features disabled produced one component with an empty import set, and that same file was transpiled.
 
@@ -101,7 +103,7 @@ The JavaScript component is about 11.5 MiB because the engine is inside the arti
 3. Chromium, the same transpiled files, served to a page.
 4. Firefox, when the browser can launch.
 
-On this machine the first three passed, including resource, registry, lane, and hostile cases. Firefox did not launch. Case count is the same list on every path that ran. There were no skipped cases inside a path that started.
+On the authoring machine, Wasmtime, Node, and Chromium passed, including resource, registry, lane, and hostile cases. Firefox did not launch there, so that machine recorded no Firefox cases. CI run 44721221639 ran this same vector list in Firefox, after jco transpilation, and passed. There were no skipped cases inside a path that started. Firefox's pass is not a native component run.
 
 What the host, not WIT, decided:
 
@@ -139,33 +141,36 @@ That lane is ordinary host state. It is not WASI 0.3, and it is not a guest expo
 
 `wit/async-probe.wit` is package `cgp:async-probe@0.1.0` with `tick: async func() -> result<string, string>`. The guest returns `"pong"` and does not suspend.
 
-| Runtime | Result |
-|---|---|
-| wit-bindgen 0.63 | Generated an `async fn` and an `[async-lift]` export |
-| wasm-tools 1.263 | `component wit` shows `tick: async func` |
-| Wasmtime 50.0.3 `wasmtime run --invoke 'tick()'` | `ok("pong")` |
-| jco transpile | Succeeded. The glue calls `WebAssembly.promising` |
-| Node 22.23.3 | `TypeError: WebAssembly.promising is not a function` |
-| Chromium (Playwright 1.64, no extra flag) | `tick` resolved to `pong` |
+`async-probe.mjs` is not the slot suite. It builds `guests/async-ping`, wraps it with `wasm-tools component new`, and checks four outcomes. The committed record is `async-result.json`.
 
-So a Component Model async export can run on Wasmtime 50 today, and this Chromium can run the jco glue, and the Node CGP supports cannot. JS Promise Integration is the missing piece on Node 22. jco's QuickJS note about `--backend-qjs-disable-async` is the same constraint from the other direction: a sync component still needs a host that is not forced through the async ABI. Node 22 is that host.
+| Check | Required result | This run |
+|---|---|---|
+| Wasmtime 50.0.3 `wasmtime run --invoke 'tick()'` | stdout exactly `ok("pong")` | `ok("pong")`, native component |
+| jco 1.42.0 transpile | exit 0 | exit 0. The glue calls `WebAssembly.promising` |
+| Node 22.23.3 | classification `unsupported-jspi`, error `WebAssembly.promising is not a function` | that error. A different error fails the probe. A successful `tick` on Node 22 also fails it, so a changed boundary cannot hide in a green test |
+| Chromium via `async/page.html` | `tick` resolves to `pong`, no page errors | Playwright 1.64.0, Chromium 156.0.8078.4, no extra launch flags, value `pong` |
+
+The Chromium page imports the transpiled `async-ping.js` and calls `ping.tick()`. That is core Wasm plus JavaScript. It is not Wasmtime, and it is not the synchronous meter page. A newer Node that returns `pong` is classified `executed`, which is a different result from Node 22's `unsupported-jspi`. A newer Node that still lacks `WebAssembly.promising` stays `unsupported-jspi`, identified by its version. Node 22 async support is not a production requirement.
+
+So a Component Model async export runs on Wasmtime 50, the same transpiled glue runs on this Chromium, and the Node CGP supports cannot run that glue. JS Promise Integration is the missing piece on Node 22. jco's QuickJS note about `--backend-qjs-disable-async` is the same constraint from the other direction: a sync component still needs a host that is not forced through the async ABI. Node 22 is that host. The synchronous conformance suite does not imply this async result. Only `async-probe.mjs` does.
 
 This probe does not show cancellation. There is no suspend point inside `tick`, so there is nothing to cancel. Component Model cancellation is cooperative. It is not a rollback of guest state, and a host that resumes a task does not have to resume it in call order. That is why the meter stays synchronous and the lane above is the only mutation path. Making WASI 0.3 `async func` the simulation interface would let completion order depend on the runtime. This prototype does not do that.
 
 ## 8. Measurements
 
-Taken 2026-11-20 on Linux x86_64, Node 22.23.3. One thousand calls each. Wasmtime times are `std::time::Instant` inside the host process, so they do not include stdin. Node and Chromium times are `performance.now` around the call loop. RSS for Wasmtime is `VmRSS` of that process. Node RSS is the whole measure process and is not a clean per-guest number. Full JSON: [measurements.json](../../../prototypes/wit-013/measurements.json).
+Taken 2026-11-20 on the authoring sandbox, Linux x86_64, Node 22.23.3. One thousand calls each. Wasmtime times are `std::time::Instant` inside the host process, so they do not include stdin. Node and Chromium times are `performance.now` around the call loop. RSS for Wasmtime is `VmRSS` of that process. Node RSS is the whole measure process and is not a clean per-guest number. The Firefox row in that file is the local launch failure, not a CI timing. CI run 44721221639 ran `npm run measure` on a GitHub-hosted runner, and that Firefox launch succeeded, but those numbers were not copied here and are not compared with this table. Full JSON: [measurements.json](../../../prototypes/wit-013/measurements.json).
 
-Build, warm crates, this machine:
+Build times recorded in `measurements.json` for this machine, with crates already downloaded:
 
 | Step | Time |
 |---|---:|
-| Forced rebuild of both Rust guests, dependencies already compiled | 488 ms |
+| `cargo` guests (warm dependencies) | 871 ms |
+| `cargo` wasmtime host (already built) | 98 ms |
 | `wasm-tools component new` for the Rust guest | 6 ms |
 | componentize the JavaScript guest | 4,167 ms |
 | jco transpile Rust / JavaScript / hostile | 667 ms / 1,260 ms / 552 ms |
 
-The first Wasmtime 50 crate compile was minutes, not milliseconds. Later host links were about one second once the crate was built. That compile is a maintainer cost, not a per-module cost.
+The first Wasmtime 50 crate compile was minutes, not these warm times. That compile is a maintainer cost, not a per-module cost. A separate stopwatch of 488 ms for a forced guest rebuild was not written into `measurements.json` and is not used here.
 
 Call and instantiate:
 
@@ -188,7 +193,7 @@ Resource drop was not timed separately. `live` returning to the previous count i
 
 ### Full WIT guest ABI
 
-The prototype can call the same service, registry, and resource contract from Rust and JavaScript on Wasmtime and, after transpilation, on Node 22 and Chromium. That is not enough to make WIT the production boundary.
+The prototype can call the same service, registry, and resource contract from Rust and JavaScript on Wasmtime and, after transpilation, on Node 22 and Chromium. CI run 44721221639 also passed that transpiled suite in Firefox. That is not enough to make WIT the production boundary.
 
 Blocked by:
 
@@ -223,8 +228,8 @@ WIT is usable as a typed description of a slot's functions, records, and resourc
 
 Failure points that remain even though the sync tests passed:
 
-- Firefox did not run here.
-- Node 22 cannot run the transpiled async export.
+- The authoring sandbox cannot launch Firefox. CI run 44721221639 passed the jco-transpiled Firefox conformance. Firefox still does not run the component binary.
+- Node 22.23.3 cannot run the transpiled async export. The probe asserts the error `WebAssembly.promising is not a function`. Chromium 156.0.8078.4 can run that same glue. Node 22 async support is not required for production.
 - The async guest never suspended, so cancellation was not observed inside a component.
 - No Windows or macOS run.
 - Component linking was not asked to reproduce slot semantics, and should not be assumed to.
@@ -232,8 +237,8 @@ Failure points that remain even though the sync tests passed:
 
 ## 11. Unresolved
 
-- Whether GitHub-hosted Firefox, after `playwright install --with-deps`, passes the same page. The workflow `wit-prototype` exists to answer that. This document does not claim it already did.
-- Whether a future Node that implements JSPI should change CGP's floor. Today the floor is 22, and 22 fails the async glue.
+- Whether a future Node that implements JSPI should change CGP's floor. The probe records that as `executed`, with the Node version, instead of Node 22's `unsupported-jspi`. Today the floor is 22, and 22 fails the async glue with the asserted error.
+- WebKit. A local launch failed for missing libraries. It was not run on CI, and no WebKit result is claimed.
 - How large a real WASI 0.3 world is once it imports clocks, streams, and cancellation. This study refused that as the default interface.
 - How an authoring adapter would lower this WIT world onto `cg_hook` without a new package schema.
 - Whether StarlingMonkey can componentize a non-trivial guest without the 11.5 MiB engine, or whether JS modules should simply stay ESM and never become components.

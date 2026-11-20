@@ -1,18 +1,39 @@
 {
   "wit": "package cgp:async-probe@0.1.0; interface ping { tick: async func() -> result<string, string>; }",
-  "note": "Separate from the slot contract. The guest returns immediately, so this does not observe cancellation or shutdown-while-pending. Those races are in the host lane tests. Cancellation in the Component Model is cooperative and is not a rollback.",
+  "note": "Separate from the slot contract and from the synchronous conformance suite. The guest returns immediately, so this does not observe cancellation or shutdown-while-pending. Those races are in the host lane tests. Cancellation in the Component Model is cooperative and is not a rollback. Node 22 missing JSPI is an expected experimental result, not a production requirement.",
   "wasmtime": {
+    "execution": "native-component",
+    "nativeComponent": true,
     "status": 0,
     "stdout": "ok(\"pong\")",
-    "stderr": ""
+    "stderr": "",
+    "ok": true,
+    "expected": "ok(\"pong\")"
   },
   "jcoTranspile": {
     "status": 0,
-    "stderr": ""
+    "stderr": "",
+    "ok": true
   },
   "node": {
     "version": "v22.23.3",
+    "major": 22,
+    "execution": "jco-transpile-core-wasm-plus-js",
+    "nativeComponent": false,
     "ok": false,
-    "error": "WebAssembly.promising is not a function"
+    "error": "WebAssembly.promising is not a function",
+    "expected": true,
+    "classification": "unsupported-jspi",
+    "note": "Expected Node 22 limitation. JSPI is not a production requirement and is not the slot ABI."
+  },
+  "chromium": {
+    "execution": "jco-transpile-core-wasm-plus-js",
+    "nativeComponent": false,
+    "playwright": "1.64.0",
+    "browserVersion": "156.0.8078.4",
+    "launchArgs": [],
+    "ok": true,
+    "value": "pong",
+    "pageErrors": []
   }
 }

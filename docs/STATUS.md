@@ -42,7 +42,7 @@ Milestone 1 through an isolated WebAssembly guest. Working, not a game.
 - Multiplayer networking or replication.
 - Hot module reloading.
 - Runtimes for Python, C, Java, C++, C#, R, SQL, Visual Basic, and Go. A WebAssembly guest is not one of those languages.
-- A Component Model or WIT guest ABI. Study 013 (`prototypes/wit-013`) ran one sync contract on Wasmtime and, after jco transpilation, on Node 22 and Chromium. Firefox did not launch in the authoring sandbox. The study does not replace `cgp.abi/1`. WIT package versions are not module ids, and a WIT handle is not a composition capability.
+- A Component Model or WIT guest ABI. Study 013 (`prototypes/wit-013`) ran one sync contract on Wasmtime and, after jco transpilation, on Node 22, Chromium, and, in GitHub Actions run 44721221639, Firefox. Firefox did not launch in the authoring sandbox. Firefox does not execute the component binary. The study does not replace `cgp.abi/1`. WIT package versions are not module ids, and a WIT handle is not a composition capability.
 - Enforced permissions for in-process JavaScript. A declared permission is still not a boundary there. The WASM backend does enforce its import allow-list. A cross composition does not make the JavaScript half limited.
 - Save migrations beyond a major-version refusal. No disk format beyond the JSON document.
 - Automatic stale-reader reclamation, path-backed JavaScript package loading, archive acquisition/import, remote registries, publisher signatures, and provenance verification. A token-owned deletion claim is released by its holder or by an explicit one-digest cancellation. Unrelated stale writer locks are not removed automatically. Stale composition leases are not reclaimed automatically.
