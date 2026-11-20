@@ -1142,6 +1142,69 @@ describe("type section compatibility", () => {
     assert.equal(spawned, false);
     host.dispose();
   });
+
+  it("reads a multi-byte u32 supertype index and refuses a struct or array resource type", async () => {
+    const five = [I32, I32, I32, I32, I32];
+    const func = [0x60, 0x05, ...five, 0x01, I32];
+    const indexed = Uint8Array.from([0x02, 0x50, 0x01, 0x80, 0x01, 0x5f, 0x00, ...func]);
+    assert.equal(resourceFunctionType(indexed, 0, indexed.length, 0), undefined);
+    assert.deepEqual(resourceFunctionType(indexed, 0, indexed.length, 1), { params: five, results: [I32] });
+
+    const overlong = Uint8Array.from([0x01, 0x50, 0x81, 0x00, 0x80, 0x81, 0x80, 0x80, 0x00, ...func]);
+    assert.deepEqual(resourceFunctionType(overlong, 0, overlong.length, 0), { params: five, results: [I32] });
+
+    for (const fifth of [0x10, 0x70, 0x80]) {
+      const overflow = Uint8Array.from([0x01, 0x50, 0x01, 0x80, 0x80, 0x80, 0x80, fifth, ...func]);
+      assert.throws(
+        () => resourceFunctionType(overflow, 0, overflow.length, 0),
+        /Malformed WebAssembly type section/,
+        fifth.toString(16),
+      );
+    }
+    assert.throws(
+      () => resourceFunctionType(Uint8Array.from([0x01, 0x50, 0x01, 0x80]), 0, 4, 0),
+      /Malformed WebAssembly type section/,
+    );
+    assert.throws(
+      () => resourceFunctionType(Uint8Array.from([0x80, 0x80, 0x80, 0x80, 0x10, ...func]), 0, 5 + func.length, 0),
+      /Malformed WebAssembly type section/,
+    );
+
+    const good = resourceSignatureGuest({ params: five, results: [I32] });
+    const guest = withTypePayload(good, replaceOnce(typePayload(good).payload, func, [0x50, 0x01, 0x80, 0x01, ...func]));
+    const resource = inspectWasm(guest).imports.find((item) => item.name === "resource_read");
+    assert.deepEqual(resource?.params, five);
+    assert.deepEqual(resource?.results, [I32]);
+    const available = workerLoad(guest, true);
+    assert.match(available?.text ?? "", /^Package resources are not available\.$/);
+
+    const empty = resourceSignatureGuest({ params: [], results: [] });
+    for (const shape of [
+      { name: "struct", bytes: [0x5f, 0x00] },
+      { name: "array", bytes: [0x5e, I32, 0x00] },
+    ]) {
+      const wasm = withTypePayload(empty, replaceOnce(typePayload(empty).payload, [0x60, 0x00, 0x00], shape.bytes));
+      assert.equal(inspectWasm(wasm).imports.find((item) => item.name === "resource_read")?.params, undefined);
+      const reply = workerLoad(wasm, true);
+      assert.match(reply?.text ?? "", /wrong signature/, shape.name);
+      assert.doesNotMatch(reply?.text ?? "", /WebAssembly\.Module|loaded/, shape.name);
+      let spawned = false;
+      const host = createBrowserWasmBackend({
+        spawn() {
+          spawned = true;
+          throw new Error("spawned");
+        },
+      });
+      const refused = await compose([pkg(`org.example.${shape.name}-resource`, wasm, ["cgp.resource.read"])], {
+        backend: host,
+        policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }),
+      });
+      assert.equal(refused.runtimeActive, false, shape.name);
+      assert.match(refused.diagnostics.map((item) => item.message).join("\n"), /wrong signature/, shape.name);
+      assert.equal(spawned, false, shape.name);
+      host.dispose();
+    }
+  });
 });
 
 describe("special resource keys", () => {

@@ -362,15 +362,25 @@ function typeError(message) {
 }
 
 /**
+ * Unsigned LEB128 u32 of at most five bytes. The fifth byte cannot continue or set unused high bits.
  * @param {Uint8Array} bytes
  * @param {{ i: number }} at
  * @param {number} end
  */
-function readBoundedUleb(bytes, at, end) {
-  if (at.i >= end) typeError(MALFORMED_TYPE);
-  const value = readUleb(bytes, at);
-  if (at.i > end) typeError(MALFORMED_TYPE);
-  return value;
+function readU32(bytes, at, end) {
+  let result = 0;
+  let factor = 1;
+  for (let n = 0; n < 5; n += 1) {
+    if (at.i >= end) typeError(MALFORMED_TYPE);
+    const byte = bytes[at.i];
+    if (byte === undefined) typeError("Truncated WebAssembly binary.");
+    at.i += 1;
+    if (n === 4 && ((byte & 0x80) !== 0 || byte > 0x0f)) typeError(MALFORMED_TYPE);
+    result += (byte & 0x7f) * factor;
+    if ((byte & 0x80) === 0) return result;
+    factor *= 128;
+  }
+  typeError(MALFORMED_TYPE);
 }
 
 /**
@@ -380,13 +390,13 @@ function readBoundedUleb(bytes, at, end) {
  * @param {number} end
  */
 function readCount(bytes, at, end) {
-  const count = readBoundedUleb(bytes, at, end);
+  const count = readU32(bytes, at, end);
   if (count > end - at.i) typeError(MALFORMED_TYPE);
   return count;
 }
 
 /**
- * Signed LEB128 of at most five bytes. The value is not needed; this only skips a heap type or a supertype index.
+ * Signed LEB128 of at most five bytes. The value is not needed; this only skips a heap type.
  * @param {Uint8Array} bytes
  * @param {{ i: number }} at
  * @param {number} end
@@ -498,7 +508,7 @@ function readSubtype(bytes, at, end) {
   if (form === 0x4f || form === 0x50) {
     at.i += 1;
     const supers = readCount(bytes, at, end);
-    for (let n = 0; n < supers; n += 1) readS33(bytes, at, end);
+    for (let n = 0; n < supers; n += 1) readU32(bytes, at, end);
     return readComptype(bytes, at, end);
   }
   return readComptype(bytes, at, end);
