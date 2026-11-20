@@ -396,20 +396,53 @@ function readCount(bytes, at, end) {
 }
 
 /**
- * Signed LEB128 of at most five bytes. The value is not needed; this only skips a heap type.
+ * Signed LEB128 s33. At most five bytes. Unused high bits must sign-extend, including on the fifth byte.
+ * Padded encodings that still fit in thirty-three bits are accepted.
  * @param {Uint8Array} bytes
  * @param {{ i: number }} at
  * @param {number} end
+ * @returns {number}
  */
 function readS33(bytes, at, end) {
+  let value = 0;
+  let scale = 1;
   for (let n = 0; n < 5; n += 1) {
     if (at.i >= end) typeError(MALFORMED_TYPE);
     const byte = bytes[at.i];
     if (byte === undefined) typeError("Truncated WebAssembly binary.");
     at.i += 1;
-    if ((byte & 0x80) === 0) return;
+    const width = 33 - 7 * n;
+    if ((byte & 0x80) === 0) {
+      const limit = 2 ** (width - 1);
+      if (byte < 0x40) {
+        if (byte >= limit) typeError(MALFORMED_TYPE);
+        return value + byte * scale;
+      }
+      if (byte < 0x80 - limit) typeError(MALFORMED_TYPE);
+      return value + (byte - 0x80) * scale;
+    }
+    if (width <= 7) typeError(MALFORMED_TYPE);
+    value += (byte - 0x80) * scale;
+    scale *= 128;
   }
   typeError(MALFORMED_TYPE);
+}
+
+/**
+ * A heap type is a one-byte abstract code, or an s33 type index that is not negative.
+ * @param {Uint8Array} bytes
+ * @param {{ i: number }} at
+ * @param {number} end
+ */
+function readHeaptype(bytes, at, end) {
+  if (at.i >= end) typeError(MALFORMED_TYPE);
+  const byte = bytes[at.i];
+  if (byte === undefined) typeError("Truncated WebAssembly binary.");
+  if (byte >= 0x69 && byte <= 0x74) {
+    at.i += 1;
+    return;
+  }
+  if (readS33(bytes, at, end) < 0) typeError(MALFORMED_TYPE);
 }
 
 /**
@@ -425,7 +458,7 @@ function readValtype(bytes, at, end) {
   if (byte >= 0x7b && byte <= 0x7f) return byte;
   if (byte >= 0x69 && byte <= 0x74) return byte;
   if (byte === 0x63 || byte === 0x64) {
-    readS33(bytes, at, end);
+    readHeaptype(bytes, at, end);
     return byte;
   }
   typeError(UNSUPPORTED_TYPE);

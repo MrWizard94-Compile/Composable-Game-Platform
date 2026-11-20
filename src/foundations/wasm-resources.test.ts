@@ -1205,6 +1205,94 @@ describe("type section compatibility", () => {
       host.dispose();
     }
   });
+
+  it("accepts abstract and nonnegative heap types and rejects a malformed s33", async () => {
+    const five = [I32, I32, I32, I32, I32];
+    const func = [0x60, 0x05, ...five, 0x01, I32];
+    const withHeap = (heap: number[]) => Uint8Array.from([0x02, 0x60, 0x01, ...heap, 0x00, ...func]);
+    const accept = (heap: number[], label: string) => {
+      const bytes = withHeap(heap);
+      assert.deepEqual(resourceFunctionType(bytes, 0, bytes.length, 1), { params: five, results: [I32] }, label);
+    };
+    const reject = (heap: number[], label: string) => {
+      const bytes = withHeap(heap);
+      assert.throws(() => resourceFunctionType(bytes, 0, bytes.length, 0), /Malformed WebAssembly type section/, label);
+    };
+
+    for (const form of [0x63, 0x64]) {
+      for (let code = 0x69; code <= 0x74; code += 1) accept([form, code], `abstract ${form.toString(16)} ${code.toString(16)}`);
+    }
+    accept([0x64, 0x80, 0x01], "type index 128");
+    accept([0x63, 0x00], "type index 0");
+    accept([0x63, 0x80, 0x00], "padded zero");
+    accept([0x64, 0x81, 0x00], "padded one");
+    accept([0x64, 0x80, 0x80, 0x80, 0x80, 0x00], "five-byte padded zero");
+    accept([0x63, 0xff, 0xff, 0xff, 0xff, 0x0f], "maximum nonnegative s33");
+
+    reject([0x63, 0x7f], "negative one");
+    reject([0x64, 0x68], "below the abstract range");
+    reject([0x63, 0x75], "above the abstract range");
+    reject([0x64, 0x40], "negative 64");
+    reject([0x63, 0xff, 0x7f], "padded negative one");
+    reject([0x64, 0x80, 0x80, 0x80, 0x80, 0x70], "minimum s33");
+    reject([0x63, 0x80, 0x80, 0x80, 0x80, 0x10], "fifth byte 0x10");
+    reject([0x64, 0x80, 0x80, 0x80, 0x80, 0x40], "fifth byte 0x40");
+    reject([0x63, 0x80, 0x80, 0x80, 0x80, 0x6f], "fifth byte 0x6f");
+    reject([0x64, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00], "overlong s33");
+    assert.throws(
+      () => resourceFunctionType(Uint8Array.from([0x01, 0x60, 0x01, 0x63, 0x80]), 0, 5, 0),
+      /Malformed WebAssembly type section/,
+    );
+    assert.throws(
+      () => resourceFunctionType(Uint8Array.from([0x01, 0x60, 0x01, 0x64]), 0, 4, 0),
+      /Malformed WebAssembly type section/,
+    );
+
+    const good = resourceSignatureGuest({ params: five, results: [I32] });
+    const type2 = [0x60, 0x00, 0x01, I32];
+    const validGuest = withTypePayload(
+      good,
+      replaceOnce(typePayload(good).payload, type2, [0x60, 0x01, 0x63, 0x70, 0x00]),
+    );
+    assert.deepEqual(inspectWasm(validGuest).imports.find((item) => item.name === "resource_read")?.params, five);
+    assert.match(workerLoad(validGuest, true)?.text ?? "", /^Package resources are not available\.$/);
+
+    const shapes = [
+      { name: "negative-heap", bytes: [0x60, 0x01, 0x64, 0x7f, 0x00] },
+      { name: "heap-sign", bytes: [0x60, 0x01, 0x63, 0x80, 0x80, 0x80, 0x80, 0x10, 0x00] },
+    ];
+    for (const shape of shapes) {
+      const wasm = withTypePayload(good, replaceOnce(typePayload(good).payload, type2, shape.bytes));
+      assert.throws(() => inspectWasm(wasm), /Malformed WebAssembly type section/, shape.name);
+      const reply = workerLoad(wasm, true);
+      assert.match(reply?.text ?? "", /Malformed WebAssembly type section/, shape.name);
+      assert.doesNotMatch(reply?.text ?? "", /WebAssembly\.Module|loaded|Package resources are not available/, shape.name);
+      let spawned = false;
+      const host = createBrowserWasmBackend({
+        spawn() {
+          spawned = true;
+          throw new Error("spawned");
+        },
+      });
+      const refused = await compose([pkg(`org.example.${shape.name}`, wasm, ["cgp.resource.read"])], {
+        backend: host,
+        policy: wasmPolicy({ allowCapabilities: ["cgp.resource.read"], maxMemoryBytes: 65536 }),
+      });
+      assert.equal(refused.runtimeActive, false, shape.name);
+      assert.match(refused.diagnostics.map((item) => item.message).join("\n"), /Malformed WebAssembly type section/, shape.name);
+      assert.equal(spawned, false, shape.name);
+      host.dispose();
+    }
+
+    const plain = withTypePayload(
+      storeGuest("{}"),
+      replaceOnce(typePayload(storeGuest("{}")).payload, type2, [0x60, 0x01, 0x64, 0x7f, 0x00]),
+    );
+    assert.doesNotThrow(() => inspectWasm(plain));
+    assert.equal(inspectWasm(plain).imports.length, 0);
+    const runtime = workerLoad(plain);
+    assert.doesNotMatch(runtime?.text ?? "", /Malformed WebAssembly type section/);
+  });
 });
 
 describe("special resource keys", () => {
